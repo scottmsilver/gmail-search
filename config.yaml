@@ -1,0 +1,20 @@
+budget:
+  max_usd: 5.0
+embedding:
+  model: gemini-embedding-2-preview
+  dimensions: 3072
+  task_type_document: RETRIEVAL_DOCUMENT
+  task_type_query: RETRIEVAL_QUERY
+attachments:
+  max_file_size_mb: 10
+  max_pdf_pages: 20
+  max_images_per_message: 10
+  max_attachment_text_tokens: 50000
+download:
+  batch_size: 100
+  max_messages: null
+search:
+  default_top_k: 20
+server:
+  host: 127.0.0.1
+  port: 8080
