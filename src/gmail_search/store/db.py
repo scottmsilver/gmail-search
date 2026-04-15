@@ -443,12 +443,21 @@ def _extract_terms_from_messages(conn):
         msg_id_to_idx[r["id"]] = idx
         text = f"{r['subject']} {r['body_text']} {r['from_addr']}"
 
-        # All words (lowercased) for long term candidates
-        words = set(re.findall(r"[a-zA-Z]{2,}", text.lower()))
-        for w in words:
+        # Single words (lowercased)
+        word_list = re.findall(r"[a-zA-Z]{2,}", text.lower())
+        for w in set(word_list):
             if w not in term_to_msgs:
                 term_to_msgs[w] = set()
             term_to_msgs[w].add(idx)
+
+        # Bigrams and trigrams (multi-word phrases like "kol emeth", "frank rimerman")
+        for ngram_size in (2, 3):
+            for i in range(len(word_list) - ngram_size + 1):
+                ngram = " ".join(word_list[i : i + ngram_size])
+                if len(ngram) > 5:  # only useful as expansion if longer than abbreviation
+                    if ngram not in term_to_msgs:
+                        term_to_msgs[ngram] = set()
+                    term_to_msgs[ngram].add(idx)
 
         # Uppercase abbreviations (2-5 chars, all caps) as alias candidates
         raw_words = re.findall(r"\b[A-Z]{2,5}\b", text)
@@ -620,11 +629,11 @@ def _validate_aliases_with_llm(conn):
     if not rows:
         return
 
-    # Build the sample for Gemini
+    # Build the sample for Gemini with co-occurrence strength
     candidates = []
     for r in rows:
         exps = json.loads(r["expansions"])
-        candidates.append(f"{r['term']} → {', '.join(exps[:2])}")
+        candidates.append(f"{r['term']} → {', '.join(exps[:2])} (co-occurrence: {r['similarity']:.0%})")
 
     # Process in chunks of 100 (Gemini can handle this in one call)
     try:
@@ -639,9 +648,12 @@ def _validate_aliases_with_llm(conn):
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite-preview",
                 contents=(
-                    "These are candidate abbreviation→expansion pairs mined from an email corpus. "
-                    "Mark each as GOOD (real abbreviation, acronym, or meaningful alias) or "
-                    "BAD (noise, random co-occurrence, email encoding artifacts, common English words). "
+                    "These are candidate abbreviation→expansion pairs mined from a personal email corpus. "
+                    "The co-occurrence percentage shows how often they appear in the same emails. "
+                    "Mark each as GOOD if the short form is a plausible abbreviation, acronym, "
+                    "nickname, or alias for the expansion IN THE CONTEXT OF PERSONAL EMAIL. "
+                    "Mark as BAD only if it's clearly noise (HTML encoding artifacts, random words, "
+                    "email headers). When in doubt, mark GOOD — false negatives are worse than false positives. "
                     'Return ONLY a JSON object: {"abbreviation": "good" or "bad"}.\n\n' + "\n".join(chunk)
                 ),
             )
