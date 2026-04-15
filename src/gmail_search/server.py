@@ -39,11 +39,11 @@ def create_app(
         k: int = Query(20, le=100),
         sort: str = Query("relevance"),
         filter: bool = Query(True, alias="filter"),
-        topic: int = Query(None),
+        topic: str = Query(None),
     ):
         engine = get_engine()
         results = engine.search_threads(q, top_k=k, sort=sort, filter_offtopic=filter)
-        # Filter by topic if requested
+        # Filter by topic if requested (includes child topics)
         if topic is not None:
             conn_t = get_connection(db_path)
             topic_msg_ids = {
@@ -119,7 +119,7 @@ def create_app(
     async def api_topics():
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT topic_id, label, message_count, top_senders FROM topics ORDER BY message_count DESC"
+            "SELECT topic_id, parent_id, label, depth, message_count, top_senders FROM topics ORDER BY depth, message_count DESC"
         ).fetchall()
         conn.close()
         import json as _json
@@ -127,7 +127,9 @@ def create_app(
         return [
             {
                 "topic_id": r["topic_id"],
+                "parent_id": r["parent_id"],
                 "label": r["label"],
+                "depth": r["depth"],
                 "message_count": r["message_count"],
                 "top_senders": _json.loads(r["top_senders"]),
             }

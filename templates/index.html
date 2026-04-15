@@ -55,6 +55,10 @@
   .topic-item.active { background: var(--accent-bg); color: var(--accent); font-weight: 500; }
   .topic-count { font-size: 10px; color: var(--text-faint); }
   .topic-all { color: var(--text-secondary); font-weight: 400; }
+  .topic-toggle { font-size: 10px; margin-right: 4px; color: var(--text-faint); cursor: pointer; }
+  .topic-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topic-children { }
+  .topic-children.collapsed { display: none; }
 
   /* Results list */
   .results-pane { flex: 1; overflow-y: auto; }
@@ -377,13 +381,56 @@ fetch('/api/status').then(r => r.json()).then(s => {
     s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' – ' + newest;
 });
 
-// Load topics for sidebar
+// Load topics for sidebar as a tree
 fetch('/api/topics').then(r => r.json()).then(topics => {
   const list = document.getElementById('topics-list');
-  list.innerHTML = topics.map(t =>
-    `<div class="topic-item" data-tid="${t.topic_id}" onclick="setTopic(${t.topic_id})">${esc(t.label)}<span class="topic-count">${t.message_count}</span></div>`
-  ).join('');
+  // Build tree structure
+  const byId = {};
+  const roots = [];
+  topics.forEach(t => { byId[t.topic_id] = { ...t, children: [] }; });
+  topics.forEach(t => {
+    if (t.parent_id && byId[t.parent_id]) {
+      byId[t.parent_id].children.push(byId[t.topic_id]);
+    } else if (!t.parent_id || t.topic_id === 'root') {
+      // skip root in display, show its children as top-level
+    }
+  });
+  // Render tree recursively (skip root, start from its children)
+  function renderNode(node) {
+    const indent = Math.max(0, node.depth - 1) * 12;
+    const hasKids = node.children.length > 0;
+    const toggle = hasKids ? `<span class="topic-toggle" onclick="event.stopPropagation();toggleTopic(this)">&#9662;</span>` : '';
+    let html = `<div class="topic-item" data-tid="${node.topic_id}" style="padding-left:${16 + indent}px" onclick="setTopic('${node.topic_id}')">
+      ${toggle}<span class="topic-label">${esc(node.label || 'Unlabeled')}</span><span class="topic-count">${node.message_count}</span>
+    </div>`;
+    if (hasKids) {
+      html += `<div class="topic-children">`;
+      node.children.sort((a, b) => b.message_count - a.message_count);
+      node.children.forEach(c => { html += renderNode(c); });
+      html += `</div>`;
+    }
+    return html;
+  }
+  // Get root's children as top-level items
+  const root = byId['root'];
+  if (root && root.children.length > 0) {
+    root.children.sort((a, b) => b.message_count - a.message_count);
+    list.innerHTML = root.children.map(c => renderNode(c)).join('');
+  } else {
+    // Flat fallback
+    list.innerHTML = topics.filter(t => t.topic_id !== 'root').map(t =>
+      `<div class="topic-item" data-tid="${t.topic_id}" onclick="setTopic('${t.topic_id}')">${esc(t.label)}<span class="topic-count">${t.message_count}</span></div>`
+    ).join('');
+  }
 });
+
+function toggleTopic(el) {
+  const children = el.closest('.topic-item').nextElementSibling;
+  if (children && children.classList.contains('topic-children')) {
+    children.classList.toggle('collapsed');
+    el.textContent = children.classList.contains('collapsed') ? '\u25B8' : '\u25BE';
+  }
+}
 </script>
 </body>
 </html>

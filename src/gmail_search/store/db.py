@@ -66,16 +66,19 @@ CREATE TABLE IF NOT EXISTS thread_summary (
 );
 
 CREATE TABLE IF NOT EXISTS topics (
-    topic_id INTEGER PRIMARY KEY,
+    topic_id TEXT PRIMARY KEY,
+    parent_id TEXT,
     label TEXT NOT NULL DEFAULT '',
+    depth INTEGER NOT NULL DEFAULT 0,
     message_count INTEGER NOT NULL DEFAULT 0,
     top_senders TEXT NOT NULL DEFAULT '[]',
     sample_subjects TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS message_topics (
-    message_id TEXT PRIMARY KEY REFERENCES messages(id),
-    topic_id INTEGER NOT NULL REFERENCES topics(topic_id)
+    message_id TEXT NOT NULL REFERENCES messages(id),
+    topic_id TEXT NOT NULL REFERENCES topics(topic_id),
+    PRIMARY KEY (message_id, topic_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_message_topics_topic ON message_topics(topic_id);
@@ -197,31 +200,51 @@ def _load_message_embeddings(conn, limit=50000):
     }
 
 
-def _kmeans_cluster(vectors, n_clusters, n_iterations=15, seed=42):
-    """Run k-means++ on vectors. Returns cluster labels (numpy array)."""
+def _bisect(vectors, indices, n_iterations=15, seed=42):
+    """Split a set of vectors into 2 clusters. Returns (left_indices, right_indices)."""
     import numpy as np
 
+    if len(indices) < 4:
+        return indices, np.array([], dtype=int)
+
+    subset = vectors[indices]
     rng = np.random.RandomState(seed)
 
-    # K-means++ initialization: pick first centroid randomly, then pick
-    # subsequent centroids with probability proportional to distance
-    centroids = [vectors[rng.randint(len(vectors))]]
-    for _ in range(n_clusters - 1):
-        dists = np.min([np.sum((vectors - c) ** 2, axis=1) for c in centroids], axis=0)
-        probs = dists / (dists.sum() + 1e-10)
-        centroids.append(vectors[rng.choice(len(vectors), p=probs)])
-    centroids = np.array(centroids)
+    # Pick two initial centroids far apart (k-means++ for k=2)
+    c0 = subset[rng.randint(len(subset))]
+    dists = np.sum((subset - c0) ** 2, axis=1)
+    c1 = subset[np.argmax(dists)]
+    centroids = np.array([c0, c1])
 
-    # Iterate: assign each vector to nearest centroid, then update centroids
     for _ in range(n_iterations):
-        sims = vectors @ centroids.T
+        sims = subset @ centroids.T
         labels = np.argmax(sims, axis=1)
-        for k in range(n_clusters):
+        for k in range(2):
             mask = labels == k
             if mask.sum() > 0:
-                centroids[k] = vectors[mask].mean(axis=0)
+                centroids[k] = subset[mask].mean(axis=0)
 
-    return labels
+    sims = subset @ centroids.T
+    labels = np.argmax(sims, axis=1)
+    return indices[labels == 0], indices[labels == 1]
+
+
+def _cluster_coherence(vectors, indices):
+    """Measure how tight a cluster is (0=scattered, 1=identical). Uses avg cosine sim to centroid."""
+    import numpy as np
+
+    if len(indices) < 2:
+        return 1.0
+    subset = vectors[indices]
+    centroid = subset.mean(axis=0)
+    norm = np.linalg.norm(centroid)
+    if norm < 1e-10:
+        return 0.0
+    centroid = centroid / norm
+    norms = np.linalg.norm(subset, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-10)
+    sims = (subset / norms) @ centroid
+    return float(sims.mean())
 
 
 def _extract_sender_name(from_addr: str) -> str:
@@ -239,19 +262,38 @@ def _summarize_cluster(indices, subjects, senders):
     return top_senders, sample_subjects
 
 
-def _store_cluster(conn, cluster_id, msg_ids, indices, top_senders, sample_subjects):
-    """Write one cluster's topic row and message assignments to the DB."""
-    import json
+def _build_topic_tree(vectors, indices, subjects, senders, topic_id, parent_id, depth, max_depth, min_cluster_size):
+    """Recursively bisect clusters to build a topic hierarchy.
 
-    conn.execute(
-        "INSERT INTO topics (topic_id, label, message_count, top_senders, sample_subjects) VALUES (?, ?, ?, ?, ?)",
-        (cluster_id, "", len(indices), json.dumps(top_senders), json.dumps(sample_subjects)),
+    Returns a list of (topic_id, parent_id, depth, indices) tuples.
+    Each message appears in its leaf node AND all ancestor nodes.
+    """
+    nodes = [(topic_id, parent_id, depth, indices)]
+
+    # Stop splitting if: too small, too deep, or too coherent
+    if len(indices) < min_cluster_size * 2 or depth >= max_depth:
+        return nodes
+
+    coherence = _cluster_coherence(vectors, indices)
+    if coherence > 0.85:
+        return nodes
+
+    left, right = _bisect(vectors, indices, seed=42 + depth * 7)
+
+    if len(left) < min_cluster_size or len(right) < min_cluster_size:
+        return nodes  # split too uneven, keep as leaf
+
+    left_id = f"{topic_id}.0"
+    right_id = f"{topic_id}.1"
+
+    left_nodes = _build_topic_tree(
+        vectors, left, subjects, senders, left_id, topic_id, depth + 1, max_depth, min_cluster_size
     )
-    for idx in indices:
-        conn.execute(
-            "INSERT OR REPLACE INTO message_topics (message_id, topic_id) VALUES (?, ?)",
-            (msg_ids[idx], cluster_id),
-        )
+    right_nodes = _build_topic_tree(
+        vectors, right, subjects, senders, right_id, topic_id, depth + 1, max_depth, min_cluster_size
+    )
+
+    return nodes + left_nodes + right_nodes
 
 
 def _auto_label_topics(conn):
@@ -261,16 +303,16 @@ def _auto_label_topics(conn):
 
     logger = logging.getLogger(__name__)
     topic_rows = conn.execute(
-        "SELECT topic_id, top_senders, sample_subjects, message_count FROM topics ORDER BY message_count DESC"
+        "SELECT topic_id, parent_id, depth, top_senders, sample_subjects, message_count FROM topics ORDER BY depth, message_count DESC"
     ).fetchall()
 
-    # Build a summary of each cluster for the LLM
     summaries = []
     for t in topic_rows:
         sndrs = json.loads(t["top_senders"])
         subjs = json.loads(t["sample_subjects"])
+        parent_info = f" (child of {t['parent_id']})" if t["parent_id"] else ""
         summaries.append(
-            f"Cluster {t['topic_id']} ({t['message_count']} msgs): "
+            f"Node {t['topic_id']}{parent_info} (depth={t['depth']}, {t['message_count']} msgs): "
             f"Senders: {', '.join(sndrs[:3])}. "
             f"Subjects: {'; '.join(subjs[:4])}"
         )
@@ -286,9 +328,10 @@ def _auto_label_topics(conn):
         response = client.models.generate_content(
             model="gemini-3.1-flash-lite-preview",
             contents=(
-                "Label each email cluster with a short 2-4 word topic name. "
-                "Return ONLY a JSON object mapping cluster number to label. "
-                'Example: {"0": "Shopping Deals", "3": "Travel Plans"}\n\n' + "\n".join(summaries)
+                "Label each node in this email topic hierarchy with a short 2-4 word name. "
+                "Parent nodes should have broader names, children should be more specific. "
+                "Return ONLY a JSON object mapping node ID to label. "
+                'Example: {"root": "All Email", "root.0": "Work", "root.0.0": "Projects"}\n\n' + "\n".join(summaries)
             ),
         )
         text = response.text.strip()
@@ -298,10 +341,10 @@ def _auto_label_topics(conn):
                 text = text[4:]
         label_map = json.loads(text)
 
-        for tid_str, label in label_map.items():
-            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, int(tid_str)))
+        for tid, label in label_map.items():
+            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, tid))
         conn.commit()
-        logger.info(f"Auto-labeled {len(label_map)} topics")
+        logger.info(f"Auto-labeled {len(label_map)} topic nodes")
 
     except Exception as e:
         logger.warning(f"Auto-labeling failed, using top sender as label: {e}")
@@ -312,8 +355,9 @@ def _auto_label_topics(conn):
         conn.commit()
 
 
-def rebuild_topics(db_path: Path, n_clusters: int = 25) -> int:
-    """Cluster messages into topics using k-means on embeddings. Returns topic count."""
+def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50) -> int:
+    """Build hierarchical topic tree using recursive bisecting k-means. Returns node count."""
+    import json
     import logging
 
     import numpy as np
@@ -324,28 +368,49 @@ def rebuild_topics(db_path: Path, n_clusters: int = 25) -> int:
     conn.row_factory = sqlite3.Row
 
     data = _load_message_embeddings(conn)
-    if len(data["msg_ids"]) < n_clusters * 5:
-        logger.warning(f"Not enough messages ({len(data['msg_ids'])}) for {n_clusters} clusters")
+    n_msgs = len(data["msg_ids"])
+    if n_msgs < min_cluster_size * 2:
+        logger.warning(f"Not enough messages ({n_msgs}) for topic hierarchy")
         conn.close()
         return 0
 
-    logger.info(f"Clustering {len(data['msg_ids'])} messages into {n_clusters} topics")
-    labels = _kmeans_cluster(data["vectors"], n_clusters)
+    logger.info(f"Building topic hierarchy from {n_msgs} messages (max_depth={max_depth})")
+
+    all_indices = np.arange(n_msgs)
+    nodes = _build_topic_tree(
+        data["vectors"],
+        all_indices,
+        data["subjects"],
+        data["senders"],
+        topic_id="root",
+        parent_id=None,
+        depth=0,
+        max_depth=max_depth,
+        min_cluster_size=min_cluster_size,
+    )
 
     conn.execute("DELETE FROM message_topics")
     conn.execute("DELETE FROM topics")
 
-    for cluster_id in range(n_clusters):
-        indices = np.where(labels == cluster_id)[0]
-        if len(indices) == 0:
-            continue
+    for topic_id, parent_id, depth, indices in nodes:
         top_senders, sample_subjects = _summarize_cluster(indices, data["subjects"], data["senders"])
-        _store_cluster(conn, cluster_id, data["msg_ids"], indices, top_senders, sample_subjects)
+        conn.execute(
+            "INSERT INTO topics (topic_id, parent_id, label, depth, message_count, top_senders, sample_subjects) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (topic_id, parent_id, "", depth, len(indices), json.dumps(top_senders), json.dumps(sample_subjects)),
+        )
+        # Messages belong to their leaf node and all ancestors
+        for idx in indices:
+            conn.execute(
+                "INSERT OR IGNORE INTO message_topics (message_id, topic_id) VALUES (?, ?)",
+                (data["msg_ids"][idx], topic_id),
+            )
 
     conn.commit()
+    logger.info(f"Built {len(nodes)} topic nodes")
+
     _auto_label_topics(conn)
 
-    count = conn.execute("SELECT COUNT(*) FROM topics WHERE message_count > 0").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
     conn.close()
     return count
 
