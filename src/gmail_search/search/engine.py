@@ -238,6 +238,10 @@ class SearchEngine:
         self._spell = None
         self._load_spell_dictionary()
 
+        # Load term aliases for query expansion
+        self._aliases: dict[str, list[str]] = {}
+        self._load_term_aliases()
+
     def _detect_user_email(self):
         """Find the most frequent sender — that's the user."""
         try:
@@ -282,6 +286,45 @@ class SearchEngine:
             logger.info("symspellpy not installed, spell correction disabled")
         except Exception as e:
             logger.warning(f"Failed to load spell dictionary: {e}")
+
+    def _load_term_aliases(self):
+        """Load precomputed term aliases from embedding nearest neighbors."""
+        import json
+
+        try:
+            conn = get_connection(self.db_path)
+            rows = conn.execute("SELECT term, expansions FROM term_aliases").fetchall()
+            conn.close()
+            self._aliases = {r["term"]: json.loads(r["expansions"]) for r in rows}
+            if self._aliases:
+                logger.info(f"Loaded {len(self._aliases)} term aliases")
+        except Exception:
+            self._aliases = {}
+
+    def _expand_query_with_aliases(self, query: str) -> str:
+        """Expand short terms in the query using discovered aliases.
+
+        'ke board' → 'ke kol emeth board' — adds the expansions alongside
+        the original term so both the alias and original match.
+        """
+        if not self._aliases:
+            return query
+
+        words = query.split()
+        expanded = []
+        for word in words:
+            expanded.append(word)
+            aliases = self._aliases.get(word.lower())
+            if aliases:
+                # Add top 2 expansions alongside the original
+                for alias in aliases[:2]:
+                    expanded.append(alias)
+                logger.info(f"Alias expansion: '{word}' → +{aliases[:2]}")
+
+        result = " ".join(expanded)
+        if result != query:
+            logger.info(f"Expanded query: '{query}' → '{result}'")
+        return result
 
     def _user_in_participants(self, from_addrs: list[str]) -> bool:
         for addr in from_addrs:
@@ -443,8 +486,9 @@ class SearchEngine:
     ) -> list[ThreadResult]:
         """Thread-grouped search with multi-signal ranking."""
         cleaned_query = self._clean_query(query)
-        pq = parse_query(cleaned_query)
-        query_vector = self._embed_query(pq.text or cleaned_query)
+        expanded_query = self._expand_query_with_aliases(cleaned_query)
+        pq = parse_query(expanded_query)
+        query_vector = self._embed_query(pq.text or expanded_query)
 
         fetch_k = min(top_k * 10, len(self.searcher.embedding_ids))
         embedding_ids, scores = self.searcher.search(query_vector, top_k=fetch_k)
@@ -500,9 +544,9 @@ class SearchEngine:
 
         # BM25 keyword search
         conn = get_connection(self.db_path)
-        # BM25 with both corrected and original query (merge best scores)
-        bm25_scores = search_fts(conn, pq.text or cleaned_query, limit=200)
-        if cleaned_query.lower() != query.lower():
+        # BM25 with expanded query (includes alias terms) + original query
+        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=200)
+        if expanded_query.lower() != query.lower():
             original_pq = parse_query(query)
             original_bm25 = search_fts(conn, original_pq.text or query, limit=200)
             for mid, score in original_bm25.items():

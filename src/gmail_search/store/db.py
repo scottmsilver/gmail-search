@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS query_cache (
     PRIMARY KEY (query_text, model)
 );
 
+CREATE TABLE IF NOT EXISTS term_aliases (
+    term TEXT PRIMARY KEY,
+    expansions TEXT NOT NULL DEFAULT '[]',
+    similarity REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);
@@ -421,6 +427,177 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
     count = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
     conn.close()
     return count
+
+
+def _extract_terms_from_messages(conn):
+    """Build a reverse index: lowercase term → set of message indices."""
+    import re
+
+    rows = conn.execute("SELECT id, subject, body_text, from_addr FROM messages").fetchall()
+
+    term_to_msgs: dict[str, set[int]] = {}
+    abbrev_to_msgs: dict[str, set[int]] = {}
+    msg_id_to_idx: dict[str, int] = {}
+
+    for idx, r in enumerate(rows):
+        msg_id_to_idx[r["id"]] = idx
+        text = f"{r['subject']} {r['body_text']} {r['from_addr']}"
+
+        # All words (lowercased) for long term candidates
+        words = set(re.findall(r"[a-zA-Z]{2,}", text.lower()))
+        for w in words:
+            if w not in term_to_msgs:
+                term_to_msgs[w] = set()
+            term_to_msgs[w].add(idx)
+
+        # Uppercase abbreviations (2-5 chars, all caps) as alias candidates
+        raw_words = re.findall(r"\b[A-Z]{2,5}\b", text)
+        for w in raw_words:
+            key = w.lower()
+            if key not in abbrev_to_msgs:
+                abbrev_to_msgs[key] = set()
+            abbrev_to_msgs[key].add(idx)
+
+    return term_to_msgs, abbrev_to_msgs, msg_id_to_idx, [r["id"] for r in rows]
+
+
+def _compute_term_centroid(vectors, indices):
+    """Average the embedding vectors at the given indices."""
+    import numpy as np
+
+    subset = vectors[list(indices)]
+    centroid = subset.mean(axis=0)
+    norm = np.linalg.norm(centroid)
+    if norm > 1e-10:
+        centroid = centroid / norm
+    return centroid
+
+
+def _find_nearest_terms(query_centroid, candidate_centroids, candidate_terms, top_k=5, min_similarity=0.7):
+    """Find the most similar terms to a query centroid by cosine similarity."""
+    import numpy as np
+
+    if not candidate_terms:
+        return []
+
+    centroids_matrix = np.array(candidate_centroids, dtype=np.float32)
+    sims = centroids_matrix @ query_centroid
+    top_indices = np.argsort(sims)[::-1][:top_k]
+
+    results = []
+    for i in top_indices:
+        if sims[i] >= min_similarity:
+            results.append((candidate_terms[i], float(sims[i])))
+    return results
+
+
+def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occurrences=3, min_similarity=0.75) -> int:
+    """Discover term aliases using embedding nearest neighbors.
+
+    For short terms (likely abbreviations), finds longer terms whose message
+    embeddings cluster nearby — indicating they refer to the same concept.
+    """
+    import json
+    import logging
+    import struct
+
+    import numpy as np
+
+    logger = logging.getLogger(__name__)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # Load embeddings
+    emb_rows = conn.execute("SELECT message_id, embedding FROM embeddings WHERE chunk_type = 'message'").fetchall()
+    if not emb_rows:
+        conn.close()
+        return 0
+
+    emb_by_msg: dict[str, int] = {}
+    vectors_list = []
+    for r in emb_rows:
+        emb_by_msg[r["message_id"]] = len(vectors_list)
+        vectors_list.append(list(struct.unpack("3072f", r["embedding"])))
+
+    vectors = np.array(vectors_list, dtype=np.float32)
+    logger.info(f"Loaded {len(vectors)} embeddings for alias discovery")
+
+    # Build term → message index mapping (all terms + uppercase abbreviations)
+    term_to_msgs, abbrev_to_msgs, _, msg_ids = _extract_terms_from_messages(conn)
+
+    def _remap_to_emb_indices(term_map):
+        result = {}
+        for term, msg_indices in term_map.items():
+            emb_indices = [emb_by_msg[msg_ids[mi]] for mi in msg_indices if msg_ids[mi] in emb_by_msg]
+            if len(emb_indices) >= min_occurrences:
+                result[term] = emb_indices
+        return result
+
+    # Short terms: only uppercase abbreviations (KE, HOA, IRS — not "the", "and")
+    short_terms = _remap_to_emb_indices(abbrev_to_msgs)
+    # Long terms: all words > 5 chars
+    long_terms = {t: idxs for t, idxs in _remap_to_emb_indices(term_to_msgs).items() if len(t) > max_term_len}
+
+    logger.info(f"Abbreviations (alias candidates): {len(short_terms)}")
+    logger.info(f"Long terms (expansion candidates): {len(long_terms)}")
+
+    if not short_terms or not long_terms:
+        conn.close()
+        return 0
+
+    # Build reverse index: message_index → set of long terms in that message
+    # This lets us find co-occurring long terms without checking all 36k x 36k pairs
+    logger.info("Building reverse index for co-occurrence...")
+    msg_to_long_terms: dict[int, set[str]] = {}
+    for long_term, indices in long_terms.items():
+        for idx in indices:
+            if idx not in msg_to_long_terms:
+                msg_to_long_terms[idx] = set()
+            msg_to_long_terms[idx].add(long_term)
+
+    # For each short term, find long terms that co-occur via the reverse index
+    logger.info("Discovering aliases via co-occurrence + embedding similarity...")
+    conn.execute("DELETE FROM term_aliases")
+    alias_count = 0
+    from collections import Counter
+
+    for term, short_emb_indices in short_terms.items():
+        short_set = set(short_emb_indices)
+
+        # Count co-occurring long terms via reverse index (fast)
+        cooccur_counts: Counter = Counter()
+        for idx in short_emb_indices:
+            for long_term in msg_to_long_terms.get(idx, set()):
+                if term not in long_term and long_term not in term:
+                    cooccur_counts[long_term] += 1
+
+        # Keep long terms with 3+ co-occurrences
+        candidates = []
+        for long_term, overlap_count in cooccur_counts.most_common(20):
+            if overlap_count < 3:
+                break
+
+            long_set = set(long_terms[long_term])
+            jaccard = overlap_count / len(short_set | long_set)
+            if jaccard < 0.1:
+                continue
+
+            candidates.append((long_term, jaccard))
+
+        # Keep top 3 by co-occurrence strength
+        expansions = candidates[:3]
+        if expansions:
+            conn.execute(
+                "INSERT INTO term_aliases (term, expansions, similarity) VALUES (?, ?, ?)",
+                (term, json.dumps([t for t, _ in expansions]), expansions[0][1]),
+            )
+            alias_count += 1
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Discovered {alias_count} term aliases")
+    return alias_count
 
 
 def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:

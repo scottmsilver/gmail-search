@@ -212,25 +212,25 @@ def reindex(ctx):
         rebuild_contact_frequency,
         rebuild_fts,
         rebuild_spell_dictionary,
+        rebuild_term_aliases,
         rebuild_thread_summary,
         rebuild_topics,
     )
 
     cfg = ctx.obj["config"]
+    db = ctx.obj["db_path"]
     index_dir = ctx.obj["data_dir"] / "scann_index"
     build_index(
-        db_path=ctx.obj["db_path"],
-        index_dir=index_dir,
-        model=cfg["embedding"]["model"],
-        dimensions=cfg["embedding"]["dimensions"],
+        db_path=db, index_dir=index_dir, model=cfg["embedding"]["model"], dimensions=cfg["embedding"]["dimensions"]
     )
-    fts_count = rebuild_fts(ctx.obj["db_path"])
-    thread_count = rebuild_thread_summary(ctx.obj["db_path"])
-    contact_count = rebuild_contact_frequency(ctx.obj["db_path"])
-    word_count = rebuild_spell_dictionary(ctx.obj["db_path"], ctx.obj["data_dir"])
-    topic_count = rebuild_topics(ctx.obj["db_path"])
+    fts_count = rebuild_fts(db)
+    thread_count = rebuild_thread_summary(db)
+    contact_count = rebuild_contact_frequency(db)
+    word_count = rebuild_spell_dictionary(db, ctx.obj["data_dir"])
+    topic_count = rebuild_topics(db)
+    alias_count = rebuild_term_aliases(db)
     click.echo(
-        f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts + {word_count} words + {topic_count} topics."
+        f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts + {word_count} words + {topic_count} topics + {alias_count} aliases."
     )
 
 
