@@ -253,11 +253,12 @@ def update(ctx, max_messages, budget, batch_size):
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
     from gmail_search.index.builder import build_index
-    from gmail_search.store.db import (
+    from gmail_search.store.db import (  # noqa: E501
         rebuild_contact_frequency,
         rebuild_fts,
         rebuild_spell_dictionary,
         rebuild_thread_summary,
+        rebuild_topics,
     )
     from gmail_search.store.queries import get_attachments_for_message
 
