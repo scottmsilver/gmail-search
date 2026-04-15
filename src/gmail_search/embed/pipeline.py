@@ -23,7 +23,7 @@ from gmail_search.store.queries import (
 
 logger = logging.getLogger(__name__)
 
-TEXT_BATCH_SIZE = 100
+TEXT_BATCH_SIZE = 50  # messages per batch (each may produce multiple chunks)
 MAX_INPUT_TOKENS = 8192
 
 
@@ -101,8 +101,12 @@ def run_embedding_pipeline(
         if not all_texts:
             continue
 
-        # Embed all chunks in one batch call
-        vectors = _retry_api_call(embedder.embed_texts_batch, all_texts)
+        # Embed in sub-batches of 100 (Gemini API limit per call)
+        vectors = []
+        for sub_i in range(0, len(all_texts), 100):
+            sub_batch = all_texts[sub_i : sub_i + 100]
+            sub_vectors = _retry_api_call(embedder.embed_texts_batch, sub_batch)
+            vectors.extend(sub_vectors)
 
         total_tokens = sum(estimate_tokens(t) for t in all_texts)
         cost = estimate_cost(input_tokens=total_tokens)
