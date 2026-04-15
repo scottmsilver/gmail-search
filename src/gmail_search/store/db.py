@@ -572,15 +572,15 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
                 if term not in long_term and long_term not in term:
                     cooccur_counts[long_term] += 1
 
-        # Keep long terms with 3+ co-occurrences
+        # Keep long terms with 5+ co-occurrences and strong Jaccard
         candidates = []
         for long_term, overlap_count in cooccur_counts.most_common(20):
-            if overlap_count < 3:
+            if overlap_count < 5:
                 break
 
             long_set = set(long_terms[long_term])
             jaccard = overlap_count / len(short_set | long_set)
-            if jaccard < 0.1:
+            if jaccard < 0.2:
                 continue
 
             candidates.append((long_term, jaccard))
@@ -595,9 +595,75 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
             alias_count += 1
 
     conn.commit()
+    logger.info(f"Discovered {alias_count} candidate aliases, validating with Gemini...")
+
+    _validate_aliases_with_llm(conn)
+
+    final_count = conn.execute("SELECT COUNT(*) FROM term_aliases").fetchone()[0]
     conn.close()
-    logger.info(f"Discovered {alias_count} term aliases")
-    return alias_count
+    logger.info(f"Validated {final_count} term aliases")
+    return final_count
+
+
+def _validate_aliases_with_llm(conn):
+    """Use Gemini to filter out noise from candidate aliases.
+
+    Sends all candidates in batches and removes ones Gemini marks as bad.
+    """
+    import json
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+
+    rows = conn.execute("SELECT term, expansions, similarity FROM term_aliases").fetchall()
+    if not rows:
+        return
+
+    # Build the sample for Gemini
+    candidates = []
+    for r in rows:
+        exps = json.loads(r["expansions"])
+        candidates.append(f"{r['term']} → {', '.join(exps[:2])}")
+
+    # Process in chunks of 100 (Gemini can handle this in one call)
+    try:
+        from google import genai
+
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key) if api_key else genai.Client()
+
+        bad_terms = set()
+        for i in range(0, len(candidates), 100):
+            chunk = candidates[i : i + 100]
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview",
+                contents=(
+                    "These are candidate abbreviation→expansion pairs mined from an email corpus. "
+                    "Mark each as GOOD (real abbreviation, acronym, or meaningful alias) or "
+                    "BAD (noise, random co-occurrence, email encoding artifacts, common English words). "
+                    'Return ONLY a JSON object: {"abbreviation": "good" or "bad"}.\n\n' + "\n".join(chunk)
+                ),
+            )
+            text = response.text.strip()
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            judgments = json.loads(text)
+            for term, verdict in judgments.items():
+                if verdict.lower() == "bad":
+                    bad_terms.add(term.lower())
+
+        # Delete bad aliases
+        if bad_terms:
+            for term in bad_terms:
+                conn.execute("DELETE FROM term_aliases WHERE term = ?", (term,))
+            conn.commit()
+            logger.info(f"Removed {len(bad_terms)} noise aliases via LLM validation")
+
+    except Exception as e:
+        logger.warning(f"LLM alias validation failed, keeping all candidates: {e}")
 
 
 def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
