@@ -164,9 +164,10 @@ def extract(ctx):
 @main.command(help="Embed all unembedded messages and attachments")
 @click.option("--model", default=None, help="Override embedding model")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
+@click.option("--force", is_flag=True, help="Re-embed all messages (clears existing message embeddings)")
 @common_options
 @click.pass_context
-def embed(ctx, model, budget):
+def embed(ctx, model, budget, force):
     from gmail_search.embed.pipeline import run_embedding_pipeline
 
     cfg = ctx.obj["config"]
@@ -174,6 +175,16 @@ def embed(ctx, model, budget):
         cfg["embedding"]["model"] = model
     if budget:
         cfg["budget"]["max_usd"] = budget
+
+    if force:
+        emb_model = cfg["embedding"]["model"]
+        conn = get_connection(ctx.obj["db_path"])
+        deleted = conn.execute(
+            "DELETE FROM embeddings WHERE chunk_type = 'message' AND model = ?", (emb_model,)
+        ).rowcount
+        conn.commit()
+        conn.close()
+        click.echo(f"Cleared {deleted} message embeddings for re-embedding.")
 
     conn = get_connection(ctx.obj["db_path"])
     ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
@@ -189,7 +200,7 @@ def embed(ctx, model, budget):
 @click.pass_context
 def reindex(ctx):
     from gmail_search.index.builder import build_index
-    from gmail_search.store.db import rebuild_fts, rebuild_thread_summary
+    from gmail_search.store.db import rebuild_contact_frequency, rebuild_fts, rebuild_thread_summary
 
     cfg = ctx.obj["config"]
     index_dir = ctx.obj["data_dir"] / "scann_index"
@@ -201,7 +212,8 @@ def reindex(ctx):
     )
     fts_count = rebuild_fts(ctx.obj["db_path"])
     thread_count = rebuild_thread_summary(ctx.obj["db_path"])
-    click.echo(f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} thread summaries.")
+    contact_count = rebuild_contact_frequency(ctx.obj["db_path"])
+    click.echo(f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts.")
 
 
 @main.command(help="Run full pipeline in rolling batches: download → extract → embed → reindex")
@@ -328,6 +340,7 @@ def update(ctx, max_messages, budget, batch_size):
         )
         rebuild_fts(db_path)
         rebuild_thread_summary(db_path)
+        rebuild_contact_frequency(db_path)
 
         conn = get_connection(db_path)
         msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]

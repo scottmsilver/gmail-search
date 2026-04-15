@@ -20,8 +20,35 @@ def truncate_to_token_limit(text: str, max_tokens: int) -> str:
     return text[:max_chars]
 
 
+def strip_quoted_replies(body: str) -> str:
+    """Remove quoted reply chains from email body to improve embedding quality."""
+    import re
+
+    lines = body.split("\n")
+    cleaned: list[str] = []
+    skip_rest = False
+
+    for line in lines:
+        stripped = line.strip()
+        # Stop at reply headers like "On Mon, Jan 5, 2026... wrote:"
+        if re.match(r"^On .{10,80} wrote:\s*$", stripped):
+            break
+        # Stop at "From: ... Sent: ... To: ..." Outlook-style headers
+        if re.match(r"^-{3,}\s*Original Message\s*-{3,}", stripped, re.IGNORECASE):
+            break
+        # Skip quoted lines
+        if stripped.startswith(">"):
+            continue
+        cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    # If stripping removed almost everything, keep the original
+    return result if len(result) > 50 else body
+
+
 def format_message_text(from_addr: str, to_addr: str, date: str, subject: str, body: str) -> str:
-    return f"From: {from_addr} | To: {to_addr} | Date: {date} | Subject: {subject} | {body}"
+    clean_body = strip_quoted_replies(body)
+    return f"From: {from_addr} | To: {to_addr} | Date: {date} | Subject: {subject} | {clean_body}"
 
 
 def format_attachment_text(filename: str, subject: str, extracted_text: str) -> str:

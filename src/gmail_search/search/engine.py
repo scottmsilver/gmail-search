@@ -82,6 +82,90 @@ def _thread_size_score(message_count: int) -> float:
 
 
 @dataclass
+class ParsedQuery:
+    """Structured query with filters extracted."""
+
+    text: str  # the freetext portion to embed
+    from_filter: str | None = None
+    to_filter: str | None = None
+    after_filter: str | None = None
+    before_filter: str | None = None
+    temporal_boost: float = 0.0  # 0.0 = no time intent, up to 0.35 for strong time intent
+
+
+def parse_query(raw: str) -> ParsedQuery:
+    """Extract structured filters and temporal intent from a query string."""
+    import re
+
+    text_parts: list[str] = []
+    from_filter = None
+    to_filter = None
+    after_filter = None
+    before_filter = None
+
+    tokens = raw.split()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        # from:value or from: value
+        for prefix, setter in [("from:", "from"), ("to:", "to"), ("after:", "after"), ("before:", "before")]:
+            if token.lower().startswith(prefix):
+                val = token[len(prefix) :]
+                if not val and i + 1 < len(tokens):
+                    i += 1
+                    val = tokens[i]
+                if setter == "from":
+                    from_filter = val
+                elif setter == "to":
+                    to_filter = val
+                elif setter == "after":
+                    after_filter = val
+                elif setter == "before":
+                    before_filter = val
+                break
+        else:
+            text_parts.append(token)
+        i += 1
+
+    text = " ".join(text_parts)
+
+    # Detect temporal intent from freetext
+    temporal_boost = 0.0
+    time_patterns = [
+        (r"\b(today|yesterday|this morning|tonight)\b", 0.35),
+        (r"\b(this week|last week|few days ago)\b", 0.30),
+        (r"\b(this month|last month|recently|recent)\b", 0.25),
+        (r"\b(this year|last year|past year)\b", 0.15),
+        (r"\b(latest|newest|most recent)\b", 0.30),
+    ]
+    for pattern, boost in time_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            temporal_boost = max(temporal_boost, boost)
+
+    return ParsedQuery(
+        text=text,
+        from_filter=from_filter,
+        to_filter=to_filter,
+        after_filter=after_filter,
+        before_filter=before_filter,
+        temporal_boost=temporal_boost,
+    )
+
+
+def _contact_frequency_score(from_addrs: list[str], freq_map: dict[str, float]) -> float:
+    """Score based on how frequently you interact with thread participants. 0-1."""
+    if not from_addrs or not freq_map:
+        return 0.0
+    best = 0.0
+    for addr in from_addrs:
+        lower = addr.lower()
+        for key, score in freq_map.items():
+            if key in lower:
+                best = max(best, score)
+    return best
+
+
+@dataclass
 class SearchResult:
     """Legacy per-message result, still used by CLI."""
 
@@ -146,6 +230,10 @@ class SearchEngine:
         else:
             self._detect_user_email()
 
+        # Load contact frequency map
+        self.contact_freq: dict[str, float] = {}
+        self._load_contact_frequency()
+
     def _detect_user_email(self):
         """Find the most frequent sender — that's the user."""
         try:
@@ -163,6 +251,15 @@ class SearchEngine:
                 logger.info(f"Detected user email: {addr}")
         except Exception:
             pass
+
+    def _load_contact_frequency(self):
+        try:
+            conn = get_connection(self.db_path)
+            rows = conn.execute("SELECT email, score FROM contact_frequency").fetchall()
+            conn.close()
+            self.contact_freq = {r["email"]: r["score"] for r in rows}
+        except Exception:
+            self.contact_freq = {}
 
     def _user_in_participants(self, from_addrs: list[str]) -> bool:
         for addr in from_addrs:
@@ -241,9 +338,38 @@ class SearchEngine:
         results = sorted(seen_messages.values(), key=lambda r: r.score, reverse=True)
         return results[:top_k]
 
+    def _clean_query(self, raw_query: str) -> str:
+        """Spell-correct and normalize query using Gemini Flash Lite."""
+        try:
+            import os
+
+            from google import genai  # noqa: F811
+
+            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            client = genai.Client(api_key=api_key) if api_key else genai.Client()
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview",
+                contents=(
+                    "Fix any spelling errors in this email search query. "
+                    "Keep the same meaning and intent. Keep structured operators like from: and after: intact. "
+                    "Return ONLY the corrected query, nothing else.\n\n"
+                    f"Query: {raw_query}"
+                ),
+            )
+            cleaned = response.text.strip().strip('"').strip("'")
+            if cleaned and len(cleaned) < len(raw_query) * 3:  # sanity check
+                if cleaned.lower() != raw_query.lower():
+                    logger.info(f"Query corrected: '{raw_query}' -> '{cleaned}'")
+                return cleaned
+        except Exception as e:
+            logger.warning(f"Query cleanup failed: {e}")
+        return raw_query
+
     def search_threads(self, query: str, top_k: int = 20, sort: str = "relevance") -> list[ThreadResult]:
         """Thread-grouped search with multi-signal ranking."""
-        query_vector = self._embed_query(query)
+        cleaned_query = self._clean_query(query)
+        pq = parse_query(cleaned_query)
+        query_vector = self._embed_query(pq.text or cleaned_query)
 
         fetch_k = min(top_k * 10, len(self.searcher.embedding_ids))
         embedding_ids, scores = self.searcher.search(query_vector, top_k=fetch_k)
@@ -299,7 +425,14 @@ class SearchEngine:
 
         # BM25 keyword search
         conn = get_connection(self.db_path)
-        bm25_scores = search_fts(conn, query, limit=200)  # {message_id: 0-1 score}
+        # BM25 with both corrected and original query (merge best scores)
+        bm25_scores = search_fts(conn, pq.text or cleaned_query, limit=200)
+        if cleaned_query.lower() != query.lower():
+            original_pq = parse_query(query)
+            original_bm25 = search_fts(conn, original_pq.text or query, limit=200)
+            for mid, score in original_bm25.items():
+                if mid not in bm25_scores or score > bm25_scores[mid]:
+                    bm25_scores[mid] = score
 
         # Merge BM25-only results: threads that BM25 found but ScaNN missed
         scann_message_ids = set()
@@ -383,6 +516,41 @@ class SearchEngine:
 
             user_replied = self._user_in_participants(from_addrs)
 
+            # Apply structured filters — skip threads that don't match
+            if pq.from_filter:
+                if not any(pq.from_filter.lower() in a.lower() for a in from_addrs):
+                    continue
+            if pq.to_filter:
+                # Check to_addr on matching messages
+                skip = True
+                for m in matches:
+                    # We don't have to_addr on ThreadMatch, check via participants
+                    if pq.to_filter.lower() in " ".join(participants).lower():
+                        skip = False
+                        break
+                if skip:
+                    continue
+            if pq.after_filter:
+                try:
+                    from dateutil.parser import parse as _dateparse
+
+                    after_dt = _dateparse(pq.after_filter)
+                    thread_dt = datetime.fromisoformat(date_last) if date_last else None
+                    if thread_dt and thread_dt < after_dt:
+                        continue
+                except Exception:
+                    pass
+            if pq.before_filter:
+                try:
+                    from dateutil.parser import parse as _dateparse
+
+                    before_dt = _dateparse(pq.before_filter)
+                    thread_dt = datetime.fromisoformat(date_first) if date_first else None
+                    if thread_dt and thread_dt > before_dt:
+                        continue
+                except Exception:
+                    pass
+
             # Compute blended score
             sim = tdata["best_sim"]
             bm25 = thread_bm25.get(thread_id, 0.0)
@@ -391,15 +559,22 @@ class SearchEngine:
             replied = 1.0 if user_replied else 0.0
             density = _match_density_score(len(matches), msg_count)
             tsize = _thread_size_score(msg_count)
+            contact = _contact_frequency_score(from_addrs, self.contact_freq)
+
+            # Dynamic recency weight: boost if query has temporal intent
+            w_recency = W_RECENCY + pq.temporal_boost
+            # Redistribute the extra weight from similarity
+            w_similarity = W_SIMILARITY - pq.temporal_boost
 
             blended = (
-                W_SIMILARITY * sim
+                w_similarity * sim
                 + W_BM25 * bm25
-                + W_RECENCY * recency
+                + w_recency * recency
                 + W_LABELS * labels
                 + W_REPLIED * replied
                 + W_MATCH_DENSITY * density
                 + W_THREAD_SIZE * tsize
+                + 0.08 * contact  # contact frequency bonus (on top of 1.0 total)
             )
 
             thread_results.append(
@@ -424,9 +599,15 @@ class SearchEngine:
         else:
             thread_results.sort(key=lambda t: t.score, reverse=True)
 
-        # Collapse repeat senders: if multiple single-message threads from the
-        # same sender have similar subjects, keep only the best-scoring one
-        return self._collapse_repeat_senders(thread_results, top_k)
+        # Collapse repeat senders
+        thread_results = self._collapse_repeat_senders(thread_results, top_k * 2)
+
+        # LLM reranker on top candidates (if enabled)
+        rerank = self.config.get("search", {}).get("rerank", True)
+        if rerank and sort == "relevance" and len(thread_results) > 3:
+            thread_results = self._llm_rerank(pq.text or query, thread_results, top_k)
+
+        return thread_results[:top_k]
 
     @staticmethod
     def _normalize_subject(subject: str) -> str:
@@ -478,3 +659,69 @@ class SearchEngine:
             logger.info(f"Collapsed {suppressed} repeat single-message threads")
 
         return collapsed[:top_k]
+
+    def _llm_rerank(self, query: str, results: list[ThreadResult], top_k: int) -> list[ThreadResult]:
+        """Use Gemini Flash to rerank the top candidates by relevance."""
+        import json as _json
+
+        # Only rerank the top 30 to keep cost/latency low
+        candidates = results[:30]
+
+        # Build a concise summary for each candidate
+        items = []
+        for i, t in enumerate(candidates):
+            snippet = t.matches[0].snippet[:100] if t.matches else ""
+            people = ", ".join(p.split("<")[0].strip().strip('"') for p in t.participants[:3])
+            items.append(f"{i}: [{t.subject}] from {people} ({t.message_count} msgs) - {snippet}")
+
+        prompt = (
+            f"Query: {query}\n\n"
+            "Rank these email threads by relevance to the query. "
+            "Return ONLY a JSON array of the indices in order of relevance, most relevant first. "
+            "Example: [3, 0, 7, 1, ...]. Return the top 20 most relevant.\n\n" + "\n".join(items)
+        )
+
+        try:
+            import os
+
+            from google import genai  # noqa: F811
+
+            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+            client = genai.Client(api_key=api_key) if api_key else genai.Client()
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview",
+                contents=prompt,
+            )
+            text = response.text.strip()
+            # Parse the JSON array from response (handle markdown code blocks)
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            ranked_indices = _json.loads(text)
+
+            if not isinstance(ranked_indices, list):
+                return results
+
+            # Build reranked list
+            reranked: list[ThreadResult] = []
+            seen = set()
+            for idx in ranked_indices:
+                if isinstance(idx, int) and 0 <= idx < len(candidates) and idx not in seen:
+                    reranked.append(candidates[idx])
+                    seen.add(idx)
+
+            # Append any candidates the LLM didn't include
+            for i, t in enumerate(candidates):
+                if i not in seen:
+                    reranked.append(t)
+
+            # Append remaining results beyond top 30
+            reranked.extend(results[30:])
+
+            logger.info(f"LLM reranked {len(ranked_indices)} results")
+            return reranked
+
+        except Exception as e:
+            logger.warning(f"LLM rerank failed, using default ranking: {e}")
+            return results

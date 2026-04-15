@@ -170,42 +170,19 @@ def _escape_fts_query(query: str) -> str:
     return " ".join(f'"{t}"' for t in tokens if t)
 
 
-def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[str, float]:
-    """Search messages + attachments via FTS5, return {message_id: bm25_score}.
-
-    BM25 scores from FTS5 are negative (lower = better match), so we negate them.
-    Returns normalized scores in 0-1 range.
-    """
-    import logging
-
-    logger = logging.getLogger(__name__)
-    safe_query = _escape_fts_query(query)
-    if not safe_query:
-        return {}
-
+def _fts_search_table(
+    conn: sqlite3.Connection,
+    table: str,
+    query: str,
+    limit: int,
+    logger,
+) -> dict[str, float]:
+    """Search a single FTS table, return {message_id: score}."""
     scores: dict[str, float] = {}
-
-    # Search messages
     try:
         rows = conn.execute(
-            """SELECT message_id, rank FROM messages_fts
-               WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?""",
-            (safe_query, limit),
-        ).fetchall()
-        for r in rows:
-            mid = r["message_id"]
-            raw = -r["rank"]  # negate: FTS5 rank is negative, lower=better
-            if mid not in scores or raw > scores[mid]:
-                scores[mid] = raw
-    except sqlite3.OperationalError as e:
-        logger.warning(f"FTS message search failed: {e}")
-
-    # Search attachments
-    try:
-        rows = conn.execute(
-            """SELECT message_id, rank FROM attachments_fts
-               WHERE attachments_fts MATCH ? ORDER BY rank LIMIT ?""",
-            (safe_query, limit),
+            f"SELECT message_id, rank FROM {table} WHERE {table} MATCH ? ORDER BY rank LIMIT ?",
+            (query, limit),
         ).fetchall()
         for r in rows:
             mid = r["message_id"]
@@ -213,7 +190,43 @@ def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[s
             if mid not in scores or raw > scores[mid]:
                 scores[mid] = raw
     except sqlite3.OperationalError as e:
-        logger.warning(f"FTS attachment search failed: {e}")
+        logger.warning(f"FTS search on {table} failed: {e}")
+    return scores
+
+
+def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[str, float]:
+    """Search messages + attachments via FTS5, return {message_id: bm25_score}.
+
+    Searches with both phrase match (higher weight) and individual terms (broader recall).
+    Returns normalized scores in 0-1 range.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    tokens = query.split()
+    if not tokens:
+        return {}
+
+    scores: dict[str, float] = {}
+
+    # Strategy 1: Phrase match (all words must appear near each other)
+    # FTS5 NEAR groups words that appear within 10 tokens of each other
+    if len(tokens) > 1:
+        escaped_tokens = [f'"{t}"' for t in tokens]
+        phrase_query = " ".join(escaped_tokens)
+        for table in ["messages_fts", "attachments_fts"]:
+            for mid, raw in _fts_search_table(conn, table, phrase_query, limit, logger).items():
+                # Boost phrase matches by 1.5x
+                boosted = raw * 1.5
+                if mid not in scores or boosted > scores[mid]:
+                    scores[mid] = boosted
+
+    # Strategy 2: Individual terms (any word matches — broader recall)
+    individual_query = " OR ".join(f'"{t}"' for t in tokens)
+    for table in ["messages_fts", "attachments_fts"]:
+        for mid, raw in _fts_search_table(conn, table, individual_query, limit, logger).items():
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
 
     # Normalize to 0-1 (single result gets 1.0)
     if scores:

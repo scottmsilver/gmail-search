@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS thread_summary (
     date_last TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS contact_frequency (
+    email TEXT PRIMARY KEY,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    score REAL NOT NULL DEFAULT 0.0
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);
@@ -147,6 +153,44 @@ def rebuild_thread_summary(db_path: Path) -> int:
 
     conn.commit()
     count = len(threads)
+    conn.close()
+    return count
+
+
+def rebuild_contact_frequency(db_path: Path) -> int:
+    """Precompute contact frequency scores. Returns contact count."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+
+    conn.execute("DELETE FROM contact_frequency")
+
+    # Count messages per sender email
+    rows = conn.execute("SELECT from_addr, COUNT(*) as c FROM messages GROUP BY from_addr ORDER BY c DESC").fetchall()
+
+    if not rows:
+        conn.close()
+        return 0
+
+    # Log-scale normalize: top sender = 1.0
+    import math
+
+    max_count = rows[0]["c"]
+    log_max = math.log(max_count + 1)
+
+    for r in rows:
+        addr = r["from_addr"].lower()
+        # Extract just the email from "Name <email>" format
+        if "<" in addr:
+            addr = addr.split("<")[1].rstrip(">")
+        score = math.log(r["c"] + 1) / log_max if log_max > 0 else 0.0
+        conn.execute(
+            "INSERT OR REPLACE INTO contact_frequency (email, message_count, score) VALUES (?, ?, ?)",
+            (addr, r["c"], score),
+        )
+
+    conn.commit()
+    count = conn.execute("SELECT COUNT(*) FROM contact_frequency").fetchone()[0]
     conn.close()
     return count
 
