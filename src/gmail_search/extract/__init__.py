@@ -10,6 +10,7 @@ class ExtractResult:
 
 
 def dispatch(mime_type: str, file_path: Path, config: dict[str, Any]) -> ExtractResult | None:
+    from gmail_search.extract.archive import extract_zip
     from gmail_search.extract.calendar import extract_calendar
     from gmail_search.extract.image import extract_heic, extract_image
     from gmail_search.extract.office import extract_csv, extract_docx, extract_xlsx
@@ -37,6 +38,9 @@ def dispatch(mime_type: str, file_path: Path, config: dict[str, Any]) -> Extract
         "application/ics": extract_calendar,
         # Plain text
         "text/plain": extract_text,
+        # Archives
+        "application/zip": extract_zip,
+        "application/x-zip-compressed": extract_zip,
     }
 
     extractor = extractors.get(mime_type)
