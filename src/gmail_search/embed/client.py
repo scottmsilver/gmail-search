@@ -121,3 +121,87 @@ class GeminiEmbedder:
 
     def embed_query(self, query: str) -> list[float]:
         return self.embed_text(query, task_type=self.task_type_query)
+
+
+class BatchGeminiEmbedder(GeminiEmbedder):
+    """Drop-in replacement that uses the Batch API (50% cheaper, higher rate limits).
+
+    Batches up to BATCH_JOB_SIZE texts, submits as an async batch job, polls for
+    completion, and returns results. Same interface as GeminiEmbedder so the pipeline
+    code doesn't change.
+    """
+
+    BATCH_JOB_SIZE = 1000  # max inline requests per batch job
+    POLL_INTERVAL = 5  # seconds between status checks
+
+    COMPLETED_STATES = {
+        "JOB_STATE_SUCCEEDED",
+        "JOB_STATE_FAILED",
+        "JOB_STATE_CANCELLED",
+        "JOB_STATE_EXPIRED",
+    }
+
+    def embed_texts_batch(self, texts: list[str], task_type: str | None = None) -> list[list[float]]:
+        """Submit texts as a batch embedding job and poll until done."""
+        import time as _time
+
+        if task_type is None:
+            task_type = self.task_type_document
+
+        if not texts:
+            return []
+
+        # For very small batches, just use the sync API (not worth the overhead)
+        if len(texts) <= 5:
+            return super().embed_texts_batch(texts, task_type)
+
+        all_vectors: list[list[float]] = []
+
+        # Process in chunks of BATCH_JOB_SIZE
+        for chunk_start in range(0, len(texts), self.BATCH_JOB_SIZE):
+            chunk = texts[chunk_start : chunk_start + self.BATCH_JOB_SIZE]
+
+            logger.info(f"Submitting batch embedding job: {len(chunk)} texts")
+            batch_job = self.client.batches.create_embeddings(
+                model=self.model,
+                src=genai.types.EmbeddingsBatchJobSource(
+                    inlined_requests=genai.types.EmbedContentBatch(
+                        contents=chunk,
+                        config=genai.types.EmbedContentConfig(
+                            task_type=task_type,
+                            output_dimensionality=self.dimensions,
+                        ),
+                    ),
+                ),
+                config={"display_name": f"gmail-search-embed-{chunk_start}"},
+            )
+
+            job_name = batch_job.name
+            logger.info(f"Batch job created: {job_name}")
+
+            # Poll until complete
+            while batch_job.state.name not in self.COMPLETED_STATES:
+                _time.sleep(self.POLL_INTERVAL)
+                batch_job = self.client.batches.get(name=job_name)
+                logger.info(f"  Batch status: {batch_job.state.name}")
+
+            if batch_job.state.name != "JOB_STATE_SUCCEEDED":
+                raise RuntimeError(f"Batch job failed: {batch_job.state.name}")
+
+            # Extract embedding vectors from results
+            for resp in batch_job.dest.inlined_embed_content_responses:
+                if resp.error:
+                    logger.warning(f"Batch item error: {resp.error}")
+                    all_vectors.append([0.0] * self.dimensions)
+                elif resp.response and resp.response.embedding:
+                    all_vectors.append(resp.response.embedding.values)
+                else:
+                    all_vectors.append([0.0] * self.dimensions)
+
+            logger.info(f"Batch job complete: {len(chunk)} embeddings received")
+
+        return all_vectors
+
+    def embed_image(self, image_path: Path, task_type: str | None = None) -> list[float]:
+        # Batch API doesn't support multimodal yet — fall back to sync
+        return super().embed_image(image_path, task_type)

@@ -59,19 +59,24 @@ def run_embedding_pipeline(
     if embedder is None:
         embedder = GeminiEmbedder(config)
 
+    # Use larger batches for Batch API (designed for bulk, small jobs waste queue time)
+    from gmail_search.embed.client import BatchGeminiEmbedder
+
+    batch_size = 1000 if isinstance(embedder, BatchGeminiEmbedder) else TEXT_BATCH_SIZE
+
     # Phase 1: Embed messages
     messages = get_messages_without_embeddings(conn, model=model)
-    logger.info(f"{len(messages)} messages to embed")
+    logger.info(f"{len(messages)} messages to embed (batch_size={batch_size})")
 
     total_embedded = 0
 
-    for i in range(0, len(messages), TEXT_BATCH_SIZE):
+    for i in range(0, len(messages), batch_size):
         ok, spent, remaining = check_budget(conn, max_budget)
         if not ok:
             logger.warning(f"Budget limit ${max_budget:.2f} reached (${spent:.2f} spent). Stopping.")
             break
 
-        batch = messages[i : i + TEXT_BATCH_SIZE]
+        batch = messages[i : i + batch_size]
         texts = []
         batch_msgs = []
 

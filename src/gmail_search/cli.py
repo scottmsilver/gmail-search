@@ -165,9 +165,10 @@ def extract(ctx):
 @click.option("--model", default=None, help="Override embedding model")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
 @click.option("--force", is_flag=True, help="Re-embed all messages (clears existing message embeddings)")
+@click.option("--batch-api", is_flag=True, help="Use Gemini Batch API (50% cheaper, async with polling)")
 @common_options
 @click.pass_context
-def embed(ctx, model, budget, force):
+def embed(ctx, model, budget, force, batch_api):
     from gmail_search.embed.pipeline import run_embedding_pipeline
 
     cfg = ctx.obj["config"]
@@ -186,12 +187,19 @@ def embed(ctx, model, budget, force):
         conn.close()
         click.echo(f"Cleared {deleted} message embeddings for re-embedding.")
 
+    embedder = None
+    if batch_api:
+        from gmail_search.embed.client import BatchGeminiEmbedder
+
+        embedder = BatchGeminiEmbedder(cfg)
+        click.echo("Using Batch API (50% cheaper, polling for results)")
+
     conn = get_connection(ctx.obj["db_path"])
     ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
     conn.close()
     click.echo(f"Budget: ${cfg['budget']['max_usd']:.2f} | Spent: ${spent:.2f} | Remaining: ${remaining:.2f}")
 
-    count = run_embedding_pipeline(ctx.obj["db_path"], cfg)
+    count = run_embedding_pipeline(ctx.obj["db_path"], cfg, embedder=embedder)
     click.echo(f"Embedded {count} new chunks.")
 
 
