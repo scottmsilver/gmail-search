@@ -12,11 +12,15 @@ Gmail Search fixes this with hybrid search: semantic understanding (what you mea
 
 - **Hybrid ranking with 8 signals** — not just embeddings. Combines semantic similarity, BM25 keyword match, recency, Gmail labels (IMPORTANT/PERSONAL/PROMOTIONS), contact frequency, thread engagement, match density, and thread size. Each signal catches things the others miss.
 - **Searches inside attachments** — PDFs get text extracted and page-rendered as images. Both text and images are embedded, so you can find a contract by describing what's in it.
-- **Spell correction** — "draw requst" finds "draw request." Searches with both corrected and original query so nothing is lost.
+- **Spell correction** — "draw requst" finds "draw request." Local SymSpell correction using a dictionary built from your own email corpus (0.1ms, no API call). Searches with both corrected and original query so nothing is lost.
+- **Personal abbreviation expansion** — "KE board" finds "Kol Emeth board" because the system mines co-occurrence patterns from your emails at reindex time. Discovers abbreviations like KE=Kol Emeth, HOA=Colony, FRCO=Frank Rimerman automatically.
 - **Structured filters** — `from:landmarks draw request` or `after:march invoice` work like Gmail operators, applied as SQL filters before ranking.
 - **Temporal awareness** — "recent invoice" automatically boosts recency. "that email from last week" does the right thing.
-- **LLM reranker** — top 30 results are reranked by Gemini Flash Lite, catching relevance subtleties that embeddings and keywords miss.
-- **Thread-grouped results** — shows conversations, not individual messages. Deduplicates repeat newsletters.
+- **Off-topic filtering** — drops clearly irrelevant results using an adaptive score gap threshold. Toggle in the UI.
+- **LLM reranker** — conditionally reranks top 30 results using Gemini Flash Lite, but only when the top scores are tightly clustered (ambiguous). Clear winners skip the reranker (~250ms vs ~1.4s).
+- **Hierarchical topic browsing** — emails are clustered into a semantic topic tree (built via recursive bisecting k-means on embeddings, auto-labeled by Gemini). Browse by topic in the sidebar: Personal > Family & Finance > Tax Documents.
+- **Query embedding cache** — repeated queries are instant (62ms) via a persistent SQLite cache. No API call on cache hit.
+- **Thread-grouped results** — shows conversations, not individual messages. Deduplicates repeat newsletters by sender+subject.
 - **Rolling pipeline** — `update` processes in batches of 500: download, extract, embed, reindex. Search gets better continuously as it runs, not just at the end.
 - **Cost-controlled** — hard budget limit, per-operation cost tracking, ~$5 per 20k messages.
 - **Fully local** — your email never leaves your machine. The SQLite DB, attachments, and indexes are all in a gitignored `data/` directory. Only embedding vectors are sent to Gemini's API.
@@ -93,11 +97,12 @@ Open http://localhost:8080 in your browser.
                                   │
                     ┌─────────────▼───────────────────────────────┐
                     │         Query Processing Layer               │
-                    │  ┌──────────┐ ┌──────────┐ ┌─────────────┐ │
-                    │  │  Spell   │ │  Parse   │ │  Temporal   │ │
-                    │  │  Correct │ │  Filters │ │  Detection  │ │
-                    │  │(Flash Lt)│ │(from: ..)│ │(recent,last)│ │
-                    │  └──────────┘ └──────────┘ └─────────────┘ │
+                    │                                              │
+                    │  1. Spell correct (local SymSpell, 0.1ms)    │
+                    │  2. Expand aliases (KE → kol emeth)          │
+                    │  3. Parse filters (from:, after:, etc.)      │
+                    │  4. Detect temporal intent (recent, last)     │
+                    │  5. Check embedding cache (SQLite)            │
                     └─────────────┬───────────────────────────────┘
                                   │
               ┌───────────────────┼───────────────────┐
@@ -106,9 +111,9 @@ Open http://localhost:8080 in your browser.
    │  Vector Search     │ │ Keyword Search│ │ SQL Filters     │
    │  (ScaNN)           │ │ (FTS5 BM25)  │ │ (from/to/date)  │
    │                    │ │               │ │                  │
-   │  Gemini embedding  │ │ Phrase match  │ │ Applied to       │
-   │  → cosine sim      │ │ + individual  │ │ thread_summary   │
-   │                    │ │ + both queries│ │                  │
+   │  Gemini embedding  │ │ Phrase 1.5x + │ │ Applied to       │
+   │  (cached) → cosine │ │ individual +  │ │ thread_summary   │
+   │                    │ │ both queries  │ │                  │
    └──────────┬─────────┘ └───────┬───────┘ └────────┬────────┘
               │                   │                   │
               └───────────────────┼───────────────────┘
@@ -120,31 +125,33 @@ Open http://localhost:8080 in your browser.
                     │  Recency (15%, dynamic) + Labels (12%) +     │
                     │  Contact Freq (8%) + Replied (8%) +          │
                     │  Match Density (6%) + Thread Size (4%)       │
-                    │                                              │
-                    │  + Temporal boost shifts weight to recency   │
-                    │  + Structured filters remove non-matches     │
                     └─────────────┬───────────────────────────────┘
                                   │
                     ┌─────────────▼───────────────────────────────┐
-                    │         LLM Reranker (Flash Lite)            │
-                    │  Top 30 candidates reranked for relevance    │
+                    │         Conditional LLM Reranker             │
+                    │  Only when top-5 score spread < 0.15         │
+                    │  (ambiguous results need reranking)           │
                     └─────────────┬───────────────────────────────┘
                                   │
                     ┌─────────────▼───────────────────────────────┐
                     │         Post-Processing                      │
-                    │  Thread grouping → Sender collapsing →       │
-                    │  Top K results                                │
+                    │  Off-topic filter → Sender collapsing →      │
+                    │  Thread grouping → Topic facets → Top K       │
                     └─────────────────────────────────────────────┘
 ```
 
 ### Data pipeline
 
 ```
-Gmail API ──► SQLite ──► Extract ──► Embed ──► Index
+Gmail API ──► SQLite ──► Extract ──► Embed ──► Index + Analyze
               (messages,   (PDF text,  (Gemini    (ScaNN vectors
                attachments  page imgs)  3072-dim)  + FTS5 keywords
                raw files)                          + thread summaries
-                                                   + contact freq)
+                                                   + contact freq
+                                                   + topic hierarchy
+                                                   + term aliases
+                                                   + spell dictionary
+                                                   + query cache)
 ```
 
 Each stage is idempotent. Crash at any point, re-run, and it picks up where it left off. The `update` command runs all stages in rolling batches of 500 messages, rebuilding indexes after each batch so search improves continuously.
@@ -155,8 +162,13 @@ Each stage is idempotent. Crash at any point, re-run, and it picks up where it l
 |-------|------|-----|
 | `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search (16x speedup) |
 | `contact_frequency` | Log-scaled message count per sender | Boosts results from frequent correspondents |
+| `topics` | Hierarchical topic tree (recursive bisecting k-means, auto-labeled) | Browse-by-topic sidebar, off-topic filtering |
+| `message_topics` | Message → topic assignments (leaf + ancestors) | Client-side topic filtering |
+| `term_aliases` | Abbreviation → expansion mappings mined from co-occurrence | "KE" → "kol emeth" query expansion |
+| `query_cache` | Query text → embedding vector (persistent) | 200x speedup on repeated queries |
 | `messages_fts` | FTS5 full-text index over subjects + bodies | BM25 keyword matching |
 | `attachments_fts` | FTS5 index over attachment text | Keyword search inside PDFs |
+| `spell_dictionary.txt` | Word frequency dictionary built from corpus | Local spell correction (SymSpell, 0.1ms) |
 
 ### Module map
 
@@ -165,10 +177,12 @@ src/gmail_search/
   config.py        — Config loading (config.yaml + config.local.yaml overrides)
   cli.py           — Click CLI: auth, download, sync, extract, embed, reindex,
                      search, cost, status, serve, update (rolling pipeline)
-  server.py        — FastAPI: /api/search, /api/thread, /api/message,
-                     /api/attachment, /api/status
+  server.py        — FastAPI: /api/search (with facets), /api/topics (tree),
+                     /api/thread, /api/message, /api/attachment, /api/status
   store/
-    db.py          — SQLite schema, FTS5, thread_summary, contact_frequency
+    db.py          — SQLite schema, FTS5 indexes, precomputed tables:
+                     thread_summary, contact_frequency, topics (hierarchical),
+                     term_aliases, query_cache, spell_dictionary
     models.py      — Dataclasses: Message, Attachment, EmbeddingRecord, CostRecord
     queries.py     — CRUD, FTS search (phrase + individual + dual-query)
     cost.py        — Per-operation cost tracking with budget enforcement
@@ -181,14 +195,17 @@ src/gmail_search/
     pdf.py         — pymupdf: text extraction + page rendering (150 DPI PNG)
     image.py       — Passthrough for jpg/png/gif attachments
   embed/
-    client.py      — Gemini wrapper (text + multimodal), quote stripping
+    client.py      — Gemini wrapper (text + multimodal), quote stripping,
+                     BatchGeminiEmbedder for Batch API (50% cheaper)
     pipeline.py    — Batched embedding with retry, budget checks, idempotency
   index/
     builder.py     — ScaNN index: adaptive config (brute force < 100, AH > 100)
     searcher.py    — ScaNN query → (embedding_ids, scores)
   search/
-    engine.py      — Query processing, hybrid ranking, LLM reranker,
-                     thread grouping, sender collapsing
+    engine.py      — Full search pipeline: spell correct → alias expand →
+                     parse filters → embed (cached) → ScaNN + BM25 →
+                     merge → rank (8 signals) → conditional rerank →
+                     off-topic filter → sender collapse → topic facets
 ```
 
 ## Commands
@@ -202,7 +219,8 @@ src/gmail_search/
 | `gmail-search extract` | Extract text/images from attachments |
 | `gmail-search embed` | Embed unembedded messages and attachments |
 | `gmail-search embed --force` | Re-embed all messages (e.g., after changing text processing) |
-| `gmail-search reindex` | Rebuild ScaNN + FTS + thread summary + contact frequency |
+| `gmail-search embed --batch-api` | Use Gemini Batch API (50% cheaper, for 100k+ messages) |
+| `gmail-search reindex` | Rebuild all indexes: ScaNN, FTS, topics, aliases, contacts, spell dict |
 | `gmail-search search "query"` | Search from the command line |
 | `gmail-search serve` | Start the web UI |
 | `gmail-search status` | Show message count, embeddings, cost |
@@ -275,23 +293,27 @@ The `--budget` flag sets a hard spending limit. `gmail-search cost --breakdown` 
 
 ## Performance
 
-Benchmarked on 20k messages / 30k embeddings:
+Benchmarked on 20k messages / 32k embeddings:
 
 | Metric | Value |
 |--------|-------|
-| Median search latency (no reranker) | 230ms |
-| Median search latency (with reranker) | 1.6s |
-| Index build time | 1.5s |
+| Median search (clear results, cached query) | 62ms |
+| Median search (clear results, new query) | 250ms |
+| Median search (ambiguous, triggers reranker) | 1.4s |
+| Index build time (ScaNN + FTS + topics + aliases) | ~90s |
 | Messages downloaded/sec | ~5 (rate limited by Gmail API) |
 | Embeddings/sec | ~50 (batched) |
+| Spell correction | 0.1ms (local SymSpell) |
+| Topic filter (client-side) | instant |
 
 ## Tech stack
 
 - **Gmail API** — message download with OAuth2, batch requests, incremental sync
 - **Gemini embedding-2-preview** — text + multimodal embeddings (3072 dims, 8192 token input)
-- **Gemini Flash Lite** — spell correction + LLM reranker
+- **Gemini Flash Lite** — conditional LLM reranker, topic auto-labeling
 - **ScaNN** — Google's vector similarity search (asymmetric hashing, sub-ms queries)
-- **SQLite + FTS5** — storage, keyword search (BM25), precomputed tables
+- **SQLite + FTS5** — storage, keyword search (BM25), precomputed tables, query cache
+- **SymSpell** — local corpus-trained spell correction (0.1ms per query)
 - **FastAPI** — web UI and API
 - **pymupdf** — PDF text extraction + page rendering
 
@@ -299,6 +321,9 @@ Benchmarked on 20k messages / 30k embeddings:
 
 Your email stays on your machine. The only data sent externally:
 - **Embedding text** sent to Gemini API (for generating vector representations)
-- **Search queries** sent to Gemini API (for query embedding, spell correction, reranking)
+- **Search queries** sent to Gemini API (for query embedding on cache miss, conditional reranking)
+- **Topic summaries** sent to Gemini Flash Lite (one-time at reindex, for auto-labeling clusters)
+
+Spell correction, abbreviation expansion, and query caching are fully local — no API calls.
 
 No email content is stored by Google's API (Gemini API data is not used for training). Credentials and tokens are stored with restricted file permissions (0600). The `data/` directory containing your email database, attachments, and indexes is gitignored.
