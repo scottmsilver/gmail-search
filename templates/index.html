@@ -175,7 +175,7 @@
 <div class="main">
   <div class="topics-pane" id="topics-pane">
     <div class="topics-title">Topics</div>
-    <div class="topic-item active topic-all" onclick="setTopic(null)">All topics</div>
+    <div class="topic-item active topic-all" onclick="setTopic(null)">All results <span class="topic-count" id="facet-total"></span></div>
     <div id="topics-list"></div>
   </div>
   <div class="results-pane" id="results-pane">
@@ -224,13 +224,9 @@ function setSort(s) {
 
 function setTopic(topicId) {
   activeTopic = topicId;
-  document.querySelectorAll('.topic-item').forEach(el => el.classList.remove('active'));
-  if (topicId === null) {
-    document.querySelector('.topic-all').classList.add('active');
-  } else {
-    const el = document.querySelector(`.topic-item[data-tid="${topicId}"]`);
-    if (el) el.classList.add('active');
-  }
+  // Re-render facet active states without rebuilding the list
+  renderFacets();
+  document.querySelector('.topic-all').classList.toggle('active', topicId === null);
   if (lastQuery) doSearch();
 }
 
@@ -246,8 +242,15 @@ async function doSearch() {
   let url = '/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort + '&filter=' + filterOn;
   if (activeTopic !== null) url += '&topic=' + activeTopic;
   const res = await fetch(url);
-  const data = await res.json();
+  const response = await res.json();
+  const data = response.results || response;
+  const facets = response.facets || [];
   if (!data.length) { resultsEl.innerHTML = '<div class="empty">No results found</div>'; return; }
+
+  // Only update facets on fresh search, not when filtering by topic
+  if (activeTopic === null) {
+    updateFacets(facets, data.length);
+  }
 
   resultsEl.innerHTML = data.map(t => {
     const people = t.participants.map(p => shortName(p));
@@ -381,55 +384,24 @@ fetch('/api/status').then(r => r.json()).then(s => {
     s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' – ' + newest;
 });
 
-// Load topics for sidebar as a tree
-fetch('/api/topics').then(r => r.json()).then(topics => {
+// Update sidebar facets from search results (leaves only, with result counts)
+let currentFacets = [];
+function updateFacets(facets, totalResults) {
+  currentFacets = facets;
+  document.getElementById('facet-total').textContent = totalResults;
+  renderFacets();
+}
+function renderFacets() {
   const list = document.getElementById('topics-list');
-  // Build tree structure
-  const byId = {};
-  const roots = [];
-  topics.forEach(t => { byId[t.topic_id] = { ...t, children: [] }; });
-  topics.forEach(t => {
-    if (t.parent_id && byId[t.parent_id]) {
-      byId[t.parent_id].children.push(byId[t.topic_id]);
-    } else if (!t.parent_id || t.topic_id === 'root') {
-      // skip root in display, show its children as top-level
-    }
-  });
-  // Render tree recursively (skip root, start from its children)
-  function renderNode(node) {
-    const indent = Math.max(0, node.depth - 1) * 12;
-    const hasKids = node.children.length > 0;
-    const toggle = hasKids ? `<span class="topic-toggle" onclick="event.stopPropagation();toggleTopic(this)">&#9662;</span>` : '';
-    let html = `<div class="topic-item" data-tid="${node.topic_id}" style="padding-left:${16 + indent}px" onclick="setTopic('${node.topic_id}')">
-      ${toggle}<span class="topic-label">${esc(node.label || 'Unlabeled')}</span><span class="topic-count">${node.message_count}</span>
-    </div>`;
-    if (hasKids) {
-      html += `<div class="topic-children">`;
-      node.children.sort((a, b) => b.message_count - a.message_count);
-      node.children.forEach(c => { html += renderNode(c); });
-      html += `</div>`;
-    }
-    return html;
+  if (!currentFacets.length) {
+    list.innerHTML = '';
+    return;
   }
-  // Get root's children as top-level items
-  const root = byId['root'];
-  if (root && root.children.length > 0) {
-    root.children.sort((a, b) => b.message_count - a.message_count);
-    list.innerHTML = root.children.map(c => renderNode(c)).join('');
-  } else {
-    // Flat fallback
-    list.innerHTML = topics.filter(t => t.topic_id !== 'root').map(t =>
-      `<div class="topic-item" data-tid="${t.topic_id}" onclick="setTopic('${t.topic_id}')">${esc(t.label)}<span class="topic-count">${t.message_count}</span></div>`
-    ).join('');
-  }
-});
-
-function toggleTopic(el) {
-  const children = el.closest('.topic-item').nextElementSibling;
-  if (children && children.classList.contains('topic-children')) {
-    children.classList.toggle('collapsed');
-    el.textContent = children.classList.contains('collapsed') ? '\u25B8' : '\u25BE';
-  }
+  list.innerHTML = currentFacets.map(f =>
+    `<div class="topic-item${activeTopic === f.topic_id ? ' active' : ''}" data-tid="${f.topic_id}" onclick="setTopic('${f.topic_id}')">
+      <span class="topic-label">${esc(f.label)}</span><span class="topic-count">${f.count}</span>
+    </div>`
+  ).join('');
 }
 </script>
 </body>

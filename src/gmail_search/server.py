@@ -20,6 +20,58 @@ def create_app(
     templates_dir = Path(__file__).parent.parent.parent / "templates"
     index_dir = data_dir / "scann_index"
 
+    def _format_thread_result(r):
+        return {
+            "thread_id": r.thread_id,
+            "score": r.score,
+            "similarity": r.similarity,
+            "subject": r.subject,
+            "participants": r.participants,
+            "message_count": r.message_count,
+            "date_first": r.date_first,
+            "date_last": r.date_last,
+            "user_replied": r.user_replied,
+            "matches": [
+                {
+                    "message_id": m.message_id,
+                    "score": m.score,
+                    "from_addr": m.from_addr,
+                    "date": m.date,
+                    "snippet": m.snippet,
+                    "match_type": m.match_type,
+                    "attachment_filename": m.attachment_filename,
+                }
+                for m in r.matches
+            ],
+        }
+
+    def _collect_result_message_ids(results):
+        ids = set()
+        for r in results:
+            for m in r.matches:
+                ids.add(m.message_id)
+        return ids
+
+    def _compute_topic_facets(db_path_inner, results):
+        """Find leaf topics that contain result messages, with hit counts."""
+        msg_ids = _collect_result_message_ids(results)
+        if not msg_ids:
+            return []
+        conn_f = get_connection(db_path_inner)
+        placeholders = ",".join("?" * len(msg_ids))
+        rows = conn_f.execute(
+            f"""SELECT t.topic_id, t.label, COUNT(DISTINCT mt.message_id) as hit_count
+                FROM message_topics mt
+                JOIN topics t ON mt.topic_id = t.topic_id
+                WHERE mt.message_id IN ({placeholders})
+                AND t.topic_id NOT IN (SELECT DISTINCT parent_id FROM topics WHERE parent_id IS NOT NULL)
+                GROUP BY t.topic_id
+                ORDER BY hit_count DESC""",
+            list(msg_ids),
+        ).fetchall()
+        conn_f.close()
+        return [{"topic_id": r["topic_id"], "label": r["label"], "count": r["hit_count"]} for r in rows]
+
     _engine: SearchEngine | None = None
 
     def get_engine() -> SearchEngine:
@@ -52,32 +104,12 @@ def create_app(
             }
             conn_t.close()
             results = [r for r in results if any(m.message_id in topic_msg_ids for m in r.matches)]
-        return [
-            {
-                "thread_id": r.thread_id,
-                "score": r.score,
-                "similarity": r.similarity,
-                "subject": r.subject,
-                "participants": r.participants,
-                "message_count": r.message_count,
-                "date_first": r.date_first,
-                "date_last": r.date_last,
-                "user_replied": r.user_replied,
-                "matches": [
-                    {
-                        "message_id": m.message_id,
-                        "score": m.score,
-                        "from_addr": m.from_addr,
-                        "date": m.date,
-                        "snippet": m.snippet,
-                        "match_type": m.match_type,
-                        "attachment_filename": m.attachment_filename,
-                    }
-                    for m in r.matches
-                ],
-            }
-            for r in results
-        ]
+        facets = _compute_topic_facets(db_path, results)
+
+        return {
+            "results": [_format_thread_result(r) for r in results],
+            "facets": facets,
+        }
 
     @app.get("/api/thread/{thread_id}")
     async def api_thread(thread_id: str):
