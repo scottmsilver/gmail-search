@@ -650,11 +650,13 @@ def _validate_aliases_with_llm(conn):
                 contents=(
                     "These are candidate abbreviation→expansion pairs mined from a personal email corpus. "
                     "The co-occurrence percentage shows how often they appear in the same emails. "
-                    "Mark each as GOOD if the short form is a plausible abbreviation, acronym, "
-                    "nickname, or alias for the expansion IN THE CONTEXT OF PERSONAL EMAIL. "
-                    "Mark as BAD only if it's clearly noise (HTML encoding artifacts, random words, "
-                    "email headers). When in doubt, mark GOOD — false negatives are worse than false positives. "
-                    'Return ONLY a JSON object: {"abbreviation": "good" or "bad"}.\n\n' + "\n".join(chunk)
+                    "Score each from 1 to 5 on how likely this is a REAL abbreviation or alias:\n"
+                    "  5 = definitely real (e.g., NY→New York, GCP→Google Cloud)\n"
+                    "  4 = very likely real (e.g., personal/org abbreviation)\n"
+                    "  3 = possibly real, unclear\n"
+                    "  2 = probably noise\n"
+                    "  1 = definitely noise (encoding artifacts, random words)\n"
+                    'Return ONLY a JSON object: {"abbreviation": score}\n\n' + "\n".join(chunk)
                 ),
             )
             text = response.text.strip()
@@ -662,12 +664,15 @@ def _validate_aliases_with_llm(conn):
                 text = text.split("```")[1]
                 if text.startswith("json"):
                     text = text[4:]
-            judgments = json.loads(text)
-            for term, verdict in judgments.items():
-                if verdict.lower() == "bad":
-                    bad_terms.add(term.lower())
+            scores = json.loads(text)
+            for term, score in scores.items():
+                try:
+                    if int(score) < 3:
+                        bad_terms.add(term.lower())
+                except (ValueError, TypeError):
+                    pass
 
-        # Delete bad aliases
+        # Delete low-scoring aliases
         if bad_terms:
             for term in bad_terms:
                 conn.execute("DELETE FROM term_aliases WHERE term = ?", (term,))
