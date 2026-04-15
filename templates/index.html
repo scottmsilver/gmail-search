@@ -224,23 +224,34 @@ function setSort(s) {
 
 function setTopic(topicId) {
   activeTopic = topicId;
-  // Re-render facet active states without rebuilding the list
   renderFacets();
   document.querySelector('.topic-all').classList.toggle('active', topicId === null);
-  if (lastQuery) doSearch();
+  // Client-side filter: show/hide rows without re-searching
+  applyTopicFilter();
+}
+
+function applyTopicFilter() {
+  document.querySelectorAll('.thread-row').forEach(el => {
+    if (activeTopic === null) {
+      el.style.display = '';
+    } else {
+      const topics = el.dataset.topics ? el.dataset.topics.split(',') : [];
+      el.style.display = topics.includes(activeTopic) ? '' : 'none';
+    }
+  });
 }
 
 async function doSearch() {
   const q = queryEl.value.trim();
   if (!q) return;
   lastQuery = q;
+  activeTopic = null;  // reset topic filter on new search
   closeDetail();
   resultsEl.innerHTML = '<div class="empty">Searching...</div>';
   document.getElementById('sort-bar').style.display = 'block';
   document.getElementById('topics-pane').classList.add('open');
   const filterOn = document.getElementById('filter-toggle').checked;
-  let url = '/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort + '&filter=' + filterOn;
-  if (activeTopic !== null) url += '&topic=' + activeTopic;
+  const url = '/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort + '&filter=' + filterOn;
   const res = await fetch(url);
   const response = await res.json();
   const data = response.results || response;
@@ -263,7 +274,8 @@ async function doSearch() {
 
     const attIcon = '<svg class="icon icon-sm att" viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>';
 
-    return `<div class="thread-row" data-tid="${t.thread_id}" onclick="showThread('${t.thread_id}', this)">
+    const topicIds = (t.topic_ids || []).join(',');
+    return `<div class="thread-row" data-tid="${t.thread_id}" data-topics="${topicIds}" onclick="showThread('${t.thread_id}', this)">
       <div class="col-people">${replied}${esc(peopleStr)}${t.message_count > 1 ? '<span class="count">' + t.message_count + '</span>' : ''}</div>
       <div class="col-content">${hasAtt ? attIcon : ''}<span class="subj">${esc(t.subject)}</span><span class="sep">&mdash;</span><span class="snip">${esc(topSnip.substring(0, 120))}</span></div>
       <div class="col-date">${fmtDateSmart(t.date_last)}</div>

@@ -291,18 +291,67 @@ class SearchEngine:
                     return True
         return False
 
-    def _embed_query(self, query: str) -> np.ndarray:
+    def _get_cached_embedding(self, cache_key: str) -> np.ndarray | None:
+        """Look up a query embedding in the persistent cache."""
+        import struct
+
+        dims = self.config["embedding"]["dimensions"]
+        try:
+            conn = get_connection(self.db_path)
+            row = conn.execute(
+                "SELECT embedding FROM query_cache WHERE query_text = ? AND model = ?",
+                (cache_key, self.config["embedding"]["model"]),
+            ).fetchone()
+            conn.close()
+            if row:
+                return np.array(struct.unpack(f"{dims}f", row["embedding"]), dtype=np.float32)
+        except Exception:
+            pass
+        return None
+
+    def _store_cached_embedding(self, cache_key: str, vector: list[float]) -> None:
+        """Persist a query embedding to the cache."""
+        import struct
+        from datetime import datetime, timezone
+
+        try:
+            blob = struct.pack(f"{len(vector)}f", *vector)
+            conn = get_connection(self.db_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO query_cache (query_text, model, embedding, created_at) VALUES (?, ?, ?, ?)",
+                (cache_key, self.config["embedding"]["model"], blob, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def _call_embedding_api_with_retry(self, query: str, max_retries: int = 3) -> list[float]:
+        """Call the Gemini embedding API with exponential backoff on transient errors."""
         import time as _time
 
-        for attempt in range(3):
+        for attempt in range(max_retries):
             try:
-                return np.array(self.embedder.embed_query(query), dtype=np.float32)
+                return self.embedder.embed_query(query)
             except Exception as e:
-                if attempt < 2 and any(code in str(e) for code in ["503", "429", "UNAVAILABLE"]):
+                if attempt < max_retries - 1 and any(code in str(e) for code in ["503", "429", "UNAVAILABLE"]):
                     _time.sleep(2 ** (attempt + 1))
                     logger.warning(f"Query embed retry {attempt + 1}: {e}")
                 else:
                     raise
+
+    def _embed_query(self, query: str) -> np.ndarray:
+        """Embed a query, checking persistent cache first to avoid repeat API calls."""
+        cache_key = query.lower().strip()
+
+        cached = self._get_cached_embedding(cache_key)
+        if cached is not None:
+            logger.info(f"Query cache hit: '{query}'")
+            return cached
+
+        vector = self._call_embedding_api_with_retry(query)
+        self._store_cached_embedding(cache_key, vector)
+        return np.array(vector, dtype=np.float32)
 
     def _fetch_embedding_rows(self, embedding_ids: list[int]):
         conn = get_connection(self.db_path)

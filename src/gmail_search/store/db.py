@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS contact_frequency (
     score REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS query_cache (
+    query_text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (query_text, model)
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);

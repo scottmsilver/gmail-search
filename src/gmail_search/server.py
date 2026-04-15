@@ -85,29 +85,53 @@ def create_app(
         html_file = templates_dir / "index.html"
         return html_file.read_text()
 
+    def _lookup_message_topics(msg_ids):
+        """Map message IDs to their leaf topic IDs for client-side filtering."""
+        if not msg_ids:
+            return {}
+        conn_t = get_connection(db_path)
+        placeholders = ",".join("?" * len(msg_ids))
+        rows = conn_t.execute(
+            f"""SELECT mt.message_id, mt.topic_id FROM message_topics mt
+                JOIN topics t ON mt.topic_id = t.topic_id
+                WHERE mt.message_id IN ({placeholders})
+                AND t.topic_id NOT IN (SELECT DISTINCT parent_id FROM topics WHERE parent_id IS NOT NULL)""",
+            list(msg_ids),
+        ).fetchall()
+        conn_t.close()
+        result = {}
+        for r in rows:
+            result.setdefault(r["message_id"], []).append(r["topic_id"])
+        return result
+
     @app.get("/api/search")
     async def api_search(
         q: str = Query(...),
         k: int = Query(20, le=100),
         sort: str = Query("relevance"),
         filter: bool = Query(True, alias="filter"),
-        topic: str = Query(None),
     ):
         engine = get_engine()
         results = engine.search_threads(q, top_k=k, sort=sort, filter_offtopic=filter)
-        # Filter by topic if requested (includes child topics)
-        if topic is not None:
-            conn_t = get_connection(db_path)
-            topic_msg_ids = {
-                r["message_id"]
-                for r in conn_t.execute("SELECT message_id FROM message_topics WHERE topic_id = ?", (topic,)).fetchall()
-            }
-            conn_t.close()
-            results = [r for r in results if any(m.message_id in topic_msg_ids for m in r.matches)]
+
+        # Look up topic IDs for all result messages (for client-side filtering)
+        all_msg_ids = _collect_result_message_ids(results)
+        msg_topics = _lookup_message_topics(all_msg_ids)
+
         facets = _compute_topic_facets(db_path, results)
 
+        # Tag each result with its topic IDs
+        formatted = []
+        for r in results:
+            fr = _format_thread_result(r)
+            topics = set()
+            for m in r.matches:
+                topics.update(msg_topics.get(m.message_id, []))
+            fr["topic_ids"] = list(topics)
+            formatted.append(fr)
+
         return {
-            "results": [_format_thread_result(r) for r in results],
+            "results": formatted,
             "facets": facets,
         }
 
