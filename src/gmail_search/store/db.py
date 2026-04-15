@@ -667,17 +667,28 @@ def _validate_aliases_with_llm(conn):
             scores = json.loads(text)
             for term, score in scores.items():
                 try:
-                    if int(score) < 3:
+                    if int(score) < 2:
                         bad_terms.add(term.lower())
                 except (ValueError, TypeError):
                     pass
 
-        # Delete low-scoring aliases
+        # Delete low-scoring aliases, but keep high-Jaccard ones regardless
+        # (strong co-occurrence is a reliable signal even if LLM is unsure)
         if bad_terms:
+            protected = set()
             for term in bad_terms:
+                row = conn.execute("SELECT similarity FROM term_aliases WHERE term = ?", (term,)).fetchone()
+                if row and row["similarity"] >= 0.25:
+                    protected.add(term)
+
+            removable = bad_terms - protected
+            for term in removable:
                 conn.execute("DELETE FROM term_aliases WHERE term = ?", (term,))
             conn.commit()
-            logger.info(f"Removed {len(bad_terms)} noise aliases via LLM validation")
+            logger.info(
+                f"Removed {len(removable)} noise aliases via LLM validation"
+                f" (protected {len(protected)} high-Jaccard aliases)"
+            )
 
     except Exception as e:
         logger.warning(f"LLM alias validation failed, keeping all candidates: {e}")
