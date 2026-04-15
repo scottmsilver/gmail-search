@@ -178,6 +178,8 @@ def embed(ctx, model, budget, force, batch_api):
         cfg["budget"]["max_usd"] = budget
 
     if force:
+        from gmail_search.store.db import clear_query_cache
+
         emb_model = cfg["embedding"]["model"]
         conn = get_connection(ctx.obj["db_path"])
         deleted = conn.execute(
@@ -185,7 +187,8 @@ def embed(ctx, model, budget, force, batch_api):
         ).rowcount
         conn.commit()
         conn.close()
-        click.echo(f"Cleared {deleted} message embeddings for re-embedding.")
+        cleared = clear_query_cache(ctx.obj["db_path"])
+        click.echo(f"Cleared {deleted} message embeddings + {cleared} cached queries for re-embedding.")
 
     embedder = None
     if batch_api:
@@ -209,6 +212,7 @@ def embed(ctx, model, budget, force, batch_api):
 def reindex(ctx):
     from gmail_search.index.builder import build_index
     from gmail_search.store.db import (
+        clear_query_cache,
         rebuild_contact_frequency,
         rebuild_fts,
         rebuild_spell_dictionary,
@@ -220,6 +224,9 @@ def reindex(ctx):
     cfg = ctx.obj["config"]
     db = ctx.obj["db_path"]
     index_dir = ctx.obj["data_dir"] / "scann_index"
+    cleared = clear_query_cache(db)
+    if cleared:
+        click.echo(f"Cleared {cleared} cached query embeddings.")
     build_index(
         db_path=db, index_dir=index_dir, model=cfg["embedding"]["model"], dimensions=cfg["embedding"]["dimensions"]
     )

@@ -680,6 +680,15 @@ def rebuild_contact_frequency(db_path: Path) -> int:
     return count
 
 
+def clear_query_cache(db_path: Path) -> int:
+    """Clear the query embedding cache. Call after re-embedding or reindexing."""
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("DELETE FROM query_cache").rowcount
+    conn.commit()
+    conn.close()
+    return count
+
+
 def rebuild_fts(db_path: Path) -> int:
     """Rebuild FTS index from current messages and attachments. Returns count indexed."""
     conn = sqlite3.connect(db_path)

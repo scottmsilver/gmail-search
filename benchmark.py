@@ -39,7 +39,8 @@ def bench_query(query: str, k: int = 20, runs: int = 3) -> dict:
             times.append(elapsed)
             if resp.status_code == 200:
                 data = resp.json()
-                result_count = len(data)
+                results = data.get("results", data) if isinstance(data, dict) else data
+                result_count = len(results)
             else:
                 times[-1] = elapsed  # keep the time but mark error
                 result_count = -1

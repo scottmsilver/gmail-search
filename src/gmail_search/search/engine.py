@@ -726,7 +726,7 @@ class SearchEngine:
         if rerank and sort == "relevance" and len(thread_results) > 3:
             top_scores = [t.score for t in thread_results[:5]]
             score_spread = max(top_scores) - min(top_scores) if len(top_scores) >= 2 else 1.0
-            if score_spread < 0.15:
+            if score_spread < 0.05:
                 # Top results are tightly clustered — reranker will help
                 logger.info(f"Reranking: top-5 spread={score_spread:.3f} (tight)")
                 thread_results = self._llm_rerank(pq.text or query, thread_results, top_k)
