@@ -9,7 +9,6 @@ from gmail_search.embed.client import (
     embedding_to_blob,
     estimate_tokens,
     format_attachment_text,
-    format_message_text,
     truncate_to_token_limit,
 )
 from gmail_search.store.cost import check_budget, estimate_cost, record_cost
@@ -76,25 +75,36 @@ def run_embedding_pipeline(
             logger.warning(f"Budget limit ${max_budget:.2f} reached (${spent:.2f} spent). Stopping.")
             break
 
+        from gmail_search.embed.client import chunk_long_text  # noqa: F811
+        from gmail_search.embed.client import strip_quoted_replies
+
         batch = messages[i : i + batch_size]
-        texts = []
-        batch_msgs = []
+
+        # Build chunks: each message may produce 1+ chunks
+        all_texts: list[str] = []
+        chunk_owners: list[tuple] = []  # (msg, chunk_index, chunk_text)
 
         for msg in batch:
-            text = format_message_text(
-                from_addr=msg.from_addr,
-                to_addr=msg.to_addr,
-                date=msg.date.strftime("%Y-%m-%d"),
-                subject=msg.subject,
-                body=msg.body_text,
-            )
-            text = truncate_to_token_limit(text, MAX_INPUT_TOKENS)
-            texts.append(text)
-            batch_msgs.append(msg)
+            metadata_prefix = f"From: {msg.from_addr} | To: {msg.to_addr} | Date: {msg.date.strftime('%Y-%m-%d')} | Subject: {msg.subject} | "
+            body = strip_quoted_replies(msg.body_text)
+            full_text = metadata_prefix + body
+            chunks = chunk_long_text(full_text, max_chunk_tokens=500)
 
-        vectors = _retry_api_call(embedder.embed_texts_batch, texts)
+            for ci, chunk in enumerate(chunks):
+                chunk = truncate_to_token_limit(chunk, MAX_INPUT_TOKENS)
+                # Prepend metadata to non-first chunks so they have context
+                if ci > 0 and not chunk.startswith("From:"):
+                    chunk = f"From: {msg.from_addr} | Subject: {msg.subject} | {chunk}"
+                all_texts.append(chunk)
+                chunk_owners.append((msg, ci, chunk))
 
-        total_tokens = sum(estimate_tokens(t) for t in texts)
+        if not all_texts:
+            continue
+
+        # Embed all chunks in one batch call
+        vectors = _retry_api_call(embedder.embed_texts_batch, all_texts)
+
+        total_tokens = sum(estimate_tokens(t) for t in all_texts)
         cost = estimate_cost(input_tokens=total_tokens)
         record_cost(
             conn,
@@ -106,15 +116,16 @@ def run_embedding_pipeline(
             message_id=f"batch_{i}",
         )
 
-        for msg, text, vector in zip(batch_msgs, texts, vectors):
+        for (msg, ci, chunk_text), vector in zip(chunk_owners, vectors):
+            chunk_type = "message" if ci == 0 else f"message_chunk_{ci}"
             insert_embedding(
                 conn,
                 EmbeddingRecord(
                     id=None,
                     message_id=msg.id,
                     attachment_id=None,
-                    chunk_type="message",
-                    chunk_text=text[:500],
+                    chunk_type=chunk_type,
+                    chunk_text=chunk_text[:500],
                     embedding=embedding_to_blob(vector),
                     model=model,
                 ),

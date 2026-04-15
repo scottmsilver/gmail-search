@@ -20,6 +20,62 @@ def truncate_to_token_limit(text: str, max_tokens: int) -> str:
     return text[:max_chars]
 
 
+def chunk_long_text(text: str, max_chunk_tokens: int = 500, overlap_tokens: int = 50) -> list[str]:
+    """Split long text into overlapping chunks for better embedding coverage.
+
+    Short texts (under max_chunk_tokens) are returned as-is.
+    Long texts are split at paragraph boundaries, with overlap to
+    preserve context at chunk edges.
+    """
+    if estimate_tokens(text) <= max_chunk_tokens:
+        return [text]
+
+    # Split on double newlines (paragraphs) first
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return [text]
+
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_tokens = 0
+
+    for para in paragraphs:
+        para_tokens = estimate_tokens(para)
+
+        # If a single paragraph exceeds max, split it by sentences
+        if para_tokens > max_chunk_tokens:
+            if current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = []
+                current_tokens = 0
+            # Split by sentences
+            sentences = para.replace(". ", ".\n").split("\n")
+            for sent in sentences:
+                sent_tokens = estimate_tokens(sent)
+                if current_tokens + sent_tokens > max_chunk_tokens and current_chunk:
+                    chunks.append(" ".join(current_chunk))
+                    # Keep last sentence for overlap
+                    current_chunk = current_chunk[-1:] if current_chunk else []
+                    current_tokens = estimate_tokens(" ".join(current_chunk))
+                current_chunk.append(sent)
+                current_tokens += sent_tokens
+        elif current_tokens + para_tokens > max_chunk_tokens and current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+            # Keep last paragraph for overlap
+            current_chunk = current_chunk[-1:] if current_chunk else []
+            current_tokens = estimate_tokens("\n\n".join(current_chunk))
+            current_chunk.append(para)
+            current_tokens += para_tokens
+        else:
+            current_chunk.append(para)
+            current_tokens += para_tokens
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+
+    return chunks if chunks else [text]
+
+
 def strip_quoted_replies(body: str) -> str:
     """Remove quoted reply chains from email body to improve embedding quality."""
     import re
