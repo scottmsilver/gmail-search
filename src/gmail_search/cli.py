@@ -254,6 +254,7 @@ def update(ctx, max_messages, budget, batch_size):
     from gmail_search.gmail.client import download_messages
     from gmail_search.index.builder import build_index
     from gmail_search.store.db import (  # noqa: E501
+        JobProgress,
         rebuild_contact_frequency,
         rebuild_fts,
         rebuild_spell_dictionary,
@@ -273,6 +274,8 @@ def update(ctx, max_messages, budget, batch_size):
     service = build_gmail_service(data_dir)
     max_msg = max_messages or cfg["download"].get("max_messages")
     index_dir = data_dir / "scann_index"
+
+    progress = JobProgress(db_path, "update")
 
     total_downloaded = 0
     total_extracted = 0
@@ -295,6 +298,8 @@ def update(ctx, max_messages, budget, batch_size):
         click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
         click.echo(f"{'='*50}")
 
+        progress.update("download", total_downloaded, max_msg or current_limit, f"batch {batch_num}")
+
         # Download one batch
         dl_count = download_messages(
             service=service,
@@ -313,6 +318,7 @@ def update(ctx, max_messages, budget, batch_size):
         click.echo(f"Downloaded {dl_count} messages.")
 
         # Extract new attachments
+        progress.update("extract", total_downloaded, max_msg or current_limit, f"+{dl_count} downloaded")
         click.echo("Extracting attachments...")
         conn = get_connection(db_path)
         rows = conn.execute(
@@ -350,6 +356,7 @@ def update(ctx, max_messages, budget, batch_size):
         click.echo(f"Extracted {extracted} attachments.")
 
         # Embed new messages + attachments
+        progress.update("embed", total_downloaded, max_msg or current_limit, f"+{extracted} extracted")
         click.echo("Embedding...")
         conn = get_connection(db_path)
         ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
@@ -362,6 +369,7 @@ def update(ctx, max_messages, budget, batch_size):
         click.echo(f"Embedded {emb_count} chunks.")
 
         # Reindex so search is live
+        progress.update("reindex", total_downloaded, max_msg or current_limit, f"+{emb_count} embedded")
         click.echo("Reindexing...")
         build_index(
             db_path=db_path,
@@ -387,6 +395,8 @@ def update(ctx, max_messages, budget, batch_size):
             click.echo("Reached max message limit.")
             break
 
+    progress.finish("done", f"+{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded")
+
     click.echo(f"\n{'='*50}")
     click.echo(f"Done! +{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded")
     conn = get_connection(db_path)
@@ -395,6 +405,32 @@ def update(ctx, max_messages, budget, batch_size):
     total_cost = get_total_spend(conn)
     conn.close()
     click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
+
+
+@main.command(help="Show progress of running jobs")
+@common_options
+@click.pass_context
+def progress(ctx):
+    from gmail_search.store.db import JobProgress
+
+    jobs = JobProgress.get(ctx.obj["db_path"])
+    if not jobs:
+        click.echo("No jobs found.")
+        return
+    for j in jobs:
+        pct = f"{j['completed']*100//j['total']}%" if j["total"] > 0 else "?"
+        elapsed = ""
+        try:
+            from datetime import datetime
+
+            start = datetime.fromisoformat(j["started_at"])
+            updated = datetime.fromisoformat(j["updated_at"])
+            elapsed = f" ({(updated - start).total_seconds():.0f}s elapsed)"
+        except Exception:
+            pass
+        click.echo(f"{j['job_id']}: {j['status']} | {j['stage']} | {j['completed']}/{j['total']} ({pct}){elapsed}")
+        if j["detail"]:
+            click.echo(f"  {j['detail']}")
 
 
 @main.command(help="Search your email")

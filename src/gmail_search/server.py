@@ -262,8 +262,16 @@ def create_app(
             filename=row["filename"],
         )
 
+    @app.get("/api/progress")
+    async def api_progress():
+        from gmail_search.store.db import JobProgress
+
+        return JobProgress.get(db_path) or []
+
     @app.get("/api/status")
     async def api_status():
+        from gmail_search.store.db import JobProgress
+
         conn = get_connection(db_path)
         msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
@@ -271,6 +279,8 @@ def create_app(
         total_cost = get_total_spend(conn)
         ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"])
         conn.close()
+        jobs = JobProgress.get(db_path) or []
+        running = [j for j in jobs if j["status"] == "running"]
         return {
             "messages": msg_count,
             "embeddings": emb_count,
@@ -278,6 +288,7 @@ def create_app(
             "date_newest": dates["newest"],
             "total_cost_usd": round(total_cost, 4),
             "budget_remaining_usd": round(remaining, 4),
+            "running_job": running[0] if running else None,
         }
 
     return app

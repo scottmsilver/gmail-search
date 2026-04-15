@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS query_cache (
     PRIMARY KEY (query_text, model)
 );
 
+CREATE TABLE IF NOT EXISTS job_progress (
+    job_id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    total INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    detail TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS term_aliases (
     term TEXT PRIMARY KEY,
     expansions TEXT NOT NULL DEFAULT '[]',
@@ -772,6 +783,58 @@ def rebuild_contact_frequency(db_path: Path) -> int:
     count = conn.execute("SELECT COUNT(*) FROM contact_frequency").fetchone()[0]
     conn.close()
     return count
+
+
+class JobProgress:
+    """Track progress of a long-running job via SQLite (queryable from other processes)."""
+
+    def __init__(self, db_path: Path, job_id: str):
+        self.db_path = db_path
+        self.job_id = job_id
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO job_progress (job_id, stage, status, total, completed, detail, started_at, updated_at) VALUES (?, '', 'running', 0, 0, '', ?, ?)",
+            (job_id, now, now),
+        )
+        conn.commit()
+        conn.close()
+
+    def update(self, stage: str, completed: int, total: int, detail: str = ""):
+        from datetime import datetime, timezone
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE job_progress SET stage=?, completed=?, total=?, detail=?, updated_at=? WHERE job_id=?",
+            (stage, completed, total, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def finish(self, status: str = "done", detail: str = ""):
+        from datetime import datetime, timezone
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE job_progress SET status=?, detail=?, updated_at=? WHERE job_id=?",
+            (status, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get(db_path: Path, job_id: str = None) -> dict | list | None:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        if job_id:
+            row = conn.execute("SELECT * FROM job_progress WHERE job_id=?", (job_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        rows = conn.execute("SELECT * FROM job_progress ORDER BY updated_at DESC LIMIT 10").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
 
 def clear_query_cache(db_path: Path) -> int:

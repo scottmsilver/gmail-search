@@ -96,8 +96,9 @@ def download_messages(
     downloaded = 0
     progress = tqdm(total=len(to_download), desc="Downloading messages")
 
-    # Cap batch size to avoid rate limits
-    effective_batch_size = min(batch_size, 10)
+    # Gmail API allows 250 quota units/sec, messages.get = 5 units each = 50 msg/sec
+    # Batch of 25 with 0.5s sleep = ~50 msg/sec theoretical
+    effective_batch_size = min(batch_size, 25)
 
     for i in range(0, len(to_download), effective_batch_size):
         batch_ids = to_download[i : i + effective_batch_size]
@@ -143,8 +144,8 @@ def download_messages(
                 logger.warning(f"{len(failed_ids)} requests rate limited, retrying in {wait}s...")
                 time.sleep(wait)
 
-        # Throttle between batches to stay under quota
-        time.sleep(1)
+        # Throttle: 25 msgs * 5 units = 125 units per batch, limit is 250/sec
+        time.sleep(0.5)
 
         for raw in batch_results:
             msg, att_metas = parse_message(raw)
