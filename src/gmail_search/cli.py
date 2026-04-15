@@ -213,6 +213,7 @@ def reindex(ctx):
         rebuild_fts,
         rebuild_spell_dictionary,
         rebuild_thread_summary,
+        rebuild_topics,
     )
 
     cfg = ctx.obj["config"]
@@ -227,8 +228,9 @@ def reindex(ctx):
     thread_count = rebuild_thread_summary(ctx.obj["db_path"])
     contact_count = rebuild_contact_frequency(ctx.obj["db_path"])
     word_count = rebuild_spell_dictionary(ctx.obj["db_path"], ctx.obj["data_dir"])
+    topic_count = rebuild_topics(ctx.obj["db_path"])
     click.echo(
-        f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts + {word_count} words."
+        f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts + {word_count} words + {topic_count} topics."
     )
 
 
@@ -244,7 +246,12 @@ def update(ctx, max_messages, budget, batch_size):
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
     from gmail_search.index.builder import build_index
-    from gmail_search.store.db import rebuild_contact_frequency, rebuild_fts, rebuild_thread_summary
+    from gmail_search.store.db import (
+        rebuild_contact_frequency,
+        rebuild_fts,
+        rebuild_spell_dictionary,
+        rebuild_thread_summary,
+    )
     from gmail_search.store.queries import get_attachments_for_message
 
     cfg = ctx.obj["config"]
@@ -358,6 +365,7 @@ def update(ctx, max_messages, budget, batch_size):
         rebuild_thread_summary(db_path)
         rebuild_contact_frequency(db_path)
         rebuild_spell_dictionary(db_path, data_dir)
+        rebuild_topics(db_path)
 
         conn = get_connection(db_path)
         msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]

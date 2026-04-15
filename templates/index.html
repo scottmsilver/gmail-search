@@ -46,6 +46,16 @@
   /* Main content area */
   .main { flex: 1; display: flex; overflow: hidden; }
 
+  /* Topic sidebar */
+  .topics-pane { width: 180px; flex-shrink: 0; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--border-light); padding: 8px 0; display: none; }
+  .topics-pane.open { display: block; }
+  .topics-title { font-size: 11px; font-weight: 500; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 16px 4px; }
+  .topic-item { display: flex; align-items: center; justify-content: space-between; padding: 5px 16px; font-size: 12px; color: var(--text); cursor: pointer; border-radius: 0 16px 16px 0; margin-right: 8px; }
+  .topic-item:hover { background: var(--hover); }
+  .topic-item.active { background: var(--accent-bg); color: var(--accent); font-weight: 500; }
+  .topic-count { font-size: 10px; color: var(--text-faint); }
+  .topic-all { color: var(--text-secondary); font-weight: 400; }
+
   /* Results list */
   .results-pane { flex: 1; overflow-y: auto; }
   .results-inner { padding: 0; }
@@ -53,6 +63,9 @@
   .sort-bar a { color: var(--accent); text-decoration: none; cursor: pointer; padding: 3px 8px; border-radius: 4px; margin: 0 2px; }
   .sort-bar a:hover { background: var(--accent-bg); }
   .sort-bar a.active { font-weight: 500; background: var(--accent-bg); }
+  .sort-bar .sep { margin: 0 8px; color: var(--border); }
+  .sort-bar label { cursor: pointer; user-select: none; }
+  .sort-bar input[type="checkbox"] { margin-right: 4px; vertical-align: middle; }
   .empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary); font-size: 14px; }
 
   /* Thread row */
@@ -156,10 +169,17 @@
   <span class="status-text" id="status"></span>
 </div>
 <div class="main">
+  <div class="topics-pane" id="topics-pane">
+    <div class="topics-title">Topics</div>
+    <div class="topic-item active topic-all" onclick="setTopic(null)">All topics</div>
+    <div id="topics-list"></div>
+  </div>
   <div class="results-pane" id="results-pane">
     <div class="sort-bar" id="sort-bar">
       Sort: <a class="active" onclick="setSort('relevance')" id="sort-relevance">Relevance</a>
       <a onclick="setSort('recent')" id="sort-recent">Recent</a>
+      <span class="sep">|</span>
+      <label><input type="checkbox" id="filter-toggle" checked onchange="doSearch()"> Hide off-topic</label>
     </div>
     <div class="results-inner" id="results">
       <div class="empty">Search your email</div>
@@ -183,6 +203,7 @@ const detailEl = document.getElementById('detail');
 let currentSort = 'relevance';
 let lastQuery = '';
 let activeThreadId = null;
+let activeTopic = null;
 
 queryEl.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 document.addEventListener('keydown', e => {
@@ -197,6 +218,18 @@ function setSort(s) {
   if (lastQuery) doSearch();
 }
 
+function setTopic(topicId) {
+  activeTopic = topicId;
+  document.querySelectorAll('.topic-item').forEach(el => el.classList.remove('active'));
+  if (topicId === null) {
+    document.querySelector('.topic-all').classList.add('active');
+  } else {
+    const el = document.querySelector(`.topic-item[data-tid="${topicId}"]`);
+    if (el) el.classList.add('active');
+  }
+  if (lastQuery) doSearch();
+}
+
 async function doSearch() {
   const q = queryEl.value.trim();
   if (!q) return;
@@ -204,7 +237,11 @@ async function doSearch() {
   closeDetail();
   resultsEl.innerHTML = '<div class="empty">Searching...</div>';
   document.getElementById('sort-bar').style.display = 'block';
-  const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort);
+  document.getElementById('topics-pane').classList.add('open');
+  const filterOn = document.getElementById('filter-toggle').checked;
+  let url = '/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort + '&filter=' + filterOn;
+  if (activeTopic !== null) url += '&topic=' + activeTopic;
+  const res = await fetch(url);
   const data = await res.json();
   if (!data.length) { resultsEl.innerHTML = '<div class="empty">No results found</div>'; return; }
 
@@ -338,6 +375,14 @@ fetch('/api/status').then(r => r.json()).then(s => {
   const newest = s.date_newest ? fmtDateSmart(s.date_newest) : '?';
   document.getElementById('status').textContent =
     s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' – ' + newest;
+});
+
+// Load topics for sidebar
+fetch('/api/topics').then(r => r.json()).then(topics => {
+  const list = document.getElementById('topics-list');
+  list.innerHTML = topics.map(t =>
+    `<div class="topic-item" data-tid="${t.topic_id}" onclick="setTopic(${t.topic_id})">${esc(t.label)}<span class="topic-count">${t.message_count}</span></div>`
+  ).join('');
 });
 </script>
 </body>

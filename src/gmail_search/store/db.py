@@ -65,6 +65,21 @@ CREATE TABLE IF NOT EXISTS thread_summary (
     date_last TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS topics (
+    topic_id INTEGER PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    top_senders TEXT NOT NULL DEFAULT '[]',
+    sample_subjects TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS message_topics (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id),
+    topic_id INTEGER NOT NULL REFERENCES topics(topic_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_topics_topic ON message_topics(topic_id);
+
 CREATE TABLE IF NOT EXISTS contact_frequency (
     email TEXT PRIMARY KEY,
     message_count INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +168,184 @@ def rebuild_thread_summary(db_path: Path) -> int:
 
     conn.commit()
     count = len(threads)
+    conn.close()
+    return count
+
+
+def _load_message_embeddings(conn, limit=50000):
+    """Load message embeddings with metadata for clustering."""
+    import struct
+
+    import numpy as np
+
+    rows = conn.execute(
+        """SELECT e.message_id, e.embedding, m.subject, m.from_addr
+           FROM embeddings e JOIN messages m ON e.message_id = m.id
+           WHERE e.chunk_type = 'message'
+           ORDER BY m.date DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    return {
+        "msg_ids": [r["message_id"] for r in rows],
+        "subjects": [r["subject"] for r in rows],
+        "senders": [r["from_addr"] for r in rows],
+        "vectors": np.array(
+            [list(struct.unpack("3072f", r["embedding"])) for r in rows],
+            dtype=np.float32,
+        ),
+    }
+
+
+def _kmeans_cluster(vectors, n_clusters, n_iterations=15, seed=42):
+    """Run k-means++ on vectors. Returns cluster labels (numpy array)."""
+    import numpy as np
+
+    rng = np.random.RandomState(seed)
+
+    # K-means++ initialization: pick first centroid randomly, then pick
+    # subsequent centroids with probability proportional to distance
+    centroids = [vectors[rng.randint(len(vectors))]]
+    for _ in range(n_clusters - 1):
+        dists = np.min([np.sum((vectors - c) ** 2, axis=1) for c in centroids], axis=0)
+        probs = dists / (dists.sum() + 1e-10)
+        centroids.append(vectors[rng.choice(len(vectors), p=probs)])
+    centroids = np.array(centroids)
+
+    # Iterate: assign each vector to nearest centroid, then update centroids
+    for _ in range(n_iterations):
+        sims = vectors @ centroids.T
+        labels = np.argmax(sims, axis=1)
+        for k in range(n_clusters):
+            mask = labels == k
+            if mask.sum() > 0:
+                centroids[k] = vectors[mask].mean(axis=0)
+
+    return labels
+
+
+def _extract_sender_name(from_addr: str) -> str:
+    """Extract display name from 'Name <email>' format."""
+    return from_addr.split("<")[0].strip().strip('"')[:30]
+
+
+def _summarize_cluster(indices, subjects, senders):
+    """Compute top senders and sample subjects for a cluster."""
+    from collections import Counter
+
+    sender_names = [_extract_sender_name(senders[i]) for i in indices]
+    top_senders = [name for name, _ in Counter(sender_names).most_common(5)]
+    sample_subjects = [subjects[i][:80] for i in indices[:8]]
+    return top_senders, sample_subjects
+
+
+def _store_cluster(conn, cluster_id, msg_ids, indices, top_senders, sample_subjects):
+    """Write one cluster's topic row and message assignments to the DB."""
+    import json
+
+    conn.execute(
+        "INSERT INTO topics (topic_id, label, message_count, top_senders, sample_subjects) VALUES (?, ?, ?, ?, ?)",
+        (cluster_id, "", len(indices), json.dumps(top_senders), json.dumps(sample_subjects)),
+    )
+    for idx in indices:
+        conn.execute(
+            "INSERT OR REPLACE INTO message_topics (message_id, topic_id) VALUES (?, ?)",
+            (msg_ids[idx], cluster_id),
+        )
+
+
+def _auto_label_topics(conn):
+    """Use Gemini Flash Lite to generate short topic labels from cluster summaries."""
+    import json
+    import logging
+
+    logger = logging.getLogger(__name__)
+    topic_rows = conn.execute(
+        "SELECT topic_id, top_senders, sample_subjects, message_count FROM topics ORDER BY message_count DESC"
+    ).fetchall()
+
+    # Build a summary of each cluster for the LLM
+    summaries = []
+    for t in topic_rows:
+        sndrs = json.loads(t["top_senders"])
+        subjs = json.loads(t["sample_subjects"])
+        summaries.append(
+            f"Cluster {t['topic_id']} ({t['message_count']} msgs): "
+            f"Senders: {', '.join(sndrs[:3])}. "
+            f"Subjects: {'; '.join(subjs[:4])}"
+        )
+
+    try:
+        import os
+
+        from google import genai
+
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=api_key) if api_key else genai.Client()
+
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=(
+                "Label each email cluster with a short 2-4 word topic name. "
+                "Return ONLY a JSON object mapping cluster number to label. "
+                'Example: {"0": "Shopping Deals", "3": "Travel Plans"}\n\n' + "\n".join(summaries)
+            ),
+        )
+        text = response.text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        label_map = json.loads(text)
+
+        for tid_str, label in label_map.items():
+            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, int(tid_str)))
+        conn.commit()
+        logger.info(f"Auto-labeled {len(label_map)} topics")
+
+    except Exception as e:
+        logger.warning(f"Auto-labeling failed, using top sender as label: {e}")
+        for t in topic_rows:
+            sndrs = json.loads(t["top_senders"])
+            label = sndrs[0] if sndrs else f"Topic {t['topic_id']}"
+            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, t["topic_id"]))
+        conn.commit()
+
+
+def rebuild_topics(db_path: Path, n_clusters: int = 25) -> int:
+    """Cluster messages into topics using k-means on embeddings. Returns topic count."""
+    import logging
+
+    import numpy as np
+
+    logger = logging.getLogger(__name__)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    data = _load_message_embeddings(conn)
+    if len(data["msg_ids"]) < n_clusters * 5:
+        logger.warning(f"Not enough messages ({len(data['msg_ids'])}) for {n_clusters} clusters")
+        conn.close()
+        return 0
+
+    logger.info(f"Clustering {len(data['msg_ids'])} messages into {n_clusters} topics")
+    labels = _kmeans_cluster(data["vectors"], n_clusters)
+
+    conn.execute("DELETE FROM message_topics")
+    conn.execute("DELETE FROM topics")
+
+    for cluster_id in range(n_clusters):
+        indices = np.where(labels == cluster_id)[0]
+        if len(indices) == 0:
+            continue
+        top_senders, sample_subjects = _summarize_cluster(indices, data["subjects"], data["senders"])
+        _store_cluster(conn, cluster_id, data["msg_ids"], indices, top_senders, sample_subjects)
+
+    conn.commit()
+    _auto_label_topics(conn)
+
+    count = conn.execute("SELECT COUNT(*) FROM topics WHERE message_count > 0").fetchone()[0]
     conn.close()
     return count
 

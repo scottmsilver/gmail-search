@@ -389,7 +389,9 @@ class SearchEngine:
             logger.info(f"Query corrected: '{raw_query}' -> '{result}'")
         return result
 
-    def search_threads(self, query: str, top_k: int = 20, sort: str = "relevance") -> list[ThreadResult]:
+    def search_threads(
+        self, query: str, top_k: int = 20, sort: str = "relevance", filter_offtopic: bool = True
+    ) -> list[ThreadResult]:
         """Thread-grouped search with multi-signal ranking."""
         cleaned_query = self._clean_query(query)
         pq = parse_query(cleaned_query)
@@ -638,7 +640,35 @@ class SearchEngine:
             else:
                 logger.info(f"Skipping rerank: top-5 spread={score_spread:.3f} (clear winner)")
 
+        # Off-topic filter: drop results with large score gap from #1
+        if filter_offtopic and len(thread_results) >= 2:
+            thread_results = self._filter_offtopic(thread_results)
+
         return thread_results[:top_k]
+
+    @staticmethod
+    def _filter_offtopic(results: list[ThreadResult]) -> list[ThreadResult]:
+        """Drop results that are clearly off-topic based on score gap from best result.
+
+        Uses adaptive threshold: keeps results within 60% of the best score,
+        but always keeps at least 3 results.
+        """
+        if not results:
+            return results
+
+        best_score = results[0].score
+        if best_score <= 0:
+            return results
+
+        threshold = best_score * 0.4  # drop anything below 40% of best
+        filtered = [r for r in results if r.score >= threshold]
+
+        # Always return at least 3 results
+        if len(filtered) < 3:
+            return results[: max(3, len(filtered))]
+
+        logger.info(f"Off-topic filter: {len(results)} -> {len(filtered)} (threshold={threshold:.3f})")
+        return filtered
 
     @staticmethod
     def _normalize_subject(subject: str) -> str:

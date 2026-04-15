@@ -34,9 +34,24 @@ def create_app(
         return html_file.read_text()
 
     @app.get("/api/search")
-    async def api_search(q: str = Query(...), k: int = Query(20, le=100), sort: str = Query("relevance")):
+    async def api_search(
+        q: str = Query(...),
+        k: int = Query(20, le=100),
+        sort: str = Query("relevance"),
+        filter: bool = Query(True, alias="filter"),
+        topic: int = Query(None),
+    ):
         engine = get_engine()
-        results = engine.search_threads(q, top_k=k, sort=sort)
+        results = engine.search_threads(q, top_k=k, sort=sort, filter_offtopic=filter)
+        # Filter by topic if requested
+        if topic is not None:
+            conn_t = get_connection(db_path)
+            topic_msg_ids = {
+                r["message_id"]
+                for r in conn_t.execute("SELECT message_id FROM message_topics WHERE topic_id = ?", (topic,)).fetchall()
+            }
+            conn_t.close()
+            results = [r for r in results if any(m.message_id in topic_msg_ids for m in r.matches)]
         return [
             {
                 "thread_id": r.thread_id,
@@ -99,6 +114,25 @@ def create_app(
             )
         conn.close()
         return {"thread_id": thread_id, "messages": messages}
+
+    @app.get("/api/topics")
+    async def api_topics():
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT topic_id, label, message_count, top_senders FROM topics ORDER BY message_count DESC"
+        ).fetchall()
+        conn.close()
+        import json as _json
+
+        return [
+            {
+                "topic_id": r["topic_id"],
+                "label": r["label"],
+                "message_count": r["message_count"],
+                "top_senders": _json.loads(r["top_senders"]),
+            }
+            for r in rows
+        ]
 
     @app.get("/api/message/{message_id}")
     async def api_message(message_id: str):
