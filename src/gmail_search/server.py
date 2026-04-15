@@ -52,25 +52,44 @@ def create_app(
                 ids.add(m.message_id)
         return ids
 
-    def _compute_topic_facets(db_path_inner, results):
-        """Find leaf topics that contain result messages, with hit counts."""
-        msg_ids = _collect_result_message_ids(results)
-        if not msg_ids:
-            return []
-        conn_f = get_connection(db_path_inner)
-        placeholders = ",".join("?" * len(msg_ids))
-        rows = conn_f.execute(
-            f"""SELECT t.topic_id, t.label, COUNT(DISTINCT mt.message_id) as hit_count
-                FROM message_topics mt
-                JOIN topics t ON mt.topic_id = t.topic_id
-                WHERE mt.message_id IN ({placeholders})
-                AND t.topic_id NOT IN (SELECT DISTINCT parent_id FROM topics WHERE parent_id IS NOT NULL)
-                GROUP BY t.topic_id
-                ORDER BY hit_count DESC""",
-            list(msg_ids),
-        ).fetchall()
-        conn_f.close()
-        return [{"topic_id": r["topic_id"], "label": r["label"], "count": r["hit_count"]} for r in rows]
+    def _compute_topic_facets(results, msg_topics):
+        """Count how many result threads fall into each leaf topic.
+
+        A thread belongs to a topic if any of its matching messages do.
+        Counts threads (not messages) so facet counts match the result list.
+        """
+        from collections import Counter
+
+        topic_thread_counts: Counter = Counter()
+        topic_labels: dict[str, str] = {}
+
+        for r in results:
+            thread_topics = set()
+            for m in r.matches:
+                for tid in msg_topics.get(m.message_id, []):
+                    thread_topics.add(tid)
+            for tid in thread_topics:
+                topic_thread_counts[tid] += 1
+
+        # Get labels for the topics we found
+        if topic_thread_counts:
+            conn_f = get_connection(db_path)
+            placeholders = ",".join("?" * len(topic_thread_counts))
+            rows = conn_f.execute(
+                f"SELECT topic_id, label FROM topics WHERE topic_id IN ({placeholders})",
+                list(topic_thread_counts.keys()),
+            ).fetchall()
+            conn_f.close()
+            topic_labels = {r["topic_id"]: r["label"] for r in rows}
+
+        return sorted(
+            [
+                {"topic_id": tid, "label": topic_labels.get(tid, tid), "count": count}
+                for tid, count in topic_thread_counts.items()
+            ],
+            key=lambda f: f["count"],
+            reverse=True,
+        )
 
     _engine: SearchEngine | None = None
 
@@ -118,7 +137,7 @@ def create_app(
         all_msg_ids = _collect_result_message_ids(results)
         msg_topics = _lookup_message_topics(all_msg_ids)
 
-        facets = _compute_topic_facets(db_path, results)
+        facets = _compute_topic_facets(results, msg_topics)
 
         # Tag each result with its topic IDs
         formatted = []
