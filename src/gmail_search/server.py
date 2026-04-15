@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
@@ -34,22 +34,71 @@ def create_app(
         return html_file.read_text()
 
     @app.get("/api/search")
-    async def api_search(q: str = Query(...), k: int = Query(20)):
+    async def api_search(q: str = Query(...), k: int = Query(20, le=100), sort: str = Query("relevance")):
         engine = get_engine()
-        results = engine.search(q, top_k=k)
+        results = engine.search_threads(q, top_k=k, sort=sort)
         return [
             {
+                "thread_id": r.thread_id,
                 "score": r.score,
-                "message_id": r.message_id,
+                "similarity": r.similarity,
                 "subject": r.subject,
-                "from_addr": r.from_addr,
-                "date": r.date,
-                "snippet": r.snippet,
-                "match_type": r.match_type,
-                "attachment_filename": r.attachment_filename,
+                "participants": r.participants,
+                "message_count": r.message_count,
+                "date_first": r.date_first,
+                "date_last": r.date_last,
+                "user_replied": r.user_replied,
+                "matches": [
+                    {
+                        "message_id": m.message_id,
+                        "score": m.score,
+                        "from_addr": m.from_addr,
+                        "date": m.date,
+                        "snippet": m.snippet,
+                        "match_type": m.match_type,
+                        "attachment_filename": m.attachment_filename,
+                    }
+                    for m in r.matches
+                ],
             }
             for r in results
         ]
+
+    @app.get("/api/thread/{thread_id}")
+    async def api_thread(thread_id: str):
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT id FROM messages WHERE thread_id = ? ORDER BY date",
+            (thread_id,),
+        ).fetchall()
+        messages = []
+        for row in rows:
+            msg = get_message(conn, row["id"])
+            if msg is None:
+                continue
+            attachments = get_attachments_for_message(conn, msg.id)
+            messages.append(
+                {
+                    "id": msg.id,
+                    "from_addr": msg.from_addr,
+                    "to_addr": msg.to_addr,
+                    "subject": msg.subject,
+                    "body_text": msg.body_text,
+                    "date": msg.date.isoformat(),
+                    "labels": msg.labels,
+                    "attachments": [
+                        {
+                            "id": a.id,
+                            "filename": a.filename,
+                            "mime_type": a.mime_type,
+                            "size_bytes": a.size_bytes,
+                        }
+                        for a in attachments
+                    ],
+                }
+            )
+        conn.close()
+        return {"thread_id": thread_id, "messages": messages}
 
     @app.get("/api/message/{message_id}")
     async def api_message(message_id: str):
@@ -57,7 +106,7 @@ def create_app(
         msg = get_message(conn, message_id)
         if msg is None:
             conn.close()
-            return {"error": "Message not found"}
+            return JSONResponse({"error": "Message not found"}, status_code=404)
         attachments = get_attachments_for_message(conn, message_id)
         conn.close()
         return {
@@ -67,7 +116,6 @@ def create_app(
             "to_addr": msg.to_addr,
             "subject": msg.subject,
             "body_text": msg.body_text,
-            "body_html": msg.body_html,
             "date": msg.date.isoformat(),
             "labels": msg.labels,
             "attachments": [
@@ -90,9 +138,15 @@ def create_app(
         ).fetchone()
         conn.close()
         if row is None or not row["raw_path"]:
-            return {"error": "Attachment not found"}
+            return JSONResponse({"error": "Attachment not found"}, status_code=404)
+        # Validate path is under data_dir to prevent path traversal
+        resolved = Path(row["raw_path"]).resolve()
+        if not str(resolved).startswith(str(data_dir.resolve())):
+            return JSONResponse({"error": "Invalid attachment path"}, status_code=403)
+        if not resolved.exists():
+            return JSONResponse({"error": "Attachment file missing"}, status_code=404)
         return FileResponse(
-            row["raw_path"],
+            str(resolved),
             media_type=row["mime_type"],
             filename=row["filename"],
         )
@@ -102,12 +156,15 @@ def create_app(
         conn = get_connection(db_path)
         msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        dates = conn.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
         total_cost = get_total_spend(conn)
         ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"])
         conn.close()
         return {
             "messages": msg_count,
             "embeddings": emb_count,
+            "date_oldest": dates["oldest"],
+            "date_newest": dates["newest"],
             "total_cost_usd": round(total_cost, 4),
             "budget_remaining_usd": round(remaining, 4),
         }

@@ -1,7 +1,26 @@
+# Personal data — credentials, tokens, email DB, attachments, indexes
 data/
+
+# Local config overrides
+config.local.yaml
+
+# Python
 *.pyc
 __pycache__/
 *.egg-info/
 dist/
 build/
 .venv/
+.pytest_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*

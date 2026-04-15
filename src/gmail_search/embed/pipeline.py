@@ -28,6 +28,24 @@ TEXT_BATCH_SIZE = 100
 MAX_INPUT_TOKENS = 8192
 
 
+def _retry_api_call(fn, *args, max_retries=5, **kwargs):
+    """Retry an API call with exponential backoff on transient errors."""
+    import time as _time
+
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err = str(e)
+            if any(code in err for code in ["503", "429", "UNAVAILABLE", "rateLimitExceeded", "500"]):
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"API error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
+                _time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"API call failed after {max_retries} retries")
+
+
 def run_embedding_pipeline(
     db_path: Path,
     config: dict[str, Any],
@@ -69,7 +87,7 @@ def run_embedding_pipeline(
             texts.append(text)
             batch_msgs.append(msg)
 
-        vectors = embedder.embed_texts_batch(texts)
+        vectors = _retry_api_call(embedder.embed_texts_batch, texts)
 
         total_tokens = sum(estimate_tokens(t) for t in texts)
         cost = estimate_cost(input_tokens=total_tokens)
@@ -117,7 +135,7 @@ def run_embedding_pipeline(
 
                 text = format_attachment_text(att.filename, msg_subject, att.extracted_text)
                 text = truncate_to_token_limit(text, MAX_INPUT_TOKENS)
-                vector = embedder.embed_texts_batch([text])[0]
+                vector = _retry_api_call(embedder.embed_texts_batch, [text])[0]
 
                 tokens = estimate_tokens(text)
                 cost = estimate_cost(input_tokens=tokens)
@@ -154,8 +172,12 @@ def run_embedding_pipeline(
                 else:
                     image_files = []
 
-                for img_file in image_files:
-                    if embedding_exists(conn, msg_id, att.id, "attachment_image", model):
+                for img_idx, img_file in enumerate(image_files):
+                    chunk_key = f"attachment_image_{img_idx}"
+                    # Check both new per-image key and legacy single key
+                    if embedding_exists(conn, msg_id, att.id, chunk_key, model):
+                        continue
+                    if img_idx == 0 and embedding_exists(conn, msg_id, att.id, "attachment_image", model):
                         continue
                     ok, spent, remaining = check_budget(conn, max_budget)
                     if not ok:
@@ -164,7 +186,7 @@ def run_embedding_pipeline(
                         return total_embedded
 
                     try:
-                        vector = embedder.embed_image(img_file)
+                        vector = _retry_api_call(embedder.embed_image, img_file)
                     except Exception as e:
                         logger.warning(f"Failed to embed image {img_file}: {e}")
                         continue
@@ -186,7 +208,7 @@ def run_embedding_pipeline(
                             id=None,
                             message_id=msg_id,
                             attachment_id=att.id,
-                            chunk_type="attachment_image",
+                            chunk_type=chunk_key,
                             chunk_text=f"[Image: {img_file.name} from {att.filename}]",
                             embedding=embedding_to_blob(vector),
                             model=model,

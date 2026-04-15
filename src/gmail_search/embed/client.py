@@ -3,7 +3,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from google import genai
+from google import genai  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,10 @@ class GeminiEmbedder:
         self.dimensions = config["embedding"]["dimensions"]
         self.task_type_document = config["embedding"]["task_type_document"]
         self.task_type_query = config["embedding"]["task_type_query"]
-        self.client = genai.Client()
+        import os
+
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        self.client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
     def embed_text(self, text: str, task_type: str | None = None) -> list[float]:
         if task_type is None:

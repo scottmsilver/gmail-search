@@ -5,104 +5,339 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gmail Search</title>
 <style>
+  :root {
+    --bg: #f6f8fc;
+    --surface: #fff;
+    --text: #202124;
+    --text-secondary: #5f6368;
+    --text-faint: #999;
+    --border: #e0e0e0;
+    --border-light: #f0f0f0;
+    --accent: #1a73e8;
+    --accent-bg: #e8f0fe;
+    --hover: #f6f8fc;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
-  h1 { margin-bottom: 20px; color: #333; }
-  .search-box { display: flex; gap: 8px; margin-bottom: 20px; }
-  .search-box input { flex: 1; padding: 12px 16px; font-size: 16px; border: 2px solid #ddd; border-radius: 8px; outline: none; }
-  .search-box input:focus { border-color: #4285f4; }
-  .search-box button { padding: 12px 24px; font-size: 16px; background: #4285f4; color: white; border: none; border-radius: 8px; cursor: pointer; }
-  .search-box button:hover { background: #3367d6; }
-  .result { background: white; padding: 16px; margin-bottom: 12px; border-radius: 8px; border: 1px solid #e0e0e0; cursor: pointer; }
-  .result:hover { border-color: #4285f4; }
-  .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-  .result-subject { font-weight: 600; color: #1a1a1a; }
-  .result-score { font-size: 12px; color: #999; }
-  .result-meta { font-size: 13px; color: #666; margin-bottom: 8px; }
-  .result-snippet { font-size: 14px; color: #444; line-height: 1.4; }
-  .badge { display: inline-block; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #e8f0fe; color: #4285f4; margin-left: 8px; }
-  .detail-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 100; }
-  .detail-panel { position: fixed; top: 0; right: 0; width: 600px; height: 100vh; background: white; overflow-y: auto; padding: 24px; z-index: 101; box-shadow: -2px 0 10px rgba(0,0,0,0.2); }
-  .detail-panel h2 { margin-bottom: 12px; }
-  .detail-panel .meta { color: #666; margin-bottom: 16px; font-size: 14px; }
-  .detail-panel .body { white-space: pre-wrap; line-height: 1.6; font-size: 14px; }
-  .detail-panel .close { float: right; cursor: pointer; font-size: 24px; color: #666; }
-  .status-bar { font-size: 12px; color: #999; margin-bottom: 16px; }
-  .empty { text-align: center; padding: 40px; color: #999; }
+  html, body { height: 100%; }
+  body { font-family: 'Google Sans', Roboto, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
+
+  /* Top bar */
+  .topbar {
+    background: var(--surface);
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  .logo { font-size: 20px; font-weight: 400; color: var(--text-secondary); white-space: nowrap; letter-spacing: -0.5px; }
+  .logo span { color: var(--accent); font-weight: 500; }
+  .search-box { flex: 1; max-width: 780px; position: relative; }
+  .search-box input {
+    width: 100%; padding: 10px 16px 10px 40px; font-size: 15px;
+    border: 1px solid var(--border); border-radius: 24px;
+    background: var(--bg); outline: none; color: var(--text);
+  }
+  .search-box input:focus { background: var(--surface); border-color: var(--accent); box-shadow: 0 1px 6px rgba(26,115,232,0.15); }
+  .search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--text-secondary); font-size: 16px; pointer-events: none; }
+  .status-text { font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+
+  /* Main content area */
+  .main { flex: 1; display: flex; overflow: hidden; }
+
+  /* Results list */
+  .results-pane { flex: 1; overflow-y: auto; }
+  .results-inner { padding: 0; }
+  .sort-bar { padding: 6px 20px; font-size: 12px; color: var(--text-secondary); display: none; border-bottom: 1px solid var(--border-light); background: var(--surface); }
+  .sort-bar a { color: var(--accent); text-decoration: none; cursor: pointer; padding: 3px 8px; border-radius: 4px; margin: 0 2px; }
+  .sort-bar a:hover { background: var(--accent-bg); }
+  .sort-bar a.active { font-weight: 500; background: var(--accent-bg); }
+  .empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary); font-size: 14px; }
+
+  /* Thread row */
+  .thread-row {
+    display: flex; align-items: center;
+    padding: 0 20px; height: 40px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border-light);
+    cursor: pointer; font-size: 13px;
+    transition: none;
+  }
+  .thread-row:hover { box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px 0 rgba(60,64,67,.3), 0 1px 3px 1px rgba(60,64,67,.15); z-index: 1; position: relative; }
+  .thread-row.active { background: #c2dbff; }
+
+  .col-people { width: 220px; flex-shrink: 0; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col-people .count { font-size: 10px; color: var(--text-secondary); font-weight: 400; margin-left: 2px; }
+  .col-people .replied { color: var(--text-secondary); font-size: 12px; margin-right: 3px; }
+  .col-content { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 16px; }
+  .col-content .subj { color: var(--text); font-weight: 500; }
+  .col-content .sep { color: var(--text-faint); margin: 0 6px; font-weight: 300; }
+  .col-content .snip { color: var(--text-secondary); font-weight: 400; }
+  .col-content .att { color: var(--text-secondary); font-size: 13px; margin-right: 4px; }
+  .col-date { width: 75px; flex-shrink: 0; text-align: right; font-size: 11px; color: var(--text-secondary); }
+
+  /* Detail panel — right side */
+  .detail-pane {
+    width: 0; flex-shrink: 0; background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto; overflow-x: hidden;
+    transition: width 0.15s ease;
+    display: flex; flex-direction: column;
+  }
+  .detail-pane.open { width: 55%; min-width: 500px; }
+  .detail-header {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+  }
+  .detail-header .close {
+    float: right; cursor: pointer; font-size: 18px; color: var(--text-secondary);
+    width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; margin: -4px -8px 0 0;
+  }
+  .detail-header .close:hover { background: #f1f3f4; }
+  .detail-header h2 { font-size: 16px; font-weight: 400; color: var(--text); padding-right: 36px; line-height: 1.4; }
+  .detail-header .thread-info { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+  .detail-messages { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+  /* Message card */
+  .msg-card { margin: 0 8px 1px; border-radius: 6px; }
+  .msg-card.collapsed .msg-body { display: none; }
+  .msg-card.collapsed .msg-header-summary { display: block; }
+  .msg-card.expanded .msg-header-summary { display: none; }
+
+  .msg-header {
+    padding: 8px 12px; cursor: pointer;
+    display: flex; align-items: flex-start; gap: 10px; border-radius: 6px;
+  }
+  .msg-header:hover { background: var(--hover); }
+  .msg-avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 500; color: #fff; flex-shrink: 0;
+  }
+  .msg-header-text { flex: 1; min-width: 0; }
+  .msg-header-top { display: flex; justify-content: space-between; align-items: center; }
+  .msg-from { font-size: 13px; font-weight: 500; color: var(--text); }
+  .msg-date { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+  .msg-to { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+  .msg-header-summary { font-size: 12px; color: var(--text-secondary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .msg-body { padding: 0 12px 12px 54px; }
+  .msg-body-text { font-size: 13px; line-height: 1.6; color: var(--text); white-space: pre-wrap; word-wrap: break-word; max-width: 100%; }
+  .msg-attachments { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .msg-att-item {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 16px;
+    font-size: 12px; color: var(--text); text-decoration: none;
+  }
+  .msg-att-item:hover { background: var(--accent-bg); border-color: var(--accent); }
+  .msg-att-size { color: var(--text-secondary); font-size: 11px; }
+
+  /* Keyboard hint */
+  .kbd-hint { position: fixed; bottom: 12px; right: 12px; font-size: 11px; color: var(--text-faint); }
+  .kbd-hint kbd { padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); font-family: inherit; font-size: 10px; }
+
+  /* SVG icons */
+  .icon { display: inline-block; vertical-align: middle; fill: currentColor; width: 16px; height: 16px; }
+  .icon-sm { width: 14px; height: 14px; }
+  .icon-search { width: 18px; height: 18px; }
 </style>
 </head>
 <body>
-<h1>Gmail Search</h1>
-<div class="status-bar" id="status"></div>
-<div class="search-box">
-  <input type="text" id="query" placeholder="Search your email..." autofocus>
-  <button onclick="doSearch()">Search</button>
+<div class="topbar">
+  <div class="logo"><span>Gmail</span> Search</div>
+  <div class="search-box">
+    <span class="search-icon"><svg class="icon icon-search" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></span>
+    <input type="text" id="query" placeholder="Search mail" autofocus>
+  </div>
+  <span class="status-text" id="status"></span>
 </div>
-<div id="results"></div>
-<div class="detail-overlay" id="overlay" onclick="closeDetail()"></div>
-<div class="detail-panel" id="detail" style="display:none">
-  <span class="close" onclick="closeDetail()">&times;</span>
-  <div id="detail-content"></div>
-</div>
-<script>
-const query = document.getElementById('query');
-const results = document.getElementById('results');
-
-query.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-
-async function doSearch() {
-  const q = query.value.trim();
-  if (!q) return;
-  results.innerHTML = '<div class="empty">Searching...</div>';
-  const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&k=20');
-  const data = await res.json();
-  if (!data.length) { results.innerHTML = '<div class="empty">No results found.</div>'; return; }
-  results.innerHTML = data.map((r, i) => `
-    <div class="result" onclick="showDetail('${r.message_id}')">
-      <div class="result-header">
-        <span class="result-subject">${esc(r.subject)}</span>
-        <span class="result-score">${r.score.toFixed(3)}</span>
-      </div>
-      <div class="result-meta">
-        ${esc(r.from_addr)} &middot; ${r.date ? r.date.split('T')[0] : ''}
-        <span class="badge">${r.match_type}</span>
-        ${r.attachment_filename ? '<span class="badge">' + esc(r.attachment_filename) + '</span>' : ''}
-      </div>
-      <div class="result-snippet">${esc(r.snippet)}</div>
+<div class="main">
+  <div class="results-pane" id="results-pane">
+    <div class="sort-bar" id="sort-bar">
+      Sort: <a class="active" onclick="setSort('relevance')" id="sort-relevance">Relevance</a>
+      <a onclick="setSort('recent')" id="sort-recent">Recent</a>
     </div>
-  `).join('');
+    <div class="results-inner" id="results">
+      <div class="empty">Search your email</div>
+    </div>
+  </div>
+  <div class="detail-pane" id="detail">
+    <div class="detail-header">
+      <div class="close" onclick="closeDetail()"><svg class="icon" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg></div>
+      <h2 id="detail-subject"></h2>
+      <div class="thread-info" id="detail-info"></div>
+    </div>
+    <div class="detail-messages" id="detail-messages"></div>
+  </div>
+</div>
+<div class="kbd-hint"><kbd>Esc</kbd> close</div>
+<script>
+const COLORS = ['#1a73e8','#ea4335','#34a853','#fbbc04','#e8710a','#9334e6','#f538a0','#00897b','#7b1fa2','#c2185b'];
+const queryEl = document.getElementById('query');
+const resultsEl = document.getElementById('results');
+const detailEl = document.getElementById('detail');
+let currentSort = 'relevance';
+let lastQuery = '';
+let activeThreadId = null;
+
+queryEl.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeDetail();
+  if (e.key === '/' && document.activeElement !== queryEl) { e.preventDefault(); queryEl.focus(); queryEl.select(); }
+});
+
+function setSort(s) {
+  currentSort = s;
+  document.getElementById('sort-relevance').classList.toggle('active', s === 'relevance');
+  document.getElementById('sort-recent').classList.toggle('active', s === 'recent');
+  if (lastQuery) doSearch();
 }
 
-async function showDetail(id) {
-  const res = await fetch('/api/message/' + id);
-  const m = await res.json();
-  document.getElementById('detail-content').innerHTML = `
-    <h2>${esc(m.subject)}</h2>
-    <div class="meta">
-      <strong>From:</strong> ${esc(m.from_addr)}<br>
-      <strong>To:</strong> ${esc(m.to_addr)}<br>
-      <strong>Date:</strong> ${m.date}<br>
-      <strong>Labels:</strong> ${(m.labels||[]).join(', ')}
-    </div>
-    <div class="body">${esc(m.body_text)}</div>
-    ${m.attachments && m.attachments.length ? '<h3 style="margin-top:16px">Attachments</h3>' + m.attachments.map(a =>
-      '<div style="margin:4px 0"><a href="/api/attachment/' + a.id + '" target="_blank">' + esc(a.filename) + '</a> (' + (a.size_bytes/1024).toFixed(1) + ' KB)</div>'
-    ).join('') : ''}
-  `;
-  document.getElementById('detail').style.display = 'block';
-  document.getElementById('overlay').style.display = 'block';
+async function doSearch() {
+  const q = queryEl.value.trim();
+  if (!q) return;
+  lastQuery = q;
+  closeDetail();
+  resultsEl.innerHTML = '<div class="empty">Searching...</div>';
+  document.getElementById('sort-bar').style.display = 'block';
+  const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&k=30&sort=' + currentSort);
+  const data = await res.json();
+  if (!data.length) { resultsEl.innerHTML = '<div class="empty">No results found</div>'; return; }
+
+  resultsEl.innerHTML = data.map(t => {
+    const people = t.participants.map(p => shortName(p));
+    const peopleStr = people.length > 3
+      ? people[0] + ', ' + people[1] + ', +' + (people.length - 2)
+      : people.join(', ');
+    const topSnip = t.matches[0] ? cleanSnippet(t.matches[0].snippet.replace(/^From:.*?\| /g, '')) : '';
+    const hasAtt = t.matches.some(m => m.attachment_filename);
+    const replied = t.user_replied ? '<span class="replied" title="You replied"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg></span>' : '';
+
+    const attIcon = '<svg class="icon icon-sm att" viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>';
+
+    return `<div class="thread-row" data-tid="${t.thread_id}" onclick="showThread('${t.thread_id}', this)">
+      <div class="col-people">${replied}${esc(peopleStr)}${t.message_count > 1 ? '<span class="count">' + t.message_count + '</span>' : ''}</div>
+      <div class="col-content">${hasAtt ? attIcon : ''}<span class="subj">${esc(t.subject)}</span><span class="sep">&mdash;</span><span class="snip">${esc(topSnip.substring(0, 120))}</span></div>
+      <div class="col-date">${fmtDateSmart(t.date_last)}</div>
+    </div>`;
+  }).join('');
+}
+
+async function showThread(threadId, rowEl) {
+  // Highlight active row
+  document.querySelectorAll('.thread-row.active').forEach(el => el.classList.remove('active'));
+  if (rowEl) rowEl.classList.add('active');
+  activeThreadId = threadId;
+
+  const res = await fetch('/api/thread/' + threadId);
+  const t = await res.json();
+  const msgs = t.messages;
+  if (!msgs || !msgs.length) return;
+
+  document.getElementById('detail-subject').textContent = msgs[0].subject;
+  document.getElementById('detail-info').textContent = msgs.length + ' message' + (msgs.length > 1 ? 's' : '') + '  ·  ' + fmtDateSmart(msgs[0].date) + ' – ' + fmtDateSmart(msgs[msgs.length-1].date);
+
+  const lastIdx = msgs.length - 1;
+  document.getElementById('detail-messages').innerHTML = msgs.map((m, i) => {
+    const expanded = i === lastIdx;
+    const color = colorFor(m.from_addr);
+    const initial = shortName(m.from_addr).charAt(0).toUpperCase();
+    const snippet = (m.body_text || '').substring(0, 90).replace(/\n/g, ' ');
+
+    return `<div class="msg-card ${expanded ? 'expanded' : 'collapsed'}">
+      <div class="msg-header" onclick="toggleCard(this)">
+        <div class="msg-avatar" style="background:${color}">${initial}</div>
+        <div class="msg-header-text">
+          <div class="msg-header-top">
+            <span class="msg-from">${esc(shortName(m.from_addr))}</span>
+            <span class="msg-date">${fmtDateFull(m.date)}</span>
+          </div>
+          <div class="msg-to">to ${esc(shortRecipients(m.to_addr))}</div>
+          <div class="msg-header-summary">${esc(snippet)}</div>
+        </div>
+      </div>
+      <div class="msg-body">
+        <div class="msg-body-text">${esc(m.body_text)}</div>
+        ${m.attachments && m.attachments.length ? `<div class="msg-attachments">${m.attachments.map(a =>
+          `<a class="msg-att-item" href="/api/attachment/${a.id}" target="_blank"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg> ${esc(a.filename)} <span class="msg-att-size">${fmtSize(a.size_bytes)}</span></a>`
+        ).join('')}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  detailEl.classList.add('open');
+  const msgArea = document.getElementById('detail-messages');
+  setTimeout(() => msgArea.scrollTop = msgArea.scrollHeight, 50);
+}
+
+function toggleCard(header) {
+  const card = header.closest('.msg-card');
+  card.classList.toggle('collapsed');
+  card.classList.toggle('expanded');
 }
 
 function closeDetail() {
-  document.getElementById('detail').style.display = 'none';
-  document.getElementById('overlay').style.display = 'none';
+  detailEl.classList.remove('open');
+  document.querySelectorAll('.thread-row.active').forEach(el => el.classList.remove('active'));
+  activeThreadId = null;
 }
 
 function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+function shortName(addr) {
+  if (!addr) return '';
+  const m = addr.match(/^"?([^"<]+)"?\s*</);
+  if (m) return m[1].trim();
+  if (addr.includes('@')) return addr.split('@')[0];
+  return addr;
+}
+
+function shortRecipients(to) {
+  if (!to) return '';
+  const parts = to.split(',').map(s => shortName(s.trim()));
+  if (parts.length > 3) return parts.slice(0, 3).join(', ') + ', +' + (parts.length - 3);
+  return parts.join(', ');
+}
+
+function cleanSnippet(s) { return s.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+function fmtDateSmart(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  const now = new Date();
+  if (dt.toDateString() === now.toDateString()) return dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (dt.getFullYear() === now.getFullYear()) return dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return dt.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function fmtDateFull(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  return dt.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' +
+         dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function colorFor(addr) {
+  let h = 0;
+  for (let i = 0; i < addr.length; i++) h = ((h << 5) - h + addr.charCodeAt(i)) | 0;
+  return COLORS[Math.abs(h) % COLORS.length];
+}
+
 fetch('/api/status').then(r => r.json()).then(s => {
+  const oldest = s.date_oldest ? fmtDateSmart(s.date_oldest) : '?';
+  const newest = s.date_newest ? fmtDateSmart(s.date_newest) : '?';
   document.getElementById('status').textContent =
-    s.messages + ' messages | ' + s.embeddings + ' embeddings | $' + s.total_cost_usd.toFixed(2) + ' spent';
+    s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' – ' + newest;
 });
 </script>
 </body>

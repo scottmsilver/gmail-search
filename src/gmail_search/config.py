@@ -20,7 +20,7 @@ DEFAULTS: dict[str, Any] = {
         "max_attachment_text_tokens": 50000,
     },
     "download": {
-        "batch_size": 100,
+        "batch_size": 25,
         "max_messages": None,
     },
     "search": {
@@ -47,13 +47,20 @@ def load_config(
     config_path: Path | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    cfg = DEFAULTS.copy()
     cfg = _deep_merge(DEFAULTS, {})
 
     if config_path and config_path.exists():
         with open(config_path) as f:
             file_cfg = yaml.safe_load(f) or {}
         cfg = _deep_merge(cfg, file_cfg)
+
+    # Load local overrides (gitignored)
+    if config_path:
+        local_path = config_path.parent / "config.local.yaml"
+        if local_path.exists():
+            with open(local_path) as f:
+                local_cfg = yaml.safe_load(f) or {}
+            cfg = _deep_merge(cfg, local_cfg)
 
     if data_dir is None:
         data_dir = Path.cwd() / "data"

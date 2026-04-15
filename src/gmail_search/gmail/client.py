@@ -14,6 +14,15 @@ from gmail_search.store.queries import get_sync_state, set_sync_state, upsert_at
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_filename(filename: str) -> str:
+    """Strip path components to prevent directory traversal."""
+    # Take only the final component, strip any path separators
+    name = Path(filename).name
+    # Remove any remaining dangerous characters
+    name = name.replace("\x00", "").strip(". ")
+    return name or "unnamed_attachment"
+
+
 def _download_attachment_data(service: Resource, message_id: str, attachment_id: str) -> bytes:
     import base64
 
@@ -43,9 +52,25 @@ def download_messages(
         kwargs: dict[str, Any] = {"userId": "me", "maxResults": 500}
         if page_token:
             kwargs["pageToken"] = page_token
-        result = service.users().messages().list(**kwargs).execute()
+
+        for attempt in range(5):
+            try:
+                result = service.users().messages().list(**kwargs).execute()
+                break
+            except Exception as e:
+                if "429" in str(e) or "rateLimitExceeded" in str(e):
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"Rate limited on list, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        else:
+            logger.error("Failed to list messages after 5 retries")
+            break
+
         messages = result.get("messages", [])
         message_ids.extend(m["id"] for m in messages)
+        logger.info(f"  ...fetched {len(message_ids)} IDs so far")
 
         if max_messages and len(message_ids) >= max_messages:
             message_ids = message_ids[:max_messages]
@@ -71,36 +96,55 @@ def download_messages(
     downloaded = 0
     progress = tqdm(total=len(to_download), desc="Downloading messages")
 
-    for i in range(0, len(to_download), batch_size):
-        batch_ids = to_download[i : i + batch_size]
+    # Cap batch size to avoid rate limits
+    effective_batch_size = min(batch_size, 10)
+
+    for i in range(0, len(to_download), effective_batch_size):
+        batch_ids = to_download[i : i + effective_batch_size]
         batch_results: list[dict] = []
+        failed_ids: list[str] = []
 
         def _callback(request_id, response, exception):
             if exception:
-                logger.warning(f"Error fetching {request_id}: {exception}")
+                if "429" in str(exception) or "rateLimitExceeded" in str(exception):
+                    failed_ids.append(request_id)
+                else:
+                    logger.warning(f"Error fetching {request_id}: {exception}")
             else:
                 batch_results.append(response)
 
-        batch = service.new_batch_http_request(callback=_callback)
-        for mid in batch_ids:
-            batch.add(
-                service.users().messages().get(userId="me", id=mid, format="full"),
-                request_id=mid,
-            )
+        for attempt in range(5):
+            batch = service.new_batch_http_request(callback=_callback)
+            ids_to_try = list(failed_ids) if (attempt > 0 and failed_ids) else list(batch_ids)
+            failed_ids.clear()  # clear in-place so callback closure sees same list
 
-        retries = 0
-        while retries < 5:
+            for mid in ids_to_try:
+                batch.add(
+                    service.users().messages().get(userId="me", id=mid, format="full"),
+                    request_id=mid,
+                )
+
             try:
                 batch.execute()
-                break
             except Exception as e:
                 if "429" in str(e) or "rateLimitExceeded" in str(e):
-                    wait = 2**retries
-                    logger.warning(f"Rate limited, retrying in {wait}s...")
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"Rate limited on batch, retrying in {wait}s...")
                     time.sleep(wait)
-                    retries += 1
+                    failed_ids.extend(ids_to_try)  # retry all
+                    continue
                 else:
                     raise
+
+            if not failed_ids:
+                break
+            else:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"{len(failed_ids)} requests rate limited, retrying in {wait}s...")
+                time.sleep(wait)
+
+        # Throttle between batches to stay under quota
+        time.sleep(1)
 
         for raw in batch_results:
             msg, att_metas = parse_message(raw)
@@ -119,7 +163,7 @@ def download_messages(
 
                 msg_att_dir = attachments_dir / msg.id
                 msg_att_dir.mkdir(exist_ok=True)
-                raw_path = msg_att_dir / att_meta["filename"]
+                raw_path = msg_att_dir / _sanitize_filename(att_meta["filename"])
 
                 try:
                     data = _download_attachment_data(service, msg.id, att_meta["attachment_id"])

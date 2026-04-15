@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     extracted_text TEXT,
     image_path TEXT,
-    raw_path TEXT
+    raw_path TEXT,
+    UNIQUE(message_id, filename)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -53,9 +54,37 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS thread_summary (
+    thread_id TEXT PRIMARY KEY,
+    subject TEXT NOT NULL DEFAULT '',
+    participants TEXT NOT NULL DEFAULT '[]',
+    all_from_addrs TEXT NOT NULL DEFAULT '[]',
+    all_labels TEXT NOT NULL DEFAULT '[]',
+    message_count INTEGER NOT NULL DEFAULT 0,
+    date_first TEXT NOT NULL DEFAULT '',
+    date_last TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    message_id UNINDEXED,
+    subject,
+    body_text,
+    from_addr,
+    to_addr,
+    tokenize='porter unicode61'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS attachments_fts USING fts5(
+    message_id UNINDEXED,
+    attachment_id UNINDEXED,
+    filename,
+    extracted_text,
+    tokenize='porter unicode61'
+);
 """
 
 
@@ -64,6 +93,90 @@ def init_db(db_path: Path) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()
+
+
+def rebuild_thread_summary(db_path: Path) -> int:
+    """Precompute thread metadata for fast search ranking. Returns thread count."""
+    import json
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+
+    conn.execute("DELETE FROM thread_summary")
+
+    rows = conn.execute(
+        """SELECT thread_id, from_addr, date, labels, subject
+           FROM messages ORDER BY date"""
+    ).fetchall()
+
+    threads: dict[str, dict] = {}
+    for r in rows:
+        tid = r["thread_id"]
+        if tid not in threads:
+            threads[tid] = {
+                "subject": r["subject"],
+                "from_addrs": [],
+                "all_labels": set(),
+                "dates": [],
+            }
+        t = threads[tid]
+        t["from_addrs"].append(r["from_addr"])
+        t["dates"].append(r["date"])
+        for label in json.loads(r["labels"]):
+            t["all_labels"].add(label)
+
+    for tid, t in threads.items():
+        participants = list(dict.fromkeys(t["from_addrs"]))  # ordered unique
+        conn.execute(
+            """INSERT INTO thread_summary
+               (thread_id, subject, participants, all_from_addrs, all_labels,
+                message_count, date_first, date_last)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                tid,
+                t["subject"],
+                json.dumps(participants),
+                json.dumps(t["from_addrs"]),
+                json.dumps(sorted(t["all_labels"])),
+                len(t["dates"]),
+                t["dates"][0],
+                t["dates"][-1],
+            ),
+        )
+
+    conn.commit()
+    count = len(threads)
+    conn.close()
+    return count
+
+
+def rebuild_fts(db_path: Path) -> int:
+    """Rebuild FTS index from current messages and attachments. Returns count indexed."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    # Clear and repopulate messages FTS
+    conn.execute("DELETE FROM messages_fts")
+    conn.execute(
+        """INSERT INTO messages_fts (message_id, subject, body_text, from_addr, to_addr)
+           SELECT id, subject, body_text, from_addr, to_addr FROM messages"""
+    )
+
+    # Clear and repopulate attachments FTS
+    conn.execute("DELETE FROM attachments_fts")
+    conn.execute(
+        """INSERT INTO attachments_fts (message_id, attachment_id, filename, extracted_text)
+           SELECT message_id, id, filename, COALESCE(extracted_text, '') FROM attachments
+           WHERE extracted_text IS NOT NULL AND extracted_text != ''"""
+    )
+
+    count = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
+    att_count = conn.execute("SELECT COUNT(*) FROM attachments_fts").fetchone()[0]
+
+    conn.commit()
+    conn.close()
+    return count + att_count
 
 
 def get_connection(db_path: Path) -> sqlite3.Connection:

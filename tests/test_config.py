@@ -8,7 +8,7 @@ def test_load_config_defaults(tmp_path):
     assert cfg["embedding"]["model"] == "gemini-embedding-2-preview"
     assert cfg["embedding"]["dimensions"] == 3072
     assert cfg["attachments"]["max_file_size_mb"] == 10
-    assert cfg["download"]["batch_size"] == 100
+    assert cfg["download"]["batch_size"] == 25
     assert cfg["search"]["default_top_k"] == 20
     assert cfg["server"]["port"] == 8080
 

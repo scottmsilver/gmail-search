@@ -28,7 +28,11 @@ def get_credentials(data_dir: Path) -> Credentials:
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
             creds = flow.run_local_server(port=0)
+        # Write token with restricted permissions (contains refresh token)
+        import stat
+
         token_path.write_text(creds.to_json())
+        token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
 
     return creds
 

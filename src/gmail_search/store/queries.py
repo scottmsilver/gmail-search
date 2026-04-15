@@ -83,7 +83,10 @@ def upsert_attachment(conn: sqlite3.Connection, att: Attachment) -> int:
     cursor = conn.execute(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
            extracted_text, image_path, raw_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(message_id, filename) DO UPDATE SET
+             mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
+             raw_path=excluded.raw_path""",
         (att.message_id, att.filename, att.mime_type, att.size_bytes, att.extracted_text, att.image_path, att.raw_path),
     )
     conn.commit()
@@ -156,3 +159,70 @@ def set_sync_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_sync_state(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+def _escape_fts_query(query: str) -> str:
+    """Escape a user query for safe use in FTS5 MATCH.
+
+    Wraps each token in double quotes to prevent FTS5 operator injection.
+    """
+    tokens = query.split()
+    return " ".join(f'"{t}"' for t in tokens if t)
+
+
+def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[str, float]:
+    """Search messages + attachments via FTS5, return {message_id: bm25_score}.
+
+    BM25 scores from FTS5 are negative (lower = better match), so we negate them.
+    Returns normalized scores in 0-1 range.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    safe_query = _escape_fts_query(query)
+    if not safe_query:
+        return {}
+
+    scores: dict[str, float] = {}
+
+    # Search messages
+    try:
+        rows = conn.execute(
+            """SELECT message_id, rank FROM messages_fts
+               WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?""",
+            (safe_query, limit),
+        ).fetchall()
+        for r in rows:
+            mid = r["message_id"]
+            raw = -r["rank"]  # negate: FTS5 rank is negative, lower=better
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
+    except sqlite3.OperationalError as e:
+        logger.warning(f"FTS message search failed: {e}")
+
+    # Search attachments
+    try:
+        rows = conn.execute(
+            """SELECT message_id, rank FROM attachments_fts
+               WHERE attachments_fts MATCH ? ORDER BY rank LIMIT ?""",
+            (safe_query, limit),
+        ).fetchall()
+        for r in rows:
+            mid = r["message_id"]
+            raw = -r["rank"]
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
+    except sqlite3.OperationalError as e:
+        logger.warning(f"FTS attachment search failed: {e}")
+
+    # Normalize to 0-1 (single result gets 1.0)
+    if scores:
+        max_score = max(scores.values())
+        min_score = min(scores.values())
+        if max_score == min_score:
+            scores = {mid: 1.0 for mid in scores}
+        else:
+            score_range = max_score - min_score
+            scores = {mid: (s - min_score) / score_range for mid, s in scores.items()}
+
+    return scores

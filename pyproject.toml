@@ -20,6 +20,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest", "requests"]
+
 [project.scripts]
 gmail-search = "gmail_search.cli:main"
 
