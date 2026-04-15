@@ -234,6 +234,10 @@ class SearchEngine:
         self.contact_freq: dict[str, float] = {}
         self._load_contact_frequency()
 
+        # Load spell corrector from corpus dictionary
+        self._spell = None
+        self._load_spell_dictionary()
+
     def _detect_user_email(self):
         """Find the most frequent sender — that's the user."""
         try:
@@ -260,6 +264,24 @@ class SearchEngine:
             self.contact_freq = {r["email"]: r["score"] for r in rows}
         except Exception:
             self.contact_freq = {}
+
+    def _load_spell_dictionary(self):
+        """Load SymSpell dictionary built from email corpus."""
+        try:
+            from symspellpy import SymSpell, Verbosity  # noqa: F401
+
+            data_dir = Path(self.config.get("data_dir", "data"))
+            dict_path = data_dir / "spell_dictionary.txt"
+            if dict_path.exists():
+                self._spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+                self._spell.load_dictionary(str(dict_path), term_index=0, count_index=1)
+                logger.info(f"Loaded spell dictionary: {dict_path}")
+            else:
+                logger.info("No spell dictionary found, spell correction disabled")
+        except ImportError:
+            logger.info("symspellpy not installed, spell correction disabled")
+        except Exception as e:
+            logger.warning(f"Failed to load spell dictionary: {e}")
 
     def _user_in_participants(self, from_addrs: list[str]) -> bool:
         for addr in from_addrs:
@@ -339,31 +361,33 @@ class SearchEngine:
         return results[:top_k]
 
     def _clean_query(self, raw_query: str) -> str:
-        """Spell-correct and normalize query using Gemini Flash Lite."""
-        try:
-            import os
+        """Spell-correct query using local corpus dictionary. Sub-millisecond."""
+        if not self._spell:
+            return raw_query
 
-            from google import genai  # noqa: F811
+        from symspellpy import Verbosity
 
-            api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-            client = genai.Client(api_key=api_key) if api_key else genai.Client()
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-lite-preview",
-                contents=(
-                    "Fix any spelling errors in this email search query. "
-                    "Keep the same meaning and intent. Keep structured operators like from: and after: intact. "
-                    "Return ONLY the corrected query, nothing else.\n\n"
-                    f"Query: {raw_query}"
-                ),
-            )
-            cleaned = response.text.strip().strip('"').strip("'")
-            if cleaned and len(cleaned) < len(raw_query) * 3:  # sanity check
-                if cleaned.lower() != raw_query.lower():
-                    logger.info(f"Query corrected: '{raw_query}' -> '{cleaned}'")
-                return cleaned
-        except Exception as e:
-            logger.warning(f"Query cleanup failed: {e}")
-        return raw_query
+        words = raw_query.split()
+        corrected = []
+        changed = False
+
+        for word in words:
+            # Don't correct structured operators or very short words
+            if ":" in word or len(word) <= 2:
+                corrected.append(word)
+                continue
+
+            suggestions = self._spell.lookup(word.lower(), Verbosity.CLOSEST, max_edit_distance=2)
+            if suggestions and suggestions[0].term != word.lower():
+                corrected.append(suggestions[0].term)
+                changed = True
+            else:
+                corrected.append(word)
+
+        result = " ".join(corrected)
+        if changed:
+            logger.info(f"Query corrected: '{raw_query}' -> '{result}'")
+        return result
 
     def search_threads(self, query: str, top_k: int = 20, sort: str = "relevance") -> list[ThreadResult]:
         """Thread-grouped search with multi-signal ranking."""
@@ -602,10 +626,17 @@ class SearchEngine:
         # Collapse repeat senders
         thread_results = self._collapse_repeat_senders(thread_results, top_k * 2)
 
-        # LLM reranker on top candidates (if enabled)
+        # LLM reranker — only when ranking is uncertain (top scores are close)
         rerank = self.config.get("search", {}).get("rerank", True)
         if rerank and sort == "relevance" and len(thread_results) > 3:
-            thread_results = self._llm_rerank(pq.text or query, thread_results, top_k)
+            top_scores = [t.score for t in thread_results[:5]]
+            score_spread = max(top_scores) - min(top_scores) if len(top_scores) >= 2 else 1.0
+            if score_spread < 0.15:
+                # Top results are tightly clustered — reranker will help
+                logger.info(f"Reranking: top-5 spread={score_spread:.3f} (tight)")
+                thread_results = self._llm_rerank(pq.text or query, thread_results, top_k)
+            else:
+                logger.info(f"Skipping rerank: top-5 spread={score_spread:.3f} (clear winner)")
 
         return thread_results[:top_k]
 

@@ -157,6 +157,48 @@ def rebuild_thread_summary(db_path: Path) -> int:
     return count
 
 
+def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
+    """Build a word frequency dictionary from the email corpus for spell correction."""
+    import re
+    from collections import Counter
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    word_counts: Counter = Counter()
+
+    # Extract words from subjects and body text
+    rows = conn.execute("SELECT subject, body_text FROM messages").fetchall()
+    for r in rows:
+        for field in [r["subject"], r["body_text"]]:
+            if field:
+                words = re.findall(r"[a-zA-Z]+", field.lower())
+                word_counts.update(w for w in words if len(w) >= 2)
+
+    # Also extract from sender names
+    rows = conn.execute("SELECT DISTINCT from_addr FROM messages").fetchall()
+    for r in rows:
+        addr = r["from_addr"]
+        # Extract name part from "Name <email>"
+        if "<" in addr:
+            name = addr.split("<")[0].strip().strip('"')
+        else:
+            name = addr.split("@")[0]
+        words = re.findall(r"[a-zA-Z]+", name.lower())
+        # Boost names heavily so they're preferred corrections
+        word_counts.update({w: 50 for w in words if len(w) >= 2})
+
+    conn.close()
+
+    # Write dictionary file (word\tfrequency format for SymSpell)
+    dict_path = data_dir / "spell_dictionary.txt"
+    with open(dict_path, "w") as f:
+        for word, count in word_counts.most_common():
+            f.write(f"{word} {count}\n")
+
+    return len(word_counts)
+
+
 def rebuild_contact_frequency(db_path: Path) -> int:
     """Precompute contact frequency scores. Returns contact count."""
     conn = sqlite3.connect(db_path)
