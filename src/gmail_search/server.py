@@ -275,6 +275,7 @@ def create_app(
         conn = get_connection(db_path)
         msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        # All dates are now UTC so string sort works correctly
         dates = conn.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
         total_cost = get_total_spend(conn)
         ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"])

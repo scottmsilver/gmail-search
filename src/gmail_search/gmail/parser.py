@@ -63,9 +63,17 @@ def parse_message(raw: dict[str, Any]) -> tuple[Message, list[dict]]:
 
     date_str = _get_header(headers, "Date")
     try:
+        from datetime import timezone
+
         date = parsedate_to_datetime(date_str)
+        if date.tzinfo:
+            date = date.astimezone(timezone.utc)
+        else:
+            date = date.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
-        date = datetime(1970, 1, 1)
+        from datetime import timezone
+
+        date = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
     body_text, body_html, att_metas = _extract_parts(payload)
 
