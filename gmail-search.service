@@ -1,0 +1,15 @@
+[Unit]
+Description=Gmail Search — continuous email sync and indexing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gmail-search watch --interval 120
+WorkingDirectory=%h/development/gmail-search
+Environment=GEMINI_API_KEY=
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

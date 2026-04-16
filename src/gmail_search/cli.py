@@ -407,6 +407,86 @@ def update(ctx, max_messages, budget, batch_size):
     click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
 
 
+def _pid_file(data_dir: Path) -> Path:
+    return data_dir / "watch.pid"
+
+
+def _is_watch_running(data_dir: Path) -> tuple[bool, int | None]:
+    """Check if a watch process is running. Returns (running, pid)."""
+    import os
+    import subprocess
+
+    pid_path = _pid_file(data_dir)
+    if not pid_path.exists():
+        return False, None
+    try:
+        pid = int(pid_path.read_text().strip())
+        # Check if the PID exists AND is actually a gmail-search watch process
+        os.kill(pid, 0)
+        cmdline = subprocess.run(["ps", "-p", str(pid), "-o", "args="], capture_output=True, text=True).stdout
+        if "gmail-search" not in cmdline and "gmail_search" not in cmdline:
+            pid_path.unlink(missing_ok=True)
+            return False, None
+        return True, pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        pid_path.unlink(missing_ok=True)
+        return False, None
+
+
+@main.command(help="Start watching for new emails in the background")
+@click.option("--interval", type=int, default=120, help="Seconds between sync checks")
+@click.option("--budget", type=float, default=None, help="Override budget limit")
+@common_options
+@click.pass_context
+def start(ctx, interval, budget):
+    """Start the watch daemon in the background."""
+    import subprocess
+    import sys
+
+    data_dir = ctx.obj["data_dir"]
+    running, pid = _is_watch_running(data_dir)
+    if running:
+        click.echo(f"Already running (PID {pid}). Use 'gmail-search stop' first.")
+        return
+
+    # Build the watch command
+    import shutil
+
+    gmail_search_bin = shutil.which("gmail-search") or f"{sys.executable} -m gmail_search.cli"
+    cmd = [gmail_search_bin, "watch", "--interval", str(interval), "--data-dir", str(data_dir)]
+    if budget:
+        cmd.extend(["--budget", str(budget)])
+
+    # Start as a detached subprocess
+    log_path = data_dir / "watch.log"
+    log_file = open(log_path, "a")
+    proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file, start_new_session=True)
+
+    _pid_file(data_dir).write_text(str(proc.pid))
+    click.echo(f"Started watch daemon (PID {proc.pid})")
+    click.echo(f"  Log: {log_path}")
+    click.echo(f"  Interval: {interval}s")
+    click.echo("  Stop: gmail-search stop")
+
+
+@main.command(help="Stop the background watch daemon")
+@common_options
+@click.pass_context
+def stop(ctx):
+    """Stop the watch daemon."""
+    import os
+
+    data_dir = ctx.obj["data_dir"]
+    running, pid = _is_watch_running(data_dir)
+    if not running:
+        click.echo("No watch daemon running.")
+        return
+
+    os.kill(pid, 15)  # SIGTERM — triggers graceful shutdown
+    _pid_file(data_dir).unlink(missing_ok=True)
+    click.echo(f"Stopped watch daemon (PID {pid})")
+
+
 @main.command(help="Watch for new emails and process them continuously")
 @click.option("--interval", type=int, default=120, help="Seconds between sync checks")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
