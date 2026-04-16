@@ -389,10 +389,25 @@ function colorFor(addr) {
   return COLORS[Math.abs(h) % COLORS.length];
 }
 
+function fmtRelativeTime(dateStr) {
+  if (!dateStr) return '?';
+  const dt = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now - dt;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return diffMin + 'min ago';
+  if (diffHr < 24) return diffHr + 'hr ago';
+  if (diffDays < 7) return diffDays + 'd ago';
+  return fmtDateFull(dateStr).split(',')[0];
+}
+
 fetch('/api/status').then(r => r.json()).then(s => {
   const oldest = s.date_oldest ? fmtDateFull(s.date_oldest).split(',')[0] : '?';
-  const newest = s.date_newest ? fmtDateFull(s.date_newest).split(',')[0] : '?';
-  let statusText = s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' to ' + newest;
+  const latest = s.date_newest ? fmtRelativeTime(s.date_newest) : '?';
+  let statusText = s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' to ' + latest;
   if (s.running_job) {
     statusText += '  ·  syncing: ' + s.running_job.stage;
   }
