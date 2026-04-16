@@ -392,15 +392,12 @@ function colorFor(addr) {
 function fmtRelativeTime(dateStr) {
   if (!dateStr) return '?';
   const dt = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now - dt;
-  const diffMin = Math.floor(diffMs / 60000);
-  const diffHr = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-  if (diffMin < 1) return 'just now';
-  if (diffMin < 60) return diffMin + 'min ago';
-  if (diffHr < 24) return diffHr + 'hr ago';
-  if (diffDays < 7) return diffDays + 'd ago';
+  const diffSec = Math.floor((new Date() - dt) / 1000);
+  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+  if (diffSec < 60) return rtf.format(-diffSec, 'second');
+  if (diffSec < 3600) return rtf.format(-Math.floor(diffSec / 60), 'minute');
+  if (diffSec < 86400) return rtf.format(-Math.floor(diffSec / 3600), 'hour');
+  if (diffSec < 604800) return rtf.format(-Math.floor(diffSec / 86400), 'day');
   return fmtDateFull(dateStr).split(',')[0];
 }
 
