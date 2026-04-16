@@ -407,6 +407,146 @@ def update(ctx, max_messages, budget, batch_size):
     click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
 
 
+@main.command(help="Watch for new emails and process them continuously")
+@click.option("--interval", type=int, default=120, help="Seconds between sync checks")
+@click.option("--budget", type=float, default=None, help="Override budget limit")
+@common_options
+@click.pass_context
+def watch(ctx, interval, budget):
+    """Poll for new emails, extract, embed, and reindex continuously."""
+    import signal
+    import time as _time
+
+    from gmail_search.embed.pipeline import run_embedding_pipeline
+    from gmail_search.extract import dispatch
+    from gmail_search.gmail.auth import build_gmail_service
+    from gmail_search.gmail.client import sync_new_messages
+    from gmail_search.index.builder import build_index
+    from gmail_search.store.db import JobProgress, rebuild_fts, rebuild_thread_summary
+    from gmail_search.store.queries import get_attachments_for_message
+
+    cfg = ctx.obj["config"]
+    db_path = ctx.obj["db_path"]
+    data_dir = ctx.obj["data_dir"]
+    att_config = cfg.get("attachments", {})
+    index_dir = data_dir / "scann_index"
+
+    if budget:
+        cfg["budget"]["max_usd"] = budget
+
+    service = build_gmail_service(data_dir)
+    progress = JobProgress(db_path, "watch")
+    running = True
+
+    def handle_stop(sig, frame):
+        nonlocal running
+        click.echo("\nStopping watch...")
+        running = False
+
+    signal.signal(signal.SIGINT, handle_stop)
+    signal.signal(signal.SIGTERM, handle_stop)
+
+    click.echo(f"Watching for new emails every {interval}s. Ctrl+C to stop.")
+    cycle = 0
+
+    while running:
+        cycle += 1
+        progress.update("sync", cycle, 0, "checking for new emails")
+
+        # Sync new messages
+        try:
+            count = sync_new_messages(
+                service=service,
+                db_path=db_path,
+                data_dir=data_dir,
+                max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+            )
+        except Exception as e:
+            logger.warning(f"Sync failed: {e}")
+            count = 0
+
+        if count > 0:
+            click.echo(f"[cycle {cycle}] Synced {count} new messages")
+
+            # Extract attachments
+            progress.update("extract", cycle, 0, f"+{count} synced")
+            conn = get_connection(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT m.id FROM messages m "
+                    "JOIN attachments a ON a.message_id = m.id "
+                    "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
+                ).fetchall()
+                for row in rows:
+                    attachments = get_attachments_for_message(conn, row["id"])
+                    for att in attachments:
+                        if att.extracted_text or att.image_path or not att.raw_path:
+                            continue
+                        if not Path(att.raw_path).exists():
+                            continue
+                        try:
+                            result = dispatch(att.mime_type, Path(att.raw_path), att_config)
+                        except Exception:
+                            continue
+                        if result is None:
+                            continue
+                        updates = {}
+                        if result.text:
+                            updates["extracted_text"] = result.text
+                        if result.images:
+                            updates["image_path"] = str(
+                                result.images[0].parent if len(result.images) > 1 else result.images[0]
+                            )
+                        if updates:
+                            set_clause = ", ".join(f"{k} = ?" for k in updates)
+                            conn.execute(
+                                f"UPDATE attachments SET {set_clause} WHERE id = ?", (*updates.values(), att.id)
+                            )
+                            conn.commit()
+            finally:
+                conn.close()
+
+            # Embed
+            progress.update("embed", cycle, 0, "embedding new messages")
+            conn = get_connection(db_path)
+            ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+            conn.close()
+            if ok:
+                emb_count = run_embedding_pipeline(db_path, cfg)
+                if emb_count:
+                    click.echo(f"[cycle {cycle}] Embedded {emb_count} chunks")
+            else:
+                click.echo(f"[cycle {cycle}] Budget exhausted (${spent:.2f})")
+
+            # Reindex (lightweight — just ScaNN, FTS, thread summary)
+            progress.update("reindex", cycle, 0, "updating indexes")
+            build_index(
+                db_path=db_path,
+                index_dir=index_dir,
+                model=cfg["embedding"]["model"],
+                dimensions=cfg["embedding"]["dimensions"],
+            )
+            rebuild_fts(db_path)
+            rebuild_thread_summary(db_path)
+
+            conn = get_connection(db_path)
+            msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            conn.close()
+            click.echo(f"[cycle {cycle}] {msg_count:,} messages | {emb_total:,} embeddings")
+        else:
+            progress.update("idle", cycle, 0, "no new messages")
+
+        # Sleep in small increments so Ctrl+C is responsive
+        for _ in range(interval):
+            if not running:
+                break
+            _time.sleep(1)
+
+    progress.finish("stopped", f"ran {cycle} cycles")
+    click.echo(f"Watch stopped after {cycle} cycles.")
+
+
 @main.command(help="Show progress of running jobs")
 @common_options
 @click.pass_context
