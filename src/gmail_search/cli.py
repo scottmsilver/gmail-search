@@ -627,30 +627,83 @@ def watch(ctx, interval, budget):
     click.echo(f"Watch stopped after {cycle} cycles.")
 
 
-@main.command(help="Show progress of running jobs")
+@main.command(help="Show progress of running jobs and daemon status")
 @common_options
 @click.pass_context
 def progress(ctx):
     from gmail_search.store.db import JobProgress
 
+    data_dir = ctx.obj["data_dir"]
+
+    # Daemon status
+    running, pid = _is_watch_running(data_dir)
+    if running:
+        click.echo(f"Watch daemon: running (PID {pid})")
+    else:
+        click.echo("Watch daemon: not running")
+
+    # DB stats
+    conn = get_connection(ctx.obj["db_path"])
+    msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+    cost = get_total_spend(conn)
+    dates = conn.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
+    conn.close()
+    click.echo(f"Messages: {msg_count:,} | Embeddings: {emb_count:,} | Cost: ${cost:.2f}")
+    if dates["oldest"]:
+        click.echo(f"Date range: {dates['oldest'][:10]} to {dates['newest'][:10]}")
+
+    # Job history
     jobs = JobProgress.get(ctx.obj["db_path"])
-    if not jobs:
-        click.echo("No jobs found.")
-        return
-    for j in jobs:
-        pct = f"{j['completed']*100//j['total']}%" if j["total"] > 0 else "?"
-        elapsed = ""
-        try:
+    if jobs:
+        click.echo("\nRecent jobs:")
+        for j in jobs:
             from datetime import datetime
 
-            start = datetime.fromisoformat(j["started_at"])
-            updated = datetime.fromisoformat(j["updated_at"])
-            elapsed = f" ({(updated - start).total_seconds():.0f}s elapsed)"
-        except Exception:
-            pass
-        click.echo(f"{j['job_id']}: {j['status']} | {j['stage']} | {j['completed']}/{j['total']} ({pct}){elapsed}")
-        if j["detail"]:
-            click.echo(f"  {j['detail']}")
+            pct = f"{j['completed'] * 100 // j['total']}%" if j["total"] > 0 else ""
+            try:
+                start = datetime.fromisoformat(j["started_at"])
+                updated = datetime.fromisoformat(j["updated_at"])
+                elapsed = f"{(updated - start).total_seconds():.0f}s"
+            except Exception:
+                elapsed = "?"
+            status_icon = {"running": ">", "done": "+", "stopped": "-", "error": "!"}.get(j["status"], "?")
+            click.echo(
+                f"  {status_icon} {j['job_id']:8s} {j['status']:8s} {j['stage']:10s} {pct:>5s} {elapsed:>6s}  {j['detail'][:50]}"
+            )
+
+    # Log tail
+    log_path = data_dir / "watch.log"
+    if log_path.exists():
+        lines = log_path.read_text().strip().split("\n")
+        recent = [l for l in lines[-5:] if l.strip()]
+        if recent:
+            click.echo(f"\nRecent log ({log_path}):")
+            for line in recent:
+                click.echo(f"  {line[:100]}")
+
+
+@main.command(help="Tail the watch daemon log")
+@click.option("-n", "--lines", type=int, default=20, help="Number of lines")
+@click.option("-f", "--follow", is_flag=True, help="Follow log output")
+@common_options
+@click.pass_context
+def logs(ctx, lines, follow):
+    """View the watch daemon log."""
+    import subprocess
+
+    log_path = ctx.obj["data_dir"] / "watch.log"
+    if not log_path.exists():
+        click.echo("No log file found. Start the daemon first: gmail-search start")
+        return
+
+    if follow:
+        click.echo(f"Following {log_path} (Ctrl+C to stop):")
+        subprocess.run(["tail", "-f", "-n", str(lines), str(log_path)])
+    else:
+        text = log_path.read_text().strip().split("\n")
+        for line in text[-lines:]:
+            click.echo(line)
 
 
 @main.command(help="Search your email")
