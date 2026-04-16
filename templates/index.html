@@ -390,10 +390,13 @@ function colorFor(addr) {
 }
 
 fetch('/api/status').then(r => r.json()).then(s => {
-  const oldest = s.date_oldest ? fmtDateSmart(s.date_oldest) : '?';
-  const newest = s.date_newest ? fmtDateSmart(s.date_newest) : '?';
-  document.getElementById('status').textContent =
-    s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' – ' + newest;
+  const oldest = s.date_oldest ? fmtDateFull(s.date_oldest).split(',')[0] : '?';
+  const newest = s.date_newest ? fmtDateFull(s.date_newest).split(',')[0] : '?';
+  let statusText = s.messages.toLocaleString() + ' messages  ·  ' + oldest + ' to ' + newest;
+  if (s.running_job) {
+    statusText += '  ·  syncing: ' + s.running_job.stage;
+  }
+  document.getElementById('status').textContent = statusText;
 });
 
 // Update sidebar facets from search results (leaves only, with result counts)
