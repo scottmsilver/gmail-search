@@ -1,12 +1,91 @@
+import re
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import get_connection
 from gmail_search.store.queries import get_attachments_for_message, get_message
+
+# ─────────────────────────────────────────────────────────────────
+# Read-only SQL endpoint helpers
+# ─────────────────────────────────────────────────────────────────
+SQL_MAX_ROWS = 500
+SQL_MAX_QUERY_CHARS = 5000
+SQL_TIMEOUT_SEC = 10.0
+
+_SQL_FORBIDDEN = re.compile(
+    r"\b(ATTACH|DETACH|PRAGMA|VACUUM|ANALYZE|REINDEX|INSERT|UPDATE|"
+    r"DELETE|DROP|CREATE|REPLACE|TRUNCATE|ALTER|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b",
+    re.IGNORECASE,
+)
+
+_SQL_STARTS_WITH_SELECT_OR_WITH = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+
+
+def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
+    """Open a connection that SQLite itself enforces as read-only."""
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=SQL_TIMEOUT_SEC)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _validate_sql(query: str) -> str | None:
+    """Return None if the query passes the safety gate, else an error string."""
+    if not query or not query.strip():
+        return "query required"
+    if len(query) > SQL_MAX_QUERY_CHARS:
+        return f"query too long (>{SQL_MAX_QUERY_CHARS} chars)"
+    if not _SQL_STARTS_WITH_SELECT_OR_WITH.match(query):
+        return "only SELECT / WITH queries are allowed"
+    # Strip string literals so keywords inside strings aren't flagged.
+    stripped = re.sub(r"'([^'\\]|\\.)*'", "''", query)
+    stripped = re.sub(r'"([^"\\]|\\.)*"', '""', stripped)
+    hit = _SQL_FORBIDDEN.search(stripped)
+    if hit:
+        return f"disallowed SQL keyword: {hit.group(0).upper()}"
+    if ";" in stripped.rstrip().rstrip(";"):
+        return "multiple statements are not allowed"
+    return None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (bytes, memoryview)):
+        return f"<blob {len(value)} bytes>"
+    return value
+
+
+def _run_sql_with_timeout(db_path: Path, query: str) -> dict:
+    """Execute a SELECT and capture the first SQL_MAX_ROWS rows.
+
+    Runs the connection on a timer thread so a hostile query cannot hang
+    the request. On timeout we call conn.interrupt() which raises
+    sqlite3.OperationalError in the executing thread.
+    """
+    conn = _open_readonly_connection(db_path)
+    timer = threading.Timer(SQL_TIMEOUT_SEC, conn.interrupt)
+    timer.start()
+    try:
+        cursor = conn.execute(query)
+        columns = [d[0] for d in cursor.description or []]
+        rows_raw = cursor.fetchmany(SQL_MAX_ROWS + 1)
+        truncated = len(rows_raw) > SQL_MAX_ROWS
+        rows = [[_json_safe(v) for v in row] for row in rows_raw[:SQL_MAX_ROWS]]
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+        }
+    finally:
+        timer.cancel()
+        conn.close()
 
 
 def _build_query_filters(
@@ -411,6 +490,28 @@ def create_app(
                 status_code=409,
             )
         return {"thread_id": rows[0]["thread_id"], "subject": rows[0]["subject"]}
+
+    @app.post("/api/sql")
+    async def api_sql(payload: dict = Body(...)):
+        """Run a read-only SQL SELECT (or WITH...SELECT) against the DB.
+
+        Hard limits: max 500 rows returned, 10s timeout, 5000 char query.
+        Enforced read-only at the SQLite connection level AND via keyword
+        blacklist (defense in depth). Statement must begin with SELECT or
+        WITH; multiple statements are rejected.
+        """
+        query = str(payload.get("query", ""))
+        err = _validate_sql(query)
+        if err:
+            return JSONResponse({"error": err}, status_code=400)
+        try:
+            return _run_sql_with_timeout(db_path, query)
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            status = 408 if "interrupted" in msg else 400
+            return JSONResponse({"error": f"SQL error: {msg}"}, status_code=status)
+        except sqlite3.DatabaseError as e:
+            return JSONResponse({"error": f"SQL error: {e!s}"}, status_code=400)
 
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(attachment_id: int):

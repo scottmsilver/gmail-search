@@ -8,6 +8,7 @@ import {
   getThreadBackend,
   lookupThreadByCiteRef,
   queryEmailsBackend,
+  runSqlBackend,
   searchEmailsBackend,
 } from "./backend";
 
@@ -225,6 +226,47 @@ export const buildTools = () => ({
             const raw = await queryEmailsBackend(q);
             return { threads: formatQueryOutput(raw) };
           },
+        ),
+      ),
+  }),
+
+  sql_query: tool({
+    description: `Run a read-only SQL SELECT (or WITH…SELECT) against the local SQLite database. Use this when the other tools can't express the question — aggregations, GROUP BY, OR across fields, relative dates, JOINs, NOT-EXISTS, multi-field filters. Max 500 rows returned, 10s timeout. Read-only enforced at DB + keyword level; INSERT/UPDATE/DELETE/DROP/ATTACH/PRAGMA are rejected.
+
+BATCH: pass one OR many queries in \`queries\` and they run in parallel.
+
+Key tables:
+- messages(id TEXT PK, thread_id TEXT, from_addr TEXT, to_addr TEXT, subject TEXT, body_text TEXT, date TEXT [ISO UTC], labels TEXT [JSON array], history_id INT)
+- thread_summary(thread_id TEXT PK, subject TEXT, participants TEXT [JSON], all_from_addrs TEXT [JSON], all_labels TEXT [JSON], message_count INT, date_first TEXT, date_last TEXT)
+- attachments(id INT PK, message_id TEXT, filename TEXT, mime_type TEXT, size_bytes INT, extracted_text TEXT)
+- topics(topic_id TEXT PK, parent_id TEXT, label TEXT, depth INT, message_count INT)
+- message_topics(message_id TEXT, topic_id TEXT)
+- contact_frequency(addr TEXT PK, email_count INT, reply_count INT, last_email TEXT)
+
+JSON fields (labels, participants, etc.) are text — use \`json_extract(labels, '$[0]')\` or \`labels LIKE '%"IMPORTANT"%'\`. Dates are ISO UTC strings; use SQLite's date() / datetime() functions (e.g. \`date(date) >= date('now', '-7 days')\`).
+
+Useful idioms:
+- Count per sender, last 30 days: \`SELECT from_addr, COUNT(*) n FROM messages WHERE date >= date('now','-30 days') GROUP BY from_addr ORDER BY n DESC LIMIT 10\`
+- Threads with attachments: \`SELECT ts.thread_id, ts.subject FROM thread_summary ts JOIN attachments a ON a.message_id IN (SELECT id FROM messages WHERE thread_id=ts.thread_id) GROUP BY ts.thread_id\`
+- Unread from vendor: \`SELECT * FROM messages WHERE from_addr LIKE '%@vendor.com%' AND labels LIKE '%"UNREAD"%'\`
+
+ALWAYS include a LIMIT unless aggregating, otherwise results get truncated and you lose precision. Do NOT SELECT from embeddings, query_cache, messages_fts, or attachments_fts — they're huge or virtual.
+
+Results come back as {columns: string[], rows: unknown[][], row_count, truncated}. The thread_id column gives you a cite_ref (first 8 chars) for citations.`,
+    inputSchema: z.object({
+      queries: z
+        .array(z.string().min(1).max(5000))
+        .min(1)
+        .max(MAX_BATCH)
+        .describe("One or more SQL SELECT queries to run in parallel."),
+    }),
+    execute: async ({ queries }) =>
+      safely("sql_query", () =>
+        runBatch(
+          "sql_query",
+          queries,
+          (q) => ({ query: q }),
+          async (q) => runSqlBackend(q),
         ),
       ),
   }),

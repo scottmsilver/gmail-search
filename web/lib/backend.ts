@@ -131,6 +131,32 @@ export const lookupThreadByCiteRef = async (citeRef: string): Promise<ThreadLook
   };
 };
 
+export type SqlResult = {
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  truncated: boolean;
+};
+
+export const runSqlBackend = async (query: string): Promise<SqlResult> => {
+  const res = await fetch(`${pythonApiUrl()}/api/sql`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) {
+    let msg = `sql_query backend ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) msg = body.error;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+  return (await res.json()) as SqlResult;
+};
+
 export type AttachmentText = {
   attachment_id: number;
   filename: string;
