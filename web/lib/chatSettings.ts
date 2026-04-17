@@ -13,16 +13,21 @@ import { AVAILABLE_MODELS, DEFAULT_THINKING, THINKING_LEVELS, type ThinkingLevel
 
 const STORAGE_KEY = "gmail-search-chat-settings-v1";
 
+export const THEMES = ["light", "dark", "sepia", "slate"] as const;
+export type Theme = (typeof THEMES)[number];
+
 export type ChatSettings = {
   model: (typeof AVAILABLE_MODELS)[number];
   thinkingLevel: ThinkingLevel;
   battleMode: boolean;
+  theme: Theme;
 };
 
 const defaultSettings = (): ChatSettings => ({
   model: AVAILABLE_MODELS[0],
   thinkingLevel: DEFAULT_THINKING,
   battleMode: false,
+  theme: "light",
 });
 
 let current: ChatSettings = defaultSettings();
@@ -50,7 +55,10 @@ const loadFromStorage = () => {
       ? (parsed.thinkingLevel as ThinkingLevel)
       : current.thinkingLevel;
     const battleMode = typeof parsed.battleMode === "boolean" ? parsed.battleMode : current.battleMode;
-    current = { model, thinkingLevel, battleMode };
+    const theme = (THEMES as readonly string[]).includes(parsed.theme ?? "")
+      ? (parsed.theme as Theme)
+      : current.theme;
+    current = { model, thinkingLevel, battleMode, theme };
   } catch {
     // ignore malformed storage
   }

@@ -12,7 +12,9 @@ import {
   getServerChatSettings,
   setChatSettings,
   subscribeChatSettings,
+  THEMES,
   type ChatSettings,
+  type Theme,
 } from "@/lib/chatSettings";
 
 const useChatSettings = (): ChatSettings =>
@@ -126,6 +128,28 @@ export const ModelPicker = () => {
             >
               ⚔ {battleOn ? "on — two random variants per question" : "off — single model"}
             </button>
+          </div>
+
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
+              Theme
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              {THEMES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setChatSettings({ theme: t as Theme })}
+                  className={
+                    t === settings.theme
+                      ? "rounded px-2 py-1 bg-neutral-900 text-white text-[11px] font-medium capitalize"
+                      : "rounded px-2 py-1 bg-neutral-100 text-neutral-700 hover:bg-neutral-200 text-[11px] capitalize"
+                  }
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}

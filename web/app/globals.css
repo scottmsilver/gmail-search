@@ -2,8 +2,166 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─────────────────────────────────────────────
+   Theme tokens — all themes define the same
+   semantic variables so components can consume
+   them via bg-[var(--token)] or via the utility
+   overrides below.
+   ───────────────────────────────────────────── */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-page: #fafafa;
+  --bg-surface: #ffffff;
+  --bg-raised: #f5f5f5;
+  --bg-sunken: #fafafa;
+  --bg-input: #fafafa;
+  --fg-primary: #171717;
+  --fg-secondary: #525252;
+  --fg-muted: #a3a3a3;
+  --border-subtle: #e5e5e5;
+  --border-default: #d4d4d4;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-page: #0a0a0a;
+  --bg-surface: #111111;
+  --bg-raised: #1a1a1a;
+  --bg-sunken: #050505;
+  --bg-input: #1a1a1a;
+  --fg-primary: #ededed;
+  --fg-secondary: #a3a3a3;
+  --fg-muted: #525252;
+  --border-subtle: #262626;
+  --border-default: #404040;
+  --accent: #3b82f6;
+  --accent-fg: #ffffff;
+}
+
+[data-theme="sepia"] {
+  color-scheme: light;
+  --bg-page: #f3eadc;
+  --bg-surface: #fbf5e9;
+  --bg-raised: #ede0cb;
+  --bg-sunken: #e7d9c0;
+  --bg-input: #fbf5e9;
+  --fg-primary: #3b2a15;
+  --fg-secondary: #6b563b;
+  --fg-muted: #9c8a6f;
+  --border-subtle: #d9c8ab;
+  --border-default: #c4aa81;
+  --accent: #8b5e3c;
+  --accent-fg: #fbf5e9;
+}
+
+[data-theme="slate"] {
+  color-scheme: dark;
+  --bg-page: #111827;
+  --bg-surface: #1f2937;
+  --bg-raised: #374151;
+  --bg-sunken: #0f172a;
+  --bg-input: #1f2937;
+  --fg-primary: #f3f4f6;
+  --fg-secondary: #9ca3af;
+  --fg-muted: #6b7280;
+  --border-subtle: #374151;
+  --border-default: #4b5563;
+  --accent: #60a5fa;
+  --accent-fg: #0f172a;
+}
+
 html,
 body {
   height: 100%;
-  background: #fafafa;
+  background: var(--bg-page);
+  color: var(--fg-primary);
+}
+
+/* Override common Tailwind utility classes so existing components
+   pick up the theme without every file being refactored. These rules
+   target the classes we actually use in the chat shell. */
+[data-theme="dark"] .bg-white,
+[data-theme="sepia"] .bg-white,
+[data-theme="slate"] .bg-white {
+  background-color: var(--bg-surface);
+}
+
+[data-theme="dark"] .bg-neutral-50,
+[data-theme="sepia"] .bg-neutral-50,
+[data-theme="slate"] .bg-neutral-50 {
+  background-color: var(--bg-raised);
+}
+
+[data-theme="dark"] .bg-neutral-100,
+[data-theme="sepia"] .bg-neutral-100,
+[data-theme="slate"] .bg-neutral-100 {
+  background-color: var(--bg-raised);
+}
+
+[data-theme="dark"] .border-neutral-200,
+[data-theme="sepia"] .border-neutral-200,
+[data-theme="slate"] .border-neutral-200 {
+  border-color: var(--border-subtle);
+}
+
+[data-theme="dark"] .border-neutral-300,
+[data-theme="sepia"] .border-neutral-300,
+[data-theme="slate"] .border-neutral-300 {
+  border-color: var(--border-default);
+}
+
+[data-theme="dark"] .text-neutral-900,
+[data-theme="sepia"] .text-neutral-900,
+[data-theme="slate"] .text-neutral-900 {
+  color: var(--fg-primary);
+}
+
+[data-theme="dark"] .text-neutral-800,
+[data-theme="sepia"] .text-neutral-800,
+[data-theme="slate"] .text-neutral-800 {
+  color: var(--fg-primary);
+}
+
+[data-theme="dark"] .text-neutral-700,
+[data-theme="sepia"] .text-neutral-700,
+[data-theme="slate"] .text-neutral-700 {
+  color: var(--fg-secondary);
+}
+
+[data-theme="dark"] .text-neutral-500,
+[data-theme="sepia"] .text-neutral-500,
+[data-theme="slate"] .text-neutral-500 {
+  color: var(--fg-secondary);
+}
+
+[data-theme="dark"] .text-neutral-400,
+[data-theme="sepia"] .text-neutral-400,
+[data-theme="slate"] .text-neutral-400 {
+  color: var(--fg-muted);
+}
+
+/* Prose (markdown) theming — Tailwind typography's invert variant
+   handles dark mode, but we apply it to any non-light theme. */
+[data-theme="dark"] .prose,
+[data-theme="slate"] .prose {
+  --tw-prose-body: var(--fg-primary);
+  --tw-prose-headings: var(--fg-primary);
+  --tw-prose-lead: var(--fg-secondary);
+  --tw-prose-links: var(--accent);
+  --tw-prose-bold: var(--fg-primary);
+  --tw-prose-bullets: var(--fg-muted);
+  --tw-prose-hr: var(--border-subtle);
+  --tw-prose-quotes: var(--fg-primary);
+  --tw-prose-code: var(--fg-primary);
+  --tw-prose-pre-bg: var(--bg-sunken);
+}
+
+[data-theme="sepia"] .prose {
+  --tw-prose-body: var(--fg-primary);
+  --tw-prose-headings: var(--fg-primary);
+  --tw-prose-bold: var(--fg-primary);
+  --tw-prose-links: var(--accent);
 }

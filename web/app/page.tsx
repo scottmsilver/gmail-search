@@ -7,6 +7,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { AssistantChatTransport, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 
 import { ConversationSidebar } from "@/components/ConversationSidebar";
+import { ThemeEffect } from "@/components/ThemeEffect";
 import { Thread } from "@/components/Thread";
 import { ThreadDrawer } from "@/components/ThreadDrawer";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/components/ThreadDrawerContext";
@@ -133,6 +134,7 @@ export default function Page() {
 
   return (
     <div className="flex h-screen">
+      <ThemeEffect />
       <ConversationSidebar activeId={conversationId} onNew={startNew} />
       <div className="flex-1 min-w-0">
         <AssistantRuntimeProvider runtime={runtime}>
