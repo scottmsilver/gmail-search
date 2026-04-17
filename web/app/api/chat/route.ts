@@ -155,7 +155,21 @@ export async function POST(req: NextRequest) {
   // both complete answers side-by-side and lets the user vote.
   if (body.battle) {
     const [variantA, variantB] = pickTwoRandomVariants();
-    await logger.log("battle_start", { variant_a: variantA, variant_b: variantB });
+    // Log the inbound conversation so we can diagnose "did we actually
+    // send context?" complaints after the fact.
+    await logger.log("battle_start", {
+      variant_a: variantA,
+      variant_b: variantB,
+      context_summary: initialMessages.map((m) => ({
+        role: m.role,
+        preview:
+          typeof m.content === "string"
+            ? m.content.slice(0, 200)
+            : Array.isArray(m.content)
+              ? `<${m.content.length} parts>`
+              : "<complex>",
+      })),
+    });
     console.log(
       `[chat ${logger.id}] battle: ${variantA.model}/${variantA.thinkingLevel} vs ${variantB.model}/${variantB.thinkingLevel}`,
     );
@@ -168,29 +182,85 @@ export async function POST(req: NextRequest) {
           data: { id: logger.id, log_path: logger.path },
         });
 
-        const [a, b] = await Promise.all([
-          runVariantOnce(google, system, tools, initialMessages, variantA.model, variantA.thinkingLevel),
-          runVariantOnce(google, system, tools, initialMessages, variantB.model, variantB.thinkingLevel),
-        ]);
-        await logger.log("battle_done", {
-          a: { text_len: a.text.length, tools: a.tools.length, error: a.error },
-          b: { text_len: b.text.length, tools: b.tools.length, error: b.error },
-          ms: logger.elapsedMs(),
+        const battleId = `battle-${logger.id}`;
+        const emit = (partial: Record<string, unknown>) => {
+          writer.write({
+            type: "data-battle",
+            id: battleId,
+            data: {
+              request_id: logger.id,
+              question,
+              variant_a: variantA,
+              variant_b: variantB,
+              ...partial,
+            },
+          });
+        };
+
+        // Show the battle panel immediately with both sides pending. The
+        // client renders spinners while each variant is working.
+        emit({
+          running_a: true,
+          running_b: true,
+          answer_a: "",
+          answer_b: "",
+          tools_a: [],
+          tools_b: [],
         });
 
-        writer.write({
-          type: "data-battle",
-          id: `battle-${logger.id}`,
-          data: {
-            request_id: logger.id,
-            question,
-            variant_a: variantA,
-            variant_b: variantB,
-            answer_a: a.error ? `⚠ ${a.error}` : a.text,
-            answer_b: b.error ? `⚠ ${b.error}` : b.text,
-            tools_a: a.tools,
-            tools_b: b.tools,
-          },
+        // Launch both variants; flip the running flag per side as each
+        // finishes so the user gets incremental feedback.
+        let finalA: Awaited<ReturnType<typeof runVariantOnce>> | null = null;
+        let finalB: Awaited<ReturnType<typeof runVariantOnce>> | null = null;
+
+        const finishSide = (side: "a" | "b", r: typeof finalA) => {
+          if (!r) return;
+          if (side === "a") finalA = r;
+          else finalB = r;
+          emit({
+            running_a: finalA === null,
+            running_b: finalB === null,
+            answer_a: finalA ? (finalA.error ? `⚠ ${finalA.error}` : finalA.text) : "",
+            answer_b: finalB ? (finalB.error ? `⚠ ${finalB.error}` : finalB.text) : "",
+            tools_a: finalA?.tools ?? [],
+            tools_b: finalB?.tools ?? [],
+          });
+        };
+
+        const pa = runVariantOnce(
+          google,
+          system,
+          tools,
+          initialMessages,
+          variantA.model,
+          variantA.thinkingLevel,
+        ).then((r) => finishSide("a", r));
+        const pb = runVariantOnce(
+          google,
+          system,
+          tools,
+          initialMessages,
+          variantB.model,
+          variantB.thinkingLevel,
+        ).then((r) => finishSide("b", r));
+        await Promise.all([pa, pb]);
+
+        // Record full answer text + tool calls per side so we can audit
+        // quality later. Base64 is stripped by the logger.
+        const toLogRecord = (r: typeof finalA) =>
+          r
+            ? {
+                text: (r as { text: string }).text,
+                error: (r as { error?: string }).error,
+                tools: (r as { tools: Array<{ name: string; args: unknown; output: unknown }> }).tools,
+              }
+            : { text: "", error: "no result" };
+        await logger.log("battle_done", {
+          variant_a: variantA,
+          variant_b: variantB,
+          a: toLogRecord(finalA),
+          b: toLogRecord(finalB),
+          ms: logger.elapsedMs(),
         });
       },
       onError: (error) => {

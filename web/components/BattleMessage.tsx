@@ -20,7 +20,16 @@ type BattleData = {
   answer_b: string;
   tools_a: Array<{ name: string; args: unknown; output: unknown }>;
   tools_b: Array<{ name: string; args: unknown; output: unknown }>;
+  running_a?: boolean;
+  running_b?: boolean;
 };
+
+const Spinner = () => (
+  <svg className="w-4 h-4 animate-spin text-neutral-400" viewBox="0 0 24 24" fill="none">
+    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={3} opacity={0.25} />
+    <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth={3} strokeLinecap="round" />
+  </svg>
+);
 
 type Vote = "a" | "b" | "tie" | "both_bad";
 
@@ -30,12 +39,14 @@ const BattleSide = ({
   tools,
   side,
   won,
+  running,
 }: {
   label: string;
   text: string;
   tools: BattleData["tools_a"];
   side: "a" | "b";
   won: boolean | null;
+  running: boolean;
 }) => {
   const { setOpenThreadId } = useThreadDrawer();
   // Walk tool outputs just like the normal renderer so [ref:] chips resolve.
@@ -54,11 +65,20 @@ const BattleSide = ({
   return (
     <div className={`rounded-lg border ${colorCls} p-3 flex flex-col min-w-0`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-mono text-neutral-500">{label}</span>
+        <span className="text-xs font-mono text-neutral-500 flex items-center gap-2">
+          {running && <Spinner />}
+          {label}
+        </span>
         <span className="text-[10px] text-neutral-400">
-          {tools.length} tool call{tools.length === 1 ? "" : "s"}
+          {running ? "thinking…" : `${tools.length} tool call${tools.length === 1 ? "" : "s"}`}
         </span>
       </div>
+      {running && !text ? (
+        <div className="flex-1 flex items-center justify-center py-6 text-xs text-neutral-400">
+          <Spinner />
+          <span className="ml-2">generating…</span>
+        </div>
+      ) : (
       <div className="prose prose-sm max-w-none prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0 prose-headings:my-2 prose-pre:my-2">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
@@ -85,6 +105,7 @@ const BattleSide = ({
           {linkifyRefs(text, knownIds)}
         </ReactMarkdown>
       </div>
+      )}
     </div>
   );
 };
@@ -92,6 +113,7 @@ const BattleSide = ({
 export const BattleMessage = ({ data }: { data: BattleData }) => {
   const [vote, setVote] = useState<Vote | null>(null);
   const [voting, setVoting] = useState(false);
+  const anyRunning = !!(data.running_a || data.running_b);
 
   const submitVote = async (winner: Vote) => {
     if (vote || voting) return;
@@ -127,7 +149,7 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
     <button
       key={v}
       type="button"
-      disabled={revealed || voting}
+      disabled={revealed || voting || anyRunning}
       onClick={() => submitVote(v)}
       className={`rounded-md border border-neutral-300 px-3 py-1 text-xs ${hoverCls} disabled:opacity-40 disabled:cursor-not-allowed`}
     >
@@ -138,8 +160,8 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
   return (
     <div className="my-3">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <BattleSide label={labelA} text={data.answer_a} tools={data.tools_a} side="a" won={wonA} />
-        <BattleSide label={labelB} text={data.answer_b} tools={data.tools_b} side="b" won={wonB} />
+        <BattleSide label={labelA} text={data.answer_a} tools={data.tools_a} side="a" won={wonA} running={!!data.running_a} />
+        <BattleSide label={labelB} text={data.answer_b} tools={data.tools_b} side="b" won={wonB} running={!!data.running_b} />
       </div>
       <div className="mt-2 flex items-center gap-2 flex-wrap">
         {revealed ? (
