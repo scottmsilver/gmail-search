@@ -10,7 +10,14 @@ import {
 } from "ai";
 import { NextRequest } from "next/server";
 
-import { AGENT_MODEL, geminiApiKey } from "@/lib/config";
+import {
+  AGENT_MODEL,
+  DEFAULT_THINKING,
+  geminiApiKey,
+  isValidModel,
+  isValidThinking,
+  type ThinkingLevel,
+} from "@/lib/config";
 import { lookupThreadByCiteRef } from "@/lib/backend";
 import { ChatLogger } from "@/lib/chatLog";
 import { collectKnownRefs, findBrokenRefs } from "@/lib/citationCheck";
@@ -60,16 +67,35 @@ const lastUserText = (messages: UIMessage[]): string => {
 };
 
 export async function POST(req: NextRequest) {
-  const { messages } = (await req.json()) as { messages: UIMessage[] };
+  const body = (await req.json()) as {
+    messages?: UIMessage[];
+    model?: string;
+    thinkingLevel?: string;
+  };
+  const messages = body.messages;
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response(JSON.stringify({ error: "messages required" }), { status: 400 });
   }
 
+  // Per-request overrides from the UI picker; fall back to defaults.
+  const model = isValidModel(body.model) ? body.model : AGENT_MODEL;
+  const thinkingLevel: ThinkingLevel = isValidThinking(body.thinkingLevel)
+    ? body.thinkingLevel
+    : DEFAULT_THINKING;
+
   const logger = new ChatLogger();
   const question = lastUserText(messages);
-  await logger.log("request", { id: logger.id, question, message_count: messages.length });
-  console.log(`[chat ${logger.id}] start q=${JSON.stringify(question.slice(0, 80))}`);
+  await logger.log("request", {
+    id: logger.id,
+    question,
+    message_count: messages.length,
+    model,
+    thinking_level: thinkingLevel,
+  });
+  console.log(
+    `[chat ${logger.id}] start model=${model} thinking=${thinkingLevel} q=${JSON.stringify(question.slice(0, 80))}`,
+  );
 
   const google = createGoogleGenerativeAI({ apiKey: geminiApiKey() });
   const tools = buildTools();
@@ -94,7 +120,7 @@ export async function POST(req: NextRequest) {
         const isFinalAttempt = attempt === MAX_VALIDATION_RETRIES;
 
         const result = streamText({
-          model: google(AGENT_MODEL),
+          model: google(model),
           system,
           messages: conversation,
           tools,
@@ -105,7 +131,7 @@ export async function POST(req: NextRequest) {
               // more but do NOT stream thought summaries — the Thoughts
               // UI panel goes blank. "low" is the only level that emits
               // visible reasoning. Trade reasoning depth vs transparency.
-              thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
+              thinkingConfig: { thinkingLevel, includeThoughts: true },
             },
           },
           onError: ({ error }) => {

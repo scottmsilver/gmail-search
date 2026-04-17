@@ -15,3 +15,23 @@ export const geminiApiKey = (): string => {
 };
 
 export const AGENT_MODEL = "gemini-3.1-flash-lite-preview";
+
+// Picker choices shown in the UI. Add/remove here.
+export const AVAILABLE_MODELS = [
+  "gemini-3.1-flash-lite-preview",
+  "gemini-3-pro-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+] as const;
+
+export type ThinkingLevel = "minimal" | "low" | "medium" | "high";
+export const THINKING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
+
+export const DEFAULT_THINKING: ThinkingLevel = "high";
+
+export const isValidModel = (m: unknown): m is (typeof AVAILABLE_MODELS)[number] =>
+  typeof m === "string" && (AVAILABLE_MODELS as readonly string[]).includes(m);
+
+export const isValidThinking = (t: unknown): t is ThinkingLevel =>
+  typeof t === "string" && (THINKING_LEVELS as string[]).includes(t);
