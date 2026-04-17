@@ -28,8 +28,13 @@ export const AVAILABLE_MODELS = [
   "gemini-2.5-flash-lite",
 ] as const;
 
+// Note: "minimal" is valid in the SDK type but rejected by some Gemini 3.x
+// models (e.g. 3.1-pro-preview responds "Thinking level MINIMAL is not
+// supported for this model"). Dropping it from the UI + battle pool so
+// we never hit that error silently. If a specific model needs it later,
+// add a per-model capability map instead of this blanket list.
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high";
-export const THINKING_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
+export const THINKING_LEVELS: ThinkingLevel[] = ["low", "medium", "high"];
 
 export const DEFAULT_THINKING: ThinkingLevel = "high";
 
