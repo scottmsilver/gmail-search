@@ -14,8 +14,8 @@ import { ReasoningPart } from "./ReasoningPart";
 import { ToolCallUI } from "./ToolCallUI";
 
 const SEND_ICON = (
-  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M13 6l6 6-6 6" />
+  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M3 8h10M9 4l4 4-4 4" />
   </svg>
 );
 
@@ -70,7 +70,7 @@ const Composer = () => (
       />
       <ComposerPrimitive.Send
         aria-label="Send"
-        className="self-end rounded-full bg-neutral-900 text-white w-8 h-8 disabled:opacity-30 flex items-center justify-center hover:bg-neutral-700 transition-colors"
+        className="self-end w-8 h-8 flex items-center justify-center text-neutral-500 hover:text-neutral-900 disabled:opacity-30 disabled:hover:text-neutral-500 transition-colors"
       >
         {SEND_ICON}
       </ComposerPrimitive.Send>
