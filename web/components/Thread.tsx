@@ -22,8 +22,8 @@ const SEND_ICON = (
 const TextPart = ({ text }: { text: string }) => <MarkdownText text={text} />;
 
 const UserMessage = () => (
-  <MessagePrimitive.Root className="flex justify-end my-4 px-4">
-    <div className="max-w-[80%] bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2 whitespace-pre-wrap">
+  <MessagePrimitive.Root className="flex justify-end my-4 px-6 md:px-8">
+    <div className="max-w-[70%] bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2 whitespace-pre-wrap">
       <MessagePrimitive.Parts components={{ Text: ({ text }) => <>{text}</> }} />
     </div>
   </MessagePrimitive.Root>
@@ -40,28 +40,26 @@ const CitationWarningPart = ({ data }: { data: CitationWarningData }) => (
 );
 
 const AssistantMessage = () => (
-  <MessagePrimitive.Root className="my-4 px-4">
-    <div className="max-w-[95%]">
-      <MessagePrimitive.Parts
-        components={{
-          Text: TextPart,
-          Reasoning: ReasoningPart,
-          tools: { Fallback: ToolCallUI },
-          data: {
-            by_name: {
-              "debug-id": DebugIdPart as never,
-              "citation-warning": CitationWarningPart as never,
-              battle: BattleMessage as never,
-            },
+  <MessagePrimitive.Root className="my-4 px-6 md:px-8">
+    <MessagePrimitive.Parts
+      components={{
+        Text: TextPart,
+        Reasoning: ReasoningPart,
+        tools: { Fallback: ToolCallUI },
+        data: {
+          by_name: {
+            "debug-id": DebugIdPart as never,
+            "citation-warning": CitationWarningPart as never,
+            battle: BattleMessage as never,
           },
-        }}
-      />
-    </div>
+        },
+      }}
+    />
   </MessagePrimitive.Root>
 );
 
 const Composer = () => (
-  <ComposerPrimitive.Root className="px-4 pb-4 pt-1 bg-white">
+  <ComposerPrimitive.Root className="px-6 md:px-8 pb-4 pt-1 bg-white">
     <ModelPicker />
     <div className="mt-2 flex gap-2 rounded-2xl border border-neutral-200 bg-neutral-50 focus-within:border-neutral-400 focus-within:bg-white transition-colors px-3 py-2">
       <ComposerPrimitive.Input
@@ -81,7 +79,7 @@ const Composer = () => (
 );
 
 export const Thread = () => (
-  <ThreadPrimitive.Root className="flex flex-col h-screen max-w-3xl mx-auto bg-white">
+  <ThreadPrimitive.Root className="flex flex-col h-screen w-full bg-white">
     <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
       <ThreadPrimitive.Empty>
         <div className="text-sm text-neutral-400 mt-32 text-center px-4">
