@@ -104,6 +104,17 @@ const runVariantOnce = async (
         toolLog.push({ name: tr.toolName, args: tr.input, output: tr.output });
       }
     }
+    // Some models (notably 2.5 Flash Lite) call a tool and then bail
+    // without emitting any text. Treat that as a failure so the UI
+    // doesn't show an empty panel — the user deserves to see WHY.
+    if (!result.text || result.text.trim().length === 0) {
+      const finish = result.finishReason ?? "unknown";
+      return {
+        text: "",
+        tools: toolLog,
+        error: `Model returned no text (finish reason: ${finish}, ${toolLog.length} tool call(s)). This model may not be good at this kind of question — try a different variant.`,
+      };
+    }
     return { text: result.text, tools: toolLog };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
