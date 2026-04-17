@@ -616,6 +616,109 @@ def create_app(
         leaderboard.sort(key=lambda x: (-x["win_rate"], -x["total"]))
         return {"leaderboard": leaderboard, "battles": len(rows)}
 
+    @app.get("/api/conversations")
+    async def api_conversations_list(limit: int = Query(100, le=500)):
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            """SELECT c.id, c.title, c.created_at, c.updated_at,
+                      (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) as message_count
+               FROM conversations c
+               ORDER BY c.updated_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        conn.close()
+        return {
+            "conversations": [
+                {
+                    "id": r["id"],
+                    "title": r["title"] or "New chat",
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "message_count": r["message_count"],
+                }
+                for r in rows
+            ]
+        }
+
+    @app.get("/api/conversations/{conversation_id}")
+    async def api_conversation_get(conversation_id: str):
+        import json as _json
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return JSONResponse({"error": "not found"}, status_code=404)
+        msg_rows = conn.execute(
+            """SELECT seq, role, parts FROM conversation_messages
+               WHERE conversation_id = ? ORDER BY seq""",
+            (conversation_id,),
+        ).fetchall()
+        conn.close()
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "messages": [{"seq": m["seq"], "role": m["role"], "parts": _json.loads(m["parts"])} for m in msg_rows],
+        }
+
+    @app.put("/api/conversations/{conversation_id}")
+    async def api_conversation_save(conversation_id: str, payload: dict = Body(...)):
+        """Upsert conversation + fully replace its message list.
+
+        Body: {title?: str, messages: [{role, parts}]}
+        """
+        import json as _json
+
+        messages = payload.get("messages", [])
+        if not isinstance(messages, list):
+            return JSONResponse({"error": "messages must be a list"}, status_code=400)
+        title = payload.get("title")
+        conn = get_connection(db_path)
+        try:
+            now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+            conn.execute(
+                """INSERT INTO conversations (id, title, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     title = COALESCE(excluded.title, conversations.title),
+                     updated_at = excluded.updated_at""",
+                (conversation_id, title, now, now),
+            )
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            for seq, m in enumerate(messages):
+                conn.execute(
+                    """INSERT INTO conversation_messages (conversation_id, seq, role, parts)
+                       VALUES (?, ?, ?, ?)""",
+                    (
+                        conversation_id,
+                        seq,
+                        str(m.get("role", "user")),
+                        _json.dumps(m.get("parts", [])),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "id": conversation_id}
+
+    @app.delete("/api/conversations/{conversation_id}")
+    async def api_conversation_delete(conversation_id: str):
+        conn = get_connection(db_path)
+        conn.execute("DELETE FROM conversation_messages WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(attachment_id: int):
         conn = get_connection(db_path)

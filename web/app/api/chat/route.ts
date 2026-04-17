@@ -17,6 +17,7 @@ import {
   geminiApiKey,
   isValidModel,
   isValidThinking,
+  pythonApiUrl,
   type ThinkingLevel,
 } from "@/lib/config";
 import { lookupThreadByCiteRef } from "@/lib/backend";
@@ -55,6 +56,45 @@ const suppressTextChunks = <T extends AnyChunk>(): TransformStream<T, T> => {
       controller.enqueue(chunk);
     },
   });
+};
+
+// Auto-title: trim the first user message to ~60 chars, single line.
+const deriveTitle = (messages: UIMessage[]): string => {
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+    for (const p of m.parts) {
+      if (p.type === "text") {
+        const one = p.text.replace(/\s+/g, " ").trim();
+        return one.length > 60 ? one.slice(0, 57) + "…" : one || "New chat";
+      }
+    }
+  }
+  return "New chat";
+};
+
+// Persist the conversation (user messages + newly-finished assistant
+// turn) to Python. Fire-and-forget — a save failure should never break
+// the chat response. Called after the stream has produced its answer.
+const saveConversation = async (
+  conversationId: string,
+  messages: Array<{ role: string; parts: unknown[] }>,
+  title: string | null,
+): Promise<void> => {
+  try {
+    const res = await fetch(
+      `${pythonApiUrl()}/api/conversations/${encodeURIComponent(conversationId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, messages }),
+      },
+    );
+    if (!res.ok) {
+      console.error(`[chat] save conversation ${conversationId} failed: ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`[chat] save conversation ${conversationId} threw:`, err);
+  }
 };
 
 const lastUserText = (messages: UIMessage[]): string => {
@@ -129,6 +169,7 @@ export async function POST(req: NextRequest) {
     model?: string;
     thinkingLevel?: string;
     battle?: boolean;
+    conversation_id?: string;
   };
   const messages = body.messages;
 
@@ -144,12 +185,14 @@ export async function POST(req: NextRequest) {
 
   const logger = new ChatLogger();
   const question = lastUserText(messages);
+  const conversationId = body.conversation_id || null;
   await logger.log("request", {
     id: logger.id,
     question,
     message_count: messages.length,
     model,
     thinking_level: thinkingLevel,
+    conversation_id: conversationId,
   });
   console.log(
     `[chat ${logger.id}] start model=${model} thinking=${thinkingLevel} q=${JSON.stringify(question.slice(0, 80))}`,
@@ -273,6 +316,35 @@ export async function POST(req: NextRequest) {
           b: toLogRecord(finalB),
           ms: logger.elapsedMs(),
         });
+
+        // Persist: prior messages (as sent) + the final battle record
+        // as one assistant turn with role "assistant" and a data-battle part.
+        if (conversationId) {
+          const persisted: Array<{ role: string; parts: unknown[] }> = messages.map((m) => ({
+            role: m.role,
+            parts: m.parts as unknown[],
+          }));
+          persisted.push({
+            role: "assistant",
+            parts: [
+              {
+                type: "data-battle",
+                id: battleId,
+                data: {
+                  request_id: logger.id,
+                  question,
+                  variant_a: variantA,
+                  variant_b: variantB,
+                  answer_a: finalA ? ((finalA as { error?: string }).error ? `⚠ ${(finalA as { error: string }).error}` : (finalA as { text: string }).text) : "",
+                  answer_b: finalB ? ((finalB as { error?: string }).error ? `⚠ ${(finalB as { error: string }).error}` : (finalB as { text: string }).text) : "",
+                  tools_a: finalA ? (finalA as { tools: unknown[] }).tools : [],
+                  tools_b: finalB ? (finalB as { tools: unknown[] }).tools : [],
+                },
+              },
+            ],
+          });
+          await saveConversation(conversationId, persisted, deriveTitle(messages));
+        }
       },
       onError: (error) => {
         const msg = error instanceof Error ? error.message : String(error);
@@ -402,6 +474,17 @@ export async function POST(req: NextRequest) {
             writer.write({ type: "text-end", id });
           }
           await logger.log("done", { attempts: attempt + 1, ms: logger.elapsedMs() });
+          if (conversationId) {
+            const persisted: Array<{ role: string; parts: unknown[] }> = messages.map((m) => ({
+              role: m.role,
+              parts: m.parts as unknown[],
+            }));
+            persisted.push({
+              role: "assistant",
+              parts: [{ type: "text", text: finalText }],
+            });
+            await saveConversation(conversationId, persisted, deriveTitle(messages));
+          }
           return;
         }
         if (attempt === MAX_VALIDATION_RETRIES) {

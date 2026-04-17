@@ -65,10 +65,7 @@ const BattleSide = ({
   return (
     <div className={`rounded-lg border ${colorCls} p-3 flex flex-col min-w-0`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-mono text-neutral-500 flex items-center gap-2">
-          {running && <Spinner />}
-          {label}
-        </span>
+        <span className="text-xs font-mono text-neutral-500">{label}</span>
         <span className="text-[10px] text-neutral-400">
           {running ? "thinking…" : `${tools.length} tool call${tools.length === 1 ? "" : "s"}`}
         </span>
