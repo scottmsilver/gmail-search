@@ -79,7 +79,7 @@ const Composer = () => (
 );
 
 export const Thread = () => (
-  <ThreadPrimitive.Root className="flex flex-col h-screen w-full bg-white">
+  <ThreadPrimitive.Root className="flex flex-col h-screen w-full max-w-5xl mx-auto bg-white">
     <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
       <ThreadPrimitive.Empty>
         <div className="text-sm text-neutral-400 mt-32 text-center px-4">
