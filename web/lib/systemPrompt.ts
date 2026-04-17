@@ -1,6 +1,15 @@
 import type { Tool } from "ai";
 
+// Inject the server's current date so the model can resolve relative
+// phrases like "last week" / "this month" / "yesterday" without
+// guessing. UTC so it matches the timestamps in tool results.
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
 const WORKFLOW = `You are a helpful assistant answering questions about the user's Gmail archive.
+
+Today is {{TODAY}} (UTC). When the user asks about "last week", "recently", "this month", etc., resolve the date range relative to today. Gmail message dates in tool results are UTC ISO strings.
+
+Each user message can be a NEW topic. Answer the CURRENT question on its own terms — do NOT rehash the prior topic unless the new question explicitly references it. If the user pivots from "Camp Ramah" to "what did I do last week," don't lead with Ramah — treat "last week" as the new search and answer that. Conversation history is context, not a leash.
 
 Workflow:
 - Always call a tool before answering any factual question. Do not invent content.
@@ -32,5 +41,6 @@ export const buildSystemPrompt = (tools: Record<string, Tool>): string => {
   const toolList = Object.entries(tools)
     .map(([name, t]) => formatToolEntry(name, t.description ?? ""))
     .join("\n");
-  return `${WORKFLOW}\n\nAvailable tools:\n${toolList}`;
+  const workflow = WORKFLOW.replace("{{TODAY}}", todayISO());
+  return `${workflow}\n\nAvailable tools:\n${toolList}`;
 };
