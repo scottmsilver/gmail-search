@@ -179,11 +179,12 @@ const SidebarToggle = () => {
     <button
       type="button"
       onClick={() => setChatSettings({ sidebarOpen: !open })}
-      className="absolute top-3 left-3 z-20 w-8 h-8 flex items-center justify-center rounded hover:bg-neutral-100 text-neutral-500 hover:text-neutral-900 transition-colors"
+      className="absolute top-3 left-3 z-20 w-11 h-11 flex items-center justify-center rounded-md transition-colors theme-hover"
+      style={{ color: "var(--fg-secondary)" }}
       title={open ? "Hide conversations" : "Show conversations"}
       aria-label={open ? "Hide conversations" : "Show conversations"}
     >
-      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
       </svg>
     </button>

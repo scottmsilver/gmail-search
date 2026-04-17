@@ -80,6 +80,13 @@ body {
   color: var(--fg-primary);
 }
 
+/* Reusable theme-aware hover for icon buttons: raised bg on hover,
+   bumps text to --fg-primary. Works across all themes. */
+.theme-hover:hover {
+  background-color: var(--bg-raised);
+  color: var(--fg-primary);
+}
+
 /* Override common Tailwind utility classes so existing components
    pick up the theme without every file being refactored. These rules
    target the classes we actually use in the chat shell. */
