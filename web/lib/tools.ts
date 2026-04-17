@@ -20,8 +20,18 @@ const MAX_INLINE_BYTES = 15 * 1024 * 1024;
 const MAX_BATCH_INLINE_BYTES = 25 * 1024 * 1024;
 // Binary tools cap their batch tighter than text tools.
 const MAX_BINARY_BATCH = 4;
-const ENRICH_TOP_N = 3;
-const ENRICHED_BODY_CHARS = 1500;
+// Enrich the first ENRICH_TOP_N hits with the matching message's body
+// text up to ENRICHED_BODY_CHARS. Tail results keep their summary +
+// short snippet. Gemini's 1M-token window means we can afford
+// generous body excerpts so the model doesn't need to call get_thread
+// for simple questions.
+const ENRICH_TOP_N = 5;
+const ENRICHED_BODY_CHARS = 4000;
+// For query_emails (metadata filter) the top matches still benefit
+// from some body. Smaller cap since query_emails lists can be up to
+// 20 results and we want to keep total payload reasonable.
+const QUERY_ENRICH_TOP_N = 3;
+const QUERY_ENRICHED_BODY_CHARS = 2000;
 const MAX_BATCH = 10;
 
 // Tune: below these thresholds we tell the model the result is thin
@@ -203,6 +213,28 @@ const formatQueryOutput = (raw: Awaited<ReturnType<typeof queryEmailsBackend>>) 
     snippet: t.snippet,
   }));
 
+// Fetches the latest message body for a thread to use as body_excerpt
+// on query_emails results. Falls back to null on any error.
+const fetchLatestBodyForThread = async (threadId: string): Promise<string | null> => {
+  try {
+    const detail = await getThreadBackend(threadId);
+    if (detail.messages.length === 0) return null;
+    const latest = detail.messages[detail.messages.length - 1];
+    return (latest.body_text ?? "").slice(0, QUERY_ENRICHED_BODY_CHARS);
+  } catch {
+    return null;
+  }
+};
+
+const enrichQueryTopHits = async (entries: ReturnType<typeof formatQueryOutput>) => {
+  const heads = entries.slice(0, QUERY_ENRICH_TOP_N);
+  const tail = entries.slice(QUERY_ENRICH_TOP_N);
+  const enriched = await Promise.all(
+    heads.map(async (e) => ({ ...e, body_excerpt: await fetchLatestBodyForThread(e.thread_id) })),
+  );
+  return [...enriched, ...tail];
+};
+
 // ────────────────────────────────────────────────────────────────────
 // schemas (single item per row — tools take an array of these)
 // ────────────────────────────────────────────────────────────────────
@@ -230,7 +262,7 @@ const QuerySchema = z.object({
 export const buildTools = () => ({
   search_emails: tool({
     description:
-      "Semantic + keyword hybrid search over the user's Gmail archive. BATCH: pass one OR many queries in `searches` and they run in parallel — prefer ONE call with multiple searches over multiple sequential calls. Each entry returns its own ranked threads. Use for any question where relevance to a topic matters. Returns short snippets — call get_thread for full content.",
+      "Semantic + keyword hybrid search over the user's Gmail archive. BATCH: pass one OR many queries in `searches` and they run in parallel — prefer ONE call with multiple searches over multiple sequential calls. Each entry returns its own ranked threads. Every thread carries a `summary` (1-3 sentences from a local model with the full message in hand) and the top 5 threads additionally carry a `body_excerpt` (up to 4000 chars of the matching message). You usually do NOT need get_thread — only call it if the body_excerpt is too short or you need multiple messages from the same thread.",
     inputSchema: z.object({
       searches: z.array(SearchSchema).min(1).max(MAX_BATCH).describe("One or more queries to run in parallel."),
     }),
@@ -252,7 +284,7 @@ export const buildTools = () => ({
 
   query_emails: tool({
     description:
-      "Structured filter over Gmail by metadata. BATCH: pass one OR many filter sets in `queries` and they run in parallel — prefer ONE call with multiple filters over multiple sequential calls. Useful for comparisons (e.g. emails-per-month). Returns short snippets — call get_thread for full content.",
+      "Structured filter over Gmail by metadata. BATCH: pass one OR many filter sets in `queries` and they run in parallel — prefer ONE call with multiple filters over multiple sequential calls. Useful for comparisons (e.g. emails-per-month). Every thread carries a summary; the top 3 additionally carry body_excerpt (up to 2000 chars of the latest message). Call get_thread only when you need earlier messages or more than 2000 chars.",
     inputSchema: z.object({
       queries: z.array(QuerySchema).min(1).max(MAX_BATCH).describe("One or more filter sets to run in parallel."),
     }),
@@ -264,7 +296,7 @@ export const buildTools = () => ({
           (q) => ({ filter: q }),
           async (q) => {
             const raw = await queryEmailsBackend(q);
-            const threads = formatQueryOutput(raw);
+            const threads = await enrichQueryTopHits(formatQueryOutput(raw));
             const hasFilters = Object.values(q).some(
               (v) => v !== undefined && v !== null && v !== "" && v !== "date_desc" && v !== 20,
             );
