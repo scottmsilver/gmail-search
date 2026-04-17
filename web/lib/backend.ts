@@ -37,10 +37,14 @@ export type QueryThread = {
 export const searchEmailsBackend = async (args: {
   query: string;
   top_k?: number;
+  date_from?: string;
+  date_to?: string;
 }): Promise<SearchThread[]> => {
   const url = new URL(`${pythonApiUrl()}/api/search`);
   url.searchParams.set("q", args.query);
   url.searchParams.set("k", String(args.top_k ?? 10));
+  if (args.date_from) url.searchParams.set("date_from", args.date_from);
+  if (args.date_to) url.searchParams.set("date_to", args.date_to);
   const res = await fetch(url.toString());
   if (!res.ok) {
     throw new Error(`search_emails backend failed: ${res.status}`);

@@ -242,6 +242,16 @@ const enrichQueryTopHits = async (entries: ReturnType<typeof formatQueryOutput>)
 const SearchSchema = z.object({
   query: z.string().describe("Natural language query."),
   top_k: z.number().int().min(1).max(20).optional().describe("Threads to return (default 10)."),
+  date_from: z
+    .string()
+    .optional()
+    .describe(
+      "ISO date YYYY-MM-DD (inclusive). Restricts results to threads with matching messages on or after this date. Relevance ranking still applies within the window.",
+    ),
+  date_to: z
+    .string()
+    .optional()
+    .describe("ISO date YYYY-MM-DD (inclusive) upper bound."),
 });
 
 const QuerySchema = z.object({
@@ -262,7 +272,7 @@ const QuerySchema = z.object({
 export const buildTools = () => ({
   search_emails: tool({
     description:
-      "Semantic + keyword hybrid search over the user's Gmail archive. BATCH: pass one OR many queries in `searches` and they run in parallel — prefer ONE call with multiple searches over multiple sequential calls. Each entry returns its own ranked threads. Every thread carries a `summary` (1-3 sentences from a local model with the full message in hand) and the top 5 threads additionally carry a `body_excerpt` (up to 4000 chars of the matching message). You usually do NOT need get_thread — only call it if the body_excerpt is too short or you need multiple messages from the same thread.",
+      "Semantic + keyword hybrid search over the user's Gmail archive. BATCH: pass one OR many queries in `searches` and they run in parallel. OPTIONAL DATE FILTER: each search can pass date_from/date_to (ISO YYYY-MM-DD) to restrict results to a time window while KEEPING relevance ranking inside it — use this for mixed questions like 'construction emails last week' instead of running query_emails and losing relevance. Every thread carries a `summary` (1-3 sentences, local-model) and the top 5 threads additionally carry a `body_excerpt` (up to 4000 chars of the matching message). You usually do NOT need get_thread — only call it if the body_excerpt is too short or you need multiple messages from the same thread.",
     inputSchema: z.object({
       searches: z.array(SearchSchema).min(1).max(MAX_BATCH).describe("One or more queries to run in parallel."),
     }),
@@ -273,7 +283,12 @@ export const buildTools = () => ({
           searches,
           (s) => ({ query: s.query }),
           async (s) => {
-            const raw = await searchEmailsBackend({ query: s.query, top_k: s.top_k });
+            const raw = await searchEmailsBackend({
+              query: s.query,
+              top_k: s.top_k,
+              date_from: s.date_from,
+              date_to: s.date_to,
+            });
             const threads = await formatSearchOutput(raw);
             const note = qualityNoteForSearch(threads, s.query);
             return note ? { threads, quality_note: note } : { threads };

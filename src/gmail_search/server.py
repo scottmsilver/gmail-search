@@ -328,11 +328,20 @@ def create_app(
         k: int = Query(20, le=100),
         sort: str = Query("relevance"),
         filter: bool = Query(True, alias="filter"),
+        date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)"),
+        date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)"),
     ):
         from gmail_search.summarize import get_summaries_bulk
 
         engine = get_engine()
-        results = engine.search_threads(q, top_k=k, sort=sort, filter_offtopic=filter)
+        results = engine.search_threads(
+            q,
+            top_k=k,
+            sort=sort,
+            filter_offtopic=filter,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
         # Look up topic IDs for all result messages (for client-side filtering)
         all_msg_ids = _collect_result_message_ids(results)

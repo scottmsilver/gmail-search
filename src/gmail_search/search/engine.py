@@ -482,9 +482,21 @@ class SearchEngine:
         return result
 
     def search_threads(
-        self, query: str, top_k: int = 20, sort: str = "relevance", filter_offtopic: bool = True
+        self,
+        query: str,
+        top_k: int = 20,
+        sort: str = "relevance",
+        filter_offtopic: bool = True,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> list[ThreadResult]:
-        """Thread-grouped search with multi-signal ranking."""
+        """Thread-grouped search with multi-signal ranking.
+
+        Optional date filters (ISO YYYY-MM-DD) restrict results to
+        threads with at least one matching message in the range —
+        computed AFTER ScaNN + BM25 ranking, so you get top relevance
+        WITHIN the window rather than raw chronological results.
+        """
         cleaned_query = self._clean_query(query)
         expanded_query = self._expand_query_with_aliases(cleaned_query)
         pq = parse_query(expanded_query)
@@ -712,6 +724,30 @@ class SearchEngine:
             )
 
         conn.close()
+
+        # Apply optional date range. We filter MESSAGE-level matches first
+        # and drop threads that have nothing left, so "construction last
+        # week" surfaces only threads that actually had last-week traffic.
+        # Relevance ranking still drives the order — this is a post-filter,
+        # not a replacement for ScaNN+BM25.
+        if date_from or date_to:
+            lo = f"{date_from}T00:00:00" if date_from else None
+            hi = f"{date_to}T23:59:59" if date_to else None
+
+            def in_window(d: str) -> bool:
+                if lo and d < lo:
+                    return False
+                if hi and d > hi:
+                    return False
+                return True
+
+            filtered: list[ThreadResult] = []
+            for t in thread_results:
+                kept = [m for m in t.matches if in_window(m.date)]
+                if kept:
+                    t.matches = kept
+                    filtered.append(t)
+            thread_results = filtered
 
         if sort == "recent":
             thread_results.sort(key=lambda t: t.date_last, reverse=True)
