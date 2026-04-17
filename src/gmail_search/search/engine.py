@@ -502,7 +502,15 @@ class SearchEngine:
         pq = parse_query(expanded_query)
         query_vector = self._embed_query(pq.text or expanded_query)
 
-        fetch_k = min(top_k * 10, len(self.searcher.embedding_ids))
+        # When a date filter is present, ScaNN's top-K might all fall
+        # outside the window, leaving us zero results even though there
+        # are relevant matches further down the similarity ranking.
+        # Grab a much bigger candidate pool so the post-filter has
+        # something to work with. ScaNN is cheap enough that fetching
+        # several thousand candidates adds tens of ms at most.
+        has_date_filter = bool(date_from or date_to)
+        fetch_k_target = max(top_k * 10, 2000) if has_date_filter else top_k * 10
+        fetch_k = min(fetch_k_target, len(self.searcher.embedding_ids))
         embedding_ids, scores = self.searcher.search(query_vector, top_k=fetch_k)
 
         # If ScaNN has no results, we still continue to pick up BM25-only matches below
@@ -556,14 +564,40 @@ class SearchEngine:
 
         # BM25 keyword search
         conn = get_connection(self.db_path)
-        # BM25 with expanded query (includes alias terms) + original query
-        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=200)
+        # BM25 with expanded query (includes alias terms) + original query.
+        # Bump the FTS limit when a date filter is present — just like
+        # ScaNN, the top-200 matches across all time might all fall
+        # outside a tight window.
+        bm25_limit = 2000 if has_date_filter else 200
+        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=bm25_limit)
         if expanded_query.lower() != query.lower():
             original_pq = parse_query(query)
-            original_bm25 = search_fts(conn, original_pq.text or query, limit=200)
+            original_bm25 = search_fts(conn, original_pq.text or query, limit=bm25_limit)
             for mid, score in original_bm25.items():
                 if mid not in bm25_scores or score > bm25_scores[mid]:
                     bm25_scores[mid] = score
+
+        # Pre-filter BM25 message_ids by date at SQL level so we waste
+        # no downstream work on messages outside the window.
+        if has_date_filter and bm25_scores:
+            ids = list(bm25_scores.keys())
+            placeholders = ",".join("?" * len(ids))
+            date_where: list[str] = []
+            params: list = list(ids)
+            if date_from:
+                date_where.append("date >= ?")
+                params.append(f"{date_from}T00:00:00")
+            if date_to:
+                date_where.append("date <= ?")
+                params.append(f"{date_to}T23:59:59")
+            in_window = {
+                r["id"]
+                for r in conn.execute(
+                    f"SELECT id FROM messages WHERE id IN ({placeholders}) AND " + " AND ".join(date_where),
+                    params,
+                ).fetchall()
+            }
+            bm25_scores = {mid: s for mid, s in bm25_scores.items() if mid in in_window}
 
         # Merge BM25-only results: threads that BM25 found but ScaNN missed
         scann_message_ids = set()
