@@ -24,6 +24,41 @@ const ENRICH_TOP_N = 3;
 const ENRICHED_BODY_CHARS = 1500;
 const MAX_BATCH = 10;
 
+// Tune: below these thresholds we tell the model the result is thin
+// and it should consider broadening. Empirically most useful answers
+// have at least 3 hits and top score > 0.45.
+const LOW_SCORE_THRESHOLD = 0.45;
+const THIN_RESULT_COUNT = 3;
+
+// Returns a quality_note string the model can see, or null if results
+// look good. Hints are phrased to trigger the "broaden when unsure"
+// rules in the system prompt.
+const qualityNoteForSearch = (
+  threads: Array<{ score?: number }>,
+  query: string,
+): string | null => {
+  if (threads.length === 0) {
+    return `No matches for ${JSON.stringify(query)}. Try alternative phrasings, broader terms, or a related topic — don't claim there are no such emails without trying 1-2 more searches.`;
+  }
+  const topScore = threads[0]?.score ?? 0;
+  if (topScore < LOW_SCORE_THRESHOLD) {
+    return `Low confidence — top relevance score ${topScore.toFixed(2)} for ${JSON.stringify(query)}. Results may be off-topic. Consider re-searching with different terms before synthesizing.`;
+  }
+  if (threads.length < THIN_RESULT_COUNT) {
+    return `Only ${threads.length} result(s) for ${JSON.stringify(query)}. If the user is asking about a topic that likely has more emails, try an alternative phrasing.`;
+  }
+  return null;
+};
+
+const qualityNoteForQuery = (threadCount: number, hasFilters: boolean): string | null => {
+  if (threadCount === 0) {
+    return hasFilters
+      ? "No threads matched these filters. The filters may be too narrow, or the data may not exist in this form. Try loosening date_from/date_to, dropping a filter, or using search_emails with natural-language terms."
+      : "No threads returned. Consider adding filters or switching to search_emails.";
+  }
+  return null;
+};
+
 // ────────────────────────────────────────────────────────────────────
 // shared helpers
 // ────────────────────────────────────────────────────────────────────
@@ -207,7 +242,9 @@ export const buildTools = () => ({
           (s) => ({ query: s.query }),
           async (s) => {
             const raw = await searchEmailsBackend({ query: s.query, top_k: s.top_k });
-            return { threads: await formatSearchOutput(raw) };
+            const threads = await formatSearchOutput(raw);
+            const note = qualityNoteForSearch(threads, s.query);
+            return note ? { threads, quality_note: note } : { threads };
           },
         ),
       ),
@@ -227,7 +264,12 @@ export const buildTools = () => ({
           (q) => ({ filter: q }),
           async (q) => {
             const raw = await queryEmailsBackend(q);
-            return { threads: formatQueryOutput(raw) };
+            const threads = formatQueryOutput(raw);
+            const hasFilters = Object.values(q).some(
+              (v) => v !== undefined && v !== null && v !== "" && v !== "date_desc" && v !== 20,
+            );
+            const note = qualityNoteForQuery(threads.length, hasFilters);
+            return note ? { threads, quality_note: note } : { threads };
           },
         ),
       ),
@@ -269,7 +311,17 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
           "sql_query",
           queries,
           (q) => ({ query: q }),
-          async (q) => runSqlBackend(q),
+          async (q) => {
+            const r = await runSqlBackend(q);
+            if (r.row_count === 0) {
+              return {
+                ...r,
+                quality_note:
+                  "Zero rows returned. The WHERE clause may be too narrow, or the data may be stored differently than you expected. Try loosening filters, LIKE-matching a substring, or inspecting the schema with a different query first.",
+              };
+            }
+            return r;
+          },
         ),
       ),
   }),
@@ -323,6 +375,10 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
           (t) => ({ thread_id: t }),
           async (t) => {
             const detail = await getThreadBackend(t);
+            const note =
+              detail.messages.length === 0
+                ? `Thread ${t} has no messages — it may not exist or be empty. Don't invent content.`
+                : null;
             return {
               cite_ref: citeRef(detail.thread_id),
               messages: detail.messages.map((m) => ({
@@ -334,6 +390,7 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
                 body_text: m.body_text,
                 attachments: m.attachments,
               })),
+              ...(note ? { quality_note: note } : {}),
             };
           },
         ),
@@ -356,7 +413,16 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
           "get_attachment_text",
           attachment_ids,
           (id) => ({ attachment_id: id }),
-          (id) => getAttachmentTextBackend(id),
+          async (id) => {
+            const att = await getAttachmentTextBackend(id);
+            if (!att.extracted_text || att.extracted_text.length < 20) {
+              return {
+                ...att,
+                quality_note: `Attachment ${id} (${att.filename}) has ${att.extracted_text?.length ?? 0} chars of extracted text — likely an image, scan, or a format we can't extract. Try get_attachment_image or get_attachment_pdf, or tell the user this attachment isn't searchable.`,
+              };
+            }
+            return att;
+          },
         ),
       ),
   }),

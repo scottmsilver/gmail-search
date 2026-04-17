@@ -131,6 +131,25 @@ async function runQuestion(question) {
     .map((m) => m[1])
     .filter((s) => /[a-f]/.test(s) && /[0-9]/.test(s));
 
+  // Fallback: some tools (sql_query, get_attachment_text) don't expose
+  // `thread_id` or `cite_ref` as named fields, they embed IDs in row
+  // data. For any ref the model used that isn't in our known set, ask
+  // the server to resolve it — matches the server's own validation.
+  const unresolved = [...new Set([...brackets, ...bares])].filter((r) => !refResolves(r, known));
+  await Promise.all(
+    unresolved.map(async (ref) => {
+      try {
+        const res = await fetch(`${ENDPOINT.replace(/\/api\/chat$/, "")}/api/thread_lookup/${ref}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.thread_id) known.add(data.thread_id);
+        }
+      } catch {
+        // ignore — treat as still unresolved
+      }
+    }),
+  );
+
   const brokenBracket = brackets.filter((r) => !refResolves(r, known));
   const brokenBare = bares.filter((r) => !refResolves(r, known));
 
