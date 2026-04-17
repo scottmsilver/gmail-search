@@ -3,11 +3,131 @@ from typing import Any
 
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import get_connection
 from gmail_search.store.queries import get_attachments_for_message, get_message
+
+
+def _build_query_filters(
+    sender: str | None,
+    subject_contains: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    label: str | None,
+) -> tuple[list[str], list]:
+    clauses: list[str] = []
+    params: list = []
+    if sender:
+        clauses.append("m.from_addr LIKE ?")
+        params.append(f"%{sender}%")
+    if subject_contains:
+        clauses.append("m.subject LIKE ?")
+        params.append(f"%{subject_contains}%")
+    if date_from:
+        clauses.append("m.date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("m.date <= ?")
+        params.append(f"{date_to}T23:59:59+00:00")
+    if label:
+        clauses.append("m.labels LIKE ?")
+        params.append(f'%"{label}"%')
+    return clauses, params
+
+
+def _thread_ids_matching_filters(
+    conn,
+    clauses: list[str],
+    params: list,
+    has_attachment: bool | None,
+    order_by: str,
+    limit: int,
+) -> list[str]:
+    where = " AND ".join(clauses) if clauses else "1=1"
+    join = ""
+    if has_attachment is True:
+        join = "INNER JOIN attachments a ON a.message_id = m.id"
+    elif has_attachment is False:
+        where += " AND m.id NOT IN (SELECT message_id FROM attachments)"
+    order = "MAX(m.date) DESC" if order_by == "date_desc" else "MAX(m.date) ASC"
+    sql = f"""SELECT m.thread_id, MAX(m.date) as last_date
+             FROM messages m {join}
+             WHERE {where}
+             GROUP BY m.thread_id
+             ORDER BY {order}
+             LIMIT ?"""
+    rows = conn.execute(sql, [*params, limit]).fetchall()
+    return [r["thread_id"] for r in rows]
+
+
+def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
+    if not thread_ids:
+        return []
+    import json as _json
+
+    placeholders = ",".join("?" * len(thread_ids))
+    rows = conn.execute(
+        f"""SELECT thread_id, subject, participants, message_count,
+            date_first, date_last
+            FROM thread_summary WHERE thread_id IN ({placeholders})""",
+        thread_ids,
+    ).fetchall()
+    by_id = {r["thread_id"]: r for r in rows}
+    latest_snippets = _latest_snippet_per_thread(conn, thread_ids)
+    out = []
+    for tid in thread_ids:
+        r = by_id.get(tid)
+        if r is None:
+            continue
+        out.append(
+            {
+                "thread_id": r["thread_id"],
+                "subject": r["subject"],
+                "participants": _json.loads(r["participants"]),
+                "message_count": r["message_count"],
+                "date_first": r["date_first"],
+                "date_last": r["date_last"],
+                "snippet": latest_snippets.get(tid, ""),
+            }
+        )
+    return out
+
+
+def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
+    if not thread_ids:
+        return {}
+    placeholders = ",".join("?" * len(thread_ids))
+    rows = conn.execute(
+        f"""SELECT m.thread_id, m.body_text FROM messages m
+            INNER JOIN (
+                SELECT thread_id, MAX(date) as max_date
+                FROM messages WHERE thread_id IN ({placeholders})
+                GROUP BY thread_id
+            ) latest ON m.thread_id = latest.thread_id AND m.date = latest.max_date""",
+        thread_ids,
+    ).fetchall()
+    return {r["thread_id"]: (r["body_text"] or "")[:500] for r in rows}
+
+
+def _run_structured_query(
+    db_path: Path,
+    sender: str | None,
+    subject_contains: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    label: str | None,
+    has_attachment: bool | None,
+    order_by: str,
+    limit: int,
+) -> list[dict]:
+    conn = get_connection(db_path)
+    try:
+        clauses, params = _build_query_filters(sender, subject_contains, date_from, date_to, label)
+        thread_ids = _thread_ids_matching_filters(conn, clauses, params, has_attachment, order_by, limit)
+        return _load_thread_summaries(conn, thread_ids)
+    finally:
+        conn.close()
 
 
 def create_app(
@@ -154,6 +274,30 @@ def create_app(
             "facets": facets,
         }
 
+    @app.get("/api/query")
+    async def api_query(
+        sender: str | None = Query(None, description="Substring match on from_addr"),
+        subject_contains: str | None = Query(None),
+        date_from: str | None = Query(None, description="ISO date (YYYY-MM-DD)"),
+        date_to: str | None = Query(None, description="ISO date (YYYY-MM-DD)"),
+        label: str | None = Query(None, description="Gmail label, e.g. INBOX, IMPORTANT"),
+        has_attachment: bool | None = Query(None),
+        order_by: str = Query("date_desc", pattern="^(date_desc|date_asc)$"),
+        limit: int = Query(20, le=100),
+    ):
+        threads = _run_structured_query(
+            db_path,
+            sender=sender,
+            subject_contains=subject_contains,
+            date_from=date_from,
+            date_to=date_to,
+            label=label,
+            has_attachment=has_attachment,
+            order_by=order_by,
+            limit=limit,
+        )
+        return {"results": threads}
+
     @app.get("/api/thread/{thread_id}")
     async def api_thread(thread_id: str):
         conn = get_connection(db_path)
@@ -238,6 +382,23 @@ def create_app(
                 }
                 for a in attachments
             ],
+        }
+
+    @app.get("/api/attachment/{attachment_id}/text")
+    async def api_attachment_text(attachment_id: int):
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = ?",
+            (attachment_id,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return JSONResponse({"error": "Attachment not found"}, status_code=404)
+        return {
+            "attachment_id": attachment_id,
+            "filename": row["filename"],
+            "mime_type": row["mime_type"],
+            "extracted_text": row["extracted_text"] or "",
         }
 
     @app.get("/api/attachment/{attachment_id}")
