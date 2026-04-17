@@ -104,11 +104,58 @@ export const getThreadBackend = async (threadId: string): Promise<ThreadDetail> 
   return (await res.json()) as ThreadDetail;
 };
 
+export type ThreadLookupHit = { thread_id: string; subject: string };
+export type ThreadLookupResult =
+  | { ok: true; hit: ThreadLookupHit }
+  | { ok: false; status: number; error: string; candidates?: ThreadLookupHit[] };
+
+export const lookupThreadByCiteRef = async (citeRef: string): Promise<ThreadLookupResult> => {
+  const url = new URL(`${pythonApiUrl()}/api/thread_lookup`);
+  url.searchParams.set("cite_ref", citeRef);
+  const res = await fetch(url.toString());
+  if (res.ok) {
+    const hit = (await res.json()) as ThreadLookupHit;
+    return { ok: true, hit };
+  }
+  let body: { error?: string; candidates?: ThreadLookupHit[] } = {};
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    body = { error: `lookup failed (${res.status})` };
+  }
+  return {
+    ok: false,
+    status: res.status,
+    error: body.error ?? `lookup failed (${res.status})`,
+    candidates: body.candidates,
+  };
+};
+
 export type AttachmentText = {
   attachment_id: number;
   filename: string;
   mime_type: string;
   extracted_text: string;
+};
+
+export type MessageDetail = {
+  id: string;
+  thread_id: string;
+  from_addr: string;
+  to_addr: string;
+  subject: string;
+  body_text: string;
+  date: string;
+  labels: string[];
+  attachments: AttachmentMeta[];
+};
+
+export const getMessageBackend = async (messageId: string): Promise<MessageDetail> => {
+  const res = await fetch(`${pythonApiUrl()}/api/message/${encodeURIComponent(messageId)}`);
+  if (!res.ok) {
+    throw new Error(`get_message backend failed: ${res.status}`);
+  }
+  return (await res.json()) as MessageDetail;
 };
 
 export const getAttachmentTextBackend = async (attachmentId: number): Promise<AttachmentText> => {

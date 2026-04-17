@@ -161,13 +161,54 @@ def get_sync_state(conn: sqlite3.Connection, key: str) -> str | None:
     return row["value"] if row else None
 
 
+# Hardened FTS5 input pipeline. The model can hand us anything — quoted
+# phrases, parenthesized expressions, column filters, control chars,
+# enormous strings. We allow-list a tiny character set and cap sizes.
+import re as _re
+
+# Keep word chars (letters/digits/underscore), apostrophe (don't), hyphen
+# (well-known), and whitespace. Everything else is collapsed to a space.
+_FTS_KEEP = _re.compile(r"[^\w'\-\s]+", _re.UNICODE)
+_MAX_TOKEN_LEN = 64
+_MAX_TOKENS = 32
+_MAX_QUERY_LEN = 2000
+
+
+def _sanitize_fts_tokens(raw: str) -> list[str]:
+    """Convert arbitrary user/model input into a safe list of FTS5 tokens.
+
+    - Allow-lists a tiny character set (word chars, ', -, whitespace).
+    - Drops empty tokens, leading/trailing punctuation, and FTS5 operator
+      keywords (AND, OR, NOT, NEAR) so they cannot be injected.
+    - Caps both per-token length and total token count.
+    """
+    if not raw:
+        return []
+    truncated = raw[:_MAX_QUERY_LEN]
+    cleaned = _FTS_KEEP.sub(" ", truncated)
+    tokens: list[str] = []
+    for tok in cleaned.split():
+        # Trim leading/trailing hyphens and apostrophes (they aren't useful
+        # alone and could confuse FTS5 tokenization).
+        stripped = tok.strip("-'")
+        if not stripped:
+            continue
+        if stripped.upper() in {"AND", "OR", "NOT", "NEAR"}:
+            continue
+        tokens.append(stripped[:_MAX_TOKEN_LEN])
+        if len(tokens) >= _MAX_TOKENS:
+            break
+    return tokens
+
+
 def _escape_fts_query(query: str) -> str:
     """Escape a user query for safe use in FTS5 MATCH.
 
-    Wraps each token in double quotes to prevent FTS5 operator injection.
+    Wraps each sanitized token in double quotes so it's treated as a
+    literal phrase and FTS5 cannot interpret any character inside as an
+    operator.
     """
-    tokens = query.split()
-    return " ".join(f'"{t}"' for t in tokens if t)
+    return " ".join(f'"{t}"' for t in _sanitize_fts_tokens(query))
 
 
 def _fts_search_table(
@@ -177,7 +218,11 @@ def _fts_search_table(
     limit: int,
     logger,
 ) -> dict[str, float]:
-    """Search a single FTS table, return {message_id: score}."""
+    """Search a single FTS table, return {message_id: score}.
+
+    Any FTS5 syntax error is logged loudly with the offending query so it
+    can be diagnosed. We never let an FTS failure crash the request.
+    """
     scores: dict[str, float] = {}
     try:
         rows = conn.execute(
@@ -190,7 +235,9 @@ def _fts_search_table(
             if mid not in scores or raw > scores[mid]:
                 scores[mid] = raw
     except sqlite3.OperationalError as e:
-        logger.warning(f"FTS search on {table} failed: {e}")
+        logger.error(f"FTS5 syntax error on {table}: {e!s} | query={query!r}")
+    except Exception as e:  # paranoid catch — FTS must never fail the request
+        logger.exception(f"Unexpected FTS error on {table}: {e!s} | query={query!r}")
     return scores
 
 
@@ -203,7 +250,7 @@ def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[s
     import logging
 
     logger = logging.getLogger(__name__)
-    tokens = query.split()
+    tokens = _sanitize_fts_tokens(query)
     if not tokens:
         return {}
 

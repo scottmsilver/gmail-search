@@ -384,6 +384,34 @@ def create_app(
             ],
         }
 
+    @app.get("/api/thread_lookup")
+    async def api_thread_lookup(cite_ref: str = Query(..., min_length=4, max_length=20)):
+        """Resolve a cite_ref (4-20 char prefix) to a real thread_id.
+
+        Returns the thread + subject when exactly one thread starts with
+        the prefix. 404 if zero matches; 409 if ambiguous.
+        """
+        prefix = cite_ref.strip().lower()
+        if not prefix or any(c not in "0123456789abcdef" for c in prefix):
+            return JSONResponse({"error": "cite_ref must be hex"}, status_code=400)
+        conn = get_connection(db_path)
+        rows = conn.execute(
+            "SELECT thread_id, subject FROM thread_summary WHERE thread_id LIKE ? LIMIT 5",
+            (f"{prefix}%",),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return JSONResponse({"error": f"no thread starts with {prefix!r}"}, status_code=404)
+        if len(rows) > 1:
+            return JSONResponse(
+                {
+                    "error": f"{len(rows)} threads start with {prefix!r} — be more specific",
+                    "candidates": [{"thread_id": r["thread_id"], "subject": r["subject"]} for r in rows],
+                },
+                status_code=409,
+            )
+        return {"thread_id": rows[0]["thread_id"], "subject": rows[0]["subject"]}
+
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(attachment_id: int):
         conn = get_connection(db_path)
