@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
@@ -11,7 +11,12 @@ import { ThemeEffect } from "@/components/ThemeEffect";
 import { Thread } from "@/components/Thread";
 import { ThreadDrawer } from "@/components/ThreadDrawer";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/components/ThreadDrawerContext";
-import { getChatSettings } from "@/lib/chatSettings";
+import {
+  getChatSettings,
+  getServerChatSettings,
+  setChatSettings,
+  subscribeChatSettings,
+} from "@/lib/chatSettings";
 
 const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "http://127.0.0.1:8080";
 
@@ -133,9 +138,10 @@ export default function Page() {
   }, [router]);
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen relative">
       <ThemeEffect />
-      <ConversationSidebar activeId={conversationId} onNew={startNew} />
+      <SidebarToggle />
+      <ConversationSidebarHost activeId={conversationId} onNew={startNew} />
       <div className="flex-1 min-w-0">
         <AssistantRuntimeProvider runtime={runtime}>
           <ThreadDrawerProvider>
@@ -147,3 +153,39 @@ export default function Page() {
     </div>
   );
 }
+
+const useSidebarOpen = () =>
+  useSyncExternalStore(
+    subscribeChatSettings,
+    () => getChatSettings().sidebarOpen,
+    () => getServerChatSettings().sidebarOpen,
+  );
+
+const ConversationSidebarHost = ({
+  activeId,
+  onNew,
+}: {
+  activeId: string | null;
+  onNew: () => void;
+}) => {
+  const open = useSidebarOpen();
+  if (!open) return null;
+  return <ConversationSidebar activeId={activeId} onNew={onNew} />;
+};
+
+const SidebarToggle = () => {
+  const open = useSidebarOpen();
+  return (
+    <button
+      type="button"
+      onClick={() => setChatSettings({ sidebarOpen: !open })}
+      className="absolute top-3 left-3 z-20 w-8 h-8 flex items-center justify-center rounded hover:bg-neutral-100 text-neutral-500 hover:text-neutral-900 transition-colors"
+      title={open ? "Hide conversations" : "Show conversations"}
+      aria-label={open ? "Hide conversations" : "Show conversations"}
+    >
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+      </svg>
+    </button>
+  );
+};

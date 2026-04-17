@@ -21,6 +21,7 @@ export type ChatSettings = {
   thinkingLevel: ThinkingLevel;
   battleMode: boolean;
   theme: Theme;
+  sidebarOpen: boolean;
 };
 
 const defaultSettings = (): ChatSettings => ({
@@ -28,6 +29,7 @@ const defaultSettings = (): ChatSettings => ({
   thinkingLevel: DEFAULT_THINKING,
   battleMode: false,
   theme: "light",
+  sidebarOpen: false,
 });
 
 let current: ChatSettings = defaultSettings();
@@ -58,7 +60,9 @@ const loadFromStorage = () => {
     const theme = (THEMES as readonly string[]).includes(parsed.theme ?? "")
       ? (parsed.theme as Theme)
       : current.theme;
-    current = { model, thinkingLevel, battleMode, theme };
+    const sidebarOpen =
+      typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : current.sidebarOpen;
+    current = { model, thinkingLevel, battleMode, theme, sidebarOpen };
   } catch {
     // ignore malformed storage
   }
