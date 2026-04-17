@@ -81,7 +81,9 @@ export type LogEvent = {
     | "answer"
     | "validation"
     | "error"
-    | "done";
+    | "done"
+    | "battle_start"
+    | "battle_done";
   data: Record<string, unknown>;
 };
 

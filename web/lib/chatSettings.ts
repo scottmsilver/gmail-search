@@ -16,11 +16,13 @@ const STORAGE_KEY = "gmail-search-chat-settings-v1";
 export type ChatSettings = {
   model: (typeof AVAILABLE_MODELS)[number];
   thinkingLevel: ThinkingLevel;
+  battleMode: boolean;
 };
 
 const defaultSettings = (): ChatSettings => ({
   model: AVAILABLE_MODELS[0],
   thinkingLevel: DEFAULT_THINKING,
+  battleMode: false,
 });
 
 let current: ChatSettings = defaultSettings();
@@ -40,7 +42,8 @@ const loadFromStorage = () => {
     const thinkingLevel = (THINKING_LEVELS as string[]).includes(parsed.thinkingLevel ?? "")
       ? (parsed.thinkingLevel as ThinkingLevel)
       : current.thinkingLevel;
-    current = { model, thinkingLevel };
+    const battleMode = typeof parsed.battleMode === "boolean" ? parsed.battleMode : current.battleMode;
+    current = { model, thinkingLevel, battleMode };
   } catch {
     // ignore malformed storage
   }

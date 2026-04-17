@@ -32,7 +32,11 @@ export default function Page() {
         api: "/api/chat",
         body: () => {
           const s = getChatSettings();
-          return { model: s.model, thinkingLevel: s.thinkingLevel };
+          return {
+            model: s.model,
+            thinkingLevel: s.thinkingLevel,
+            battle: s.battleMode,
+          };
         },
       }),
     [],

@@ -6,6 +6,7 @@ import {
   ThreadPrimitive,
 } from "@assistant-ui/react";
 
+import { BattleMessage } from "./BattleMessage";
 import { DebugIdBadge } from "./DebugIdBadge";
 import { MarkdownText } from "./MarkdownText";
 import { ModelPicker } from "./ModelPicker";
@@ -50,6 +51,7 @@ const AssistantMessage = () => (
             by_name: {
               "debug-id": DebugIdPart as never,
               "citation-warning": CitationWarningPart as never,
+              battle: BattleMessage as never,
             },
           },
         }}

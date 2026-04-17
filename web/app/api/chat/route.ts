@@ -3,6 +3,7 @@ import {
   convertToModelMessages,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  generateText,
   stepCountIs,
   streamText,
   type ModelMessage,
@@ -19,6 +20,7 @@ import {
   type ThinkingLevel,
 } from "@/lib/config";
 import { lookupThreadByCiteRef } from "@/lib/backend";
+import { pickTwoRandomVariants } from "@/lib/battleVariants";
 import { ChatLogger } from "@/lib/chatLog";
 import { collectKnownRefs, findBrokenRefs } from "@/lib/citationCheck";
 import { buildSystemPrompt } from "@/lib/systemPrompt";
@@ -66,11 +68,56 @@ const lastUserText = (messages: UIMessage[]): string => {
   return "";
 };
 
+// Only Gemini 3.x supports thinkingConfig. 2.x rejects it with "Thinking
+// level is not supported for this model." Build provider options per-model.
+const googleProviderOptions = (model: string, thinkingLevel: ThinkingLevel, includeThoughts: boolean) => {
+  if (!model.startsWith("gemini-3")) return undefined;
+  return { google: { thinkingConfig: { thinkingLevel, includeThoughts } } };
+};
+
+// Run one variant end-to-end (no validation loop, no streaming to client)
+// and return the final text + a compact tool log. Used by battle mode.
+const runVariantOnce = async (
+  google: ReturnType<typeof createGoogleGenerativeAI>,
+  system: string,
+  tools: ReturnType<typeof buildTools>,
+  conversation: ModelMessage[],
+  model: string,
+  thinkingLevel: ThinkingLevel,
+): Promise<{
+  text: string;
+  tools: Array<{ name: string; args: unknown; output: unknown }>;
+  error?: string;
+}> => {
+  try {
+    const result = await generateText({
+      model: google(model),
+      system,
+      messages: conversation,
+      tools,
+      stopWhen: stepCountIs(MAX_TOOL_STEPS),
+      providerOptions: googleProviderOptions(model, thinkingLevel, false),
+    });
+    const toolLog: Array<{ name: string; args: unknown; output: unknown }> = [];
+    for (const step of result.steps) {
+      for (const tr of step.toolResults ?? []) {
+        toolLog.push({ name: tr.toolName, args: tr.input, output: tr.output });
+      }
+    }
+    return { text: result.text, tools: toolLog };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[chat] battle variant ${model}/${thinkingLevel} failed:`, err);
+    return { text: "", tools: [], error: msg };
+  }
+};
+
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as {
     messages?: UIMessage[];
     model?: string;
     thinkingLevel?: string;
+    battle?: boolean;
   };
   const messages = body.messages;
 
@@ -102,6 +149,60 @@ export async function POST(req: NextRequest) {
   const system = buildSystemPrompt(tools);
   const initialMessages = await convertToModelMessages(messages);
 
+  // ── Battle mode ─────────────────────────────────────────────────
+  // Run two random variants in parallel and emit a single data-battle
+  // part. No validation loop, no per-variant streaming — the UI shows
+  // both complete answers side-by-side and lets the user vote.
+  if (body.battle) {
+    const [variantA, variantB] = pickTwoRandomVariants();
+    await logger.log("battle_start", { variant_a: variantA, variant_b: variantB });
+    console.log(
+      `[chat ${logger.id}] battle: ${variantA.model}/${variantA.thinkingLevel} vs ${variantB.model}/${variantB.thinkingLevel}`,
+    );
+
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({
+          type: "data-debug-id",
+          id: `dbg-${logger.id}`,
+          data: { id: logger.id, log_path: logger.path },
+        });
+
+        const [a, b] = await Promise.all([
+          runVariantOnce(google, system, tools, initialMessages, variantA.model, variantA.thinkingLevel),
+          runVariantOnce(google, system, tools, initialMessages, variantB.model, variantB.thinkingLevel),
+        ]);
+        await logger.log("battle_done", {
+          a: { text_len: a.text.length, tools: a.tools.length, error: a.error },
+          b: { text_len: b.text.length, tools: b.tools.length, error: b.error },
+          ms: logger.elapsedMs(),
+        });
+
+        writer.write({
+          type: "data-battle",
+          id: `battle-${logger.id}`,
+          data: {
+            request_id: logger.id,
+            question,
+            variant_a: variantA,
+            variant_b: variantB,
+            answer_a: a.error ? `⚠ ${a.error}` : a.text,
+            answer_b: b.error ? `⚠ ${b.error}` : b.text,
+            tools_a: a.tools,
+            tools_b: b.tools,
+          },
+        });
+      },
+      onError: (error) => {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[chat ${logger.id}] battle error:`, error);
+        return msg;
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  // ── Normal mode (validation loop, streaming) ────────────────────
   const stream = createUIMessageStream({
     execute: async ({ writer }) => {
       // Surface the request ID to the client immediately so the UI can
@@ -125,15 +226,11 @@ export async function POST(req: NextRequest) {
           messages: conversation,
           tools,
           stopWhen: stepCountIs(MAX_TOOL_STEPS),
-          providerOptions: {
-            google: {
-              // NOTE: On Gemini 3.1 Flash Lite, "medium" and "high" think
-              // more but do NOT stream thought summaries — the Thoughts
-              // UI panel goes blank. "low" is the only level that emits
-              // visible reasoning. Trade reasoning depth vs transparency.
-              thinkingConfig: { thinkingLevel, includeThoughts: true },
-            },
-          },
+          // Thinking config only applies to Gemini 3.x; 2.x rejects it.
+          // NOTE: On Gemini 3.1 Flash Lite, "medium" and "high" still think
+          // more but do NOT stream thought summaries, so the Thoughts
+          // panel stays empty above "low".
+          providerOptions: googleProviderOptions(model, thinkingLevel, true),
           onError: ({ error }) => {
             const msg = error instanceof Error ? error.message : String(error);
             console.error(`[chat ${logger.id}] streamText error:`, error);
