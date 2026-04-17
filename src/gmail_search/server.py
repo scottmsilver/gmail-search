@@ -523,6 +523,99 @@ def create_app(
         except sqlite3.DatabaseError as e:
             return JSONResponse({"error": f"SQL error: {e!s}"}, status_code=400)
 
+    @app.post("/api/battle/vote")
+    async def api_battle_vote(payload: dict = Body(...)):
+        """Record a model battle outcome.
+
+        Body: {question, variant_a, variant_b, winner, request_id_a?, request_id_b?}
+        where winner ∈ {"a","b","tie","both_bad"} and variant_{a,b} are
+        JSON objects like {"model":"...","thinkingLevel":"..."}.
+        """
+        import json as _json
+
+        question = str(payload.get("question", "")).strip()
+        va = payload.get("variant_a")
+        vb = payload.get("variant_b")
+        winner = str(payload.get("winner", ""))
+        if winner not in {"a", "b", "tie", "both_bad"}:
+            return JSONResponse({"error": "winner must be a|b|tie|both_bad"}, status_code=400)
+        if not isinstance(va, dict) or not isinstance(vb, dict):
+            return JSONResponse({"error": "variant_a and variant_b must be objects"}, status_code=400)
+        conn = get_connection(db_path)
+        cur = conn.execute(
+            """INSERT INTO model_battles
+                 (question, variant_a, variant_b, winner, request_id_a, request_id_b)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                question[:1000],
+                _json.dumps(va),
+                _json.dumps(vb),
+                winner,
+                payload.get("request_id_a"),
+                payload.get("request_id_b"),
+            ),
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+        conn.close()
+        return {"ok": True, "id": row_id}
+
+    @app.get("/api/battle/stats")
+    async def api_battle_stats():
+        """Per-variant win rate + head-to-head matrix."""
+        import json as _json
+
+        conn = get_connection(db_path)
+        rows = conn.execute("SELECT variant_a, variant_b, winner FROM model_battles").fetchall()
+        conn.close()
+
+        def key(v: dict) -> str:
+            return f"{v.get('model','?')} · {v.get('thinkingLevel','?')}"
+
+        wins: dict[str, int] = {}
+        losses: dict[str, int] = {}
+        ties: dict[str, int] = {}
+        both_bad: dict[str, int] = {}
+        for r in rows:
+            a = key(_json.loads(r["variant_a"]))
+            b = key(_json.loads(r["variant_b"]))
+            for v in (a, b):
+                wins.setdefault(v, 0)
+                losses.setdefault(v, 0)
+                ties.setdefault(v, 0)
+                both_bad.setdefault(v, 0)
+            w = r["winner"]
+            if w == "a":
+                wins[a] += 1
+                losses[b] += 1
+            elif w == "b":
+                wins[b] += 1
+                losses[a] += 1
+            elif w == "tie":
+                ties[a] += 1
+                ties[b] += 1
+            else:  # both_bad
+                both_bad[a] += 1
+                both_bad[b] += 1
+
+        leaderboard = []
+        for v in sorted(wins.keys()):
+            total = wins[v] + losses[v] + ties[v] + both_bad[v]
+            win_rate = wins[v] / total if total else 0.0
+            leaderboard.append(
+                {
+                    "variant": v,
+                    "wins": wins[v],
+                    "losses": losses[v],
+                    "ties": ties[v],
+                    "both_bad": both_bad[v],
+                    "total": total,
+                    "win_rate": round(win_rate, 3),
+                }
+            )
+        leaderboard.sort(key=lambda x: (-x["win_rate"], -x["total"]))
+        return {"leaderboard": leaderboard, "battles": len(rows)}
+
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(attachment_id: int):
         conn = get_connection(db_path)

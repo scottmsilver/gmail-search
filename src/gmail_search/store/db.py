@@ -96,6 +96,19 @@ CREATE TABLE IF NOT EXISTS message_summaries (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS model_battles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question TEXT NOT NULL,
+    variant_a TEXT NOT NULL,
+    variant_b TEXT NOT NULL,
+    winner TEXT NOT NULL CHECK(winner IN ('a','b','tie','both_bad')),
+    request_id_a TEXT,
+    request_id_b TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_battles_created ON model_battles(created_at);
+
 CREATE TABLE IF NOT EXISTS query_cache (
     query_text TEXT NOT NULL,
     model TEXT NOT NULL,

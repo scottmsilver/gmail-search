@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useSyncExternalStore } from "react";
 
 import {
@@ -63,6 +64,13 @@ export const ModelPicker = () => {
           </button>
         ))}
       </div>
+      <Link
+        href="/battle"
+        className="ml-auto text-neutral-500 hover:text-neutral-800"
+        title="A/B battle mode"
+      >
+        ⚔ battle
+      </Link>
     </div>
   );
 };
