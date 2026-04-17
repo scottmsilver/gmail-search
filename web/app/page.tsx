@@ -95,14 +95,28 @@ export default function Page() {
         const data = (await res.json()) as {
           messages: Array<{ seq: number; role: string; parts: unknown[] }>;
         };
-        // Convert our stored shape into the AI SDK UIMessage format that
-        // assistant-ui's AI SDK runtime expects.
-        const uiMessages = data.messages.map((m, idx) => ({
+        const serverMessages = data.messages ?? [];
+        if (serverMessages.length === 0) {
+          runtimeRef.current.thread.reset();
+          return;
+        }
+        // AI SDK runtime expects a MessageFormatRepository — a linked
+        // list of {parentId, message} entries, not a bare UIMessage
+        // array. Build the chain so each message's parent is the prior
+        // one's id.
+        const uiMessages = serverMessages.map((m, idx) => ({
           id: `${conversationId}-${idx}`,
           role: m.role as "user" | "assistant",
           parts: m.parts,
         }));
-        runtimeRef.current.thread.importExternalState(uiMessages);
+        const repo = {
+          messages: uiMessages.map((msg, idx) => ({
+            parentId: idx === 0 ? null : uiMessages[idx - 1].id,
+            message: msg,
+          })),
+          headId: uiMessages[uiMessages.length - 1].id,
+        };
+        runtimeRef.current.thread.importExternalState(repo);
       } catch (err) {
         console.error("load conversation failed", err);
       }
