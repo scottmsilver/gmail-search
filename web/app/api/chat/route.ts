@@ -101,7 +101,11 @@ export async function POST(req: NextRequest) {
           stopWhen: stepCountIs(MAX_TOOL_STEPS),
           providerOptions: {
             google: {
-              thinkingConfig: { thinkingLevel: "low", includeThoughts: true },
+              // NOTE: On Gemini 3.1 Flash Lite, "medium" and "high" think
+              // more but do NOT stream thought summaries — the Thoughts
+              // UI panel goes blank. "low" is the only level that emits
+              // visible reasoning. Trade reasoning depth vs transparency.
+              thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
             },
           },
           onError: ({ error }) => {

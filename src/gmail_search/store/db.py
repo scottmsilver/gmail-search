@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS contact_frequency (
     score REAL NOT NULL DEFAULT 0.0
 );
 
+CREATE TABLE IF NOT EXISTS message_summaries (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id),
+    summary TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS query_cache (
     query_text TEXT NOT NULL,
     model TEXT NOT NULL,

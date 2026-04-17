@@ -128,6 +128,9 @@ const baseSearchEntry = (t: RawSearchResults[number]) => {
     date_last: t.date_last,
     from_addr: top?.from_addr ?? "",
     snippet: top?.snippet ?? "",
+    // Pre-computed local-model summary of the top-matching message.
+    // When present, it's usually enough to answer without calling get_thread.
+    summary: top?.summary ?? "",
     score: Number(t.score.toFixed(3)),
     top_message_id: top?.message_id ?? null,
   };

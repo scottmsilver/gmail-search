@@ -8,6 +8,7 @@ export type ThreadMatch = {
   snippet: string;
   match_type: string;
   attachment_filename: string | null;
+  summary?: string;
 };
 
 export type SearchThread = {

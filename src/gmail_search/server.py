@@ -329,6 +329,8 @@ def create_app(
         sort: str = Query("relevance"),
         filter: bool = Query(True, alias="filter"),
     ):
+        from gmail_search.summarize import get_summaries_bulk
+
         engine = get_engine()
         results = engine.search_threads(q, top_k=k, sort=sort, filter_offtopic=filter)
 
@@ -336,9 +338,15 @@ def create_app(
         all_msg_ids = _collect_result_message_ids(results)
         msg_topics = _lookup_message_topics(all_msg_ids)
 
+        # Pre-computed per-message summaries — lets the agent answer many
+        # questions without fetching full thread bodies via get_thread.
+        conn_s = get_connection(db_path)
+        summaries = get_summaries_bulk(conn_s, all_msg_ids)
+        conn_s.close()
+
         facets = _compute_topic_facets(results, msg_topics)
 
-        # Tag each result with its topic IDs
+        # Tag each result with its topic IDs + attach match-level summaries.
         formatted = []
         for r in results:
             fr = _format_thread_result(r)
@@ -346,6 +354,8 @@ def create_app(
             for m in r.matches:
                 topics.update(msg_topics.get(m.message_id, []))
             fr["topic_ids"] = list(topics)
+            for match in fr["matches"]:
+                match["summary"] = summaries.get(match["message_id"], "")
             formatted.append(fr)
 
         return {

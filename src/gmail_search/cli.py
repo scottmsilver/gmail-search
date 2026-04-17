@@ -776,6 +776,31 @@ def status(ctx):
     conn.close()
 
 
+@main.command(help="Generate per-message summaries via a local Ollama model")
+@click.option("--model", default=None, help="Ollama model tag (default: qwen2.5:7b)")
+@click.option("--concurrency", type=int, default=4, help="Parallel requests (default 4)")
+@click.option("--limit", type=int, default=None, help="Max messages to process this run")
+@common_options
+@click.pass_context
+def summarize(ctx, model, concurrency, limit):
+    import logging
+
+    from gmail_search.summarize import DEFAULT_MODEL, backfill
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    chosen = model or DEFAULT_MODEL
+    click.echo(f"Summarizing with {chosen} (concurrency={concurrency}, limit={limit})")
+    result = backfill(
+        ctx.obj["db_path"],
+        model=chosen,
+        concurrency=concurrency,
+        limit=limit,
+    )
+    click.echo(
+        f"Done: {result['done']}/{result['total']} summarized " f"({result['failed']} failed) in {result['seconds']}s"
+    )
+
+
 @main.command(help="Start the web UI")
 @click.option("--host", default=None)
 @click.option("--port", type=int, default=None)
