@@ -29,6 +29,13 @@ let current: ChatSettings = defaultSettings();
 let loaded = false;
 const subscribers = new Set<() => void>();
 
+// Stable object returned to React during SSR / initial hydration so
+// the server-rendered HTML matches the client's first paint. After
+// hydration, `getChatSettings()` (with localStorage merged) takes over
+// and any subscribers re-render. Do NOT mutate this.
+const SERVER_SNAPSHOT: ChatSettings = Object.freeze(defaultSettings()) as ChatSettings;
+export const getServerChatSettings = (): ChatSettings => SERVER_SNAPSHOT;
+
 const loadFromStorage = () => {
   if (loaded || typeof window === "undefined") return;
   loaded = true;

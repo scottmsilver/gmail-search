@@ -9,13 +9,16 @@ import {
 } from "@/lib/config";
 import {
   getChatSettings,
+  getServerChatSettings,
   setChatSettings,
   subscribeChatSettings,
   type ChatSettings,
 } from "@/lib/chatSettings";
 
+// Server snapshot must NOT read localStorage — otherwise SSR HTML
+// (defaults) doesn't match the first client render (localStorage).
 const useChatSettings = (): ChatSettings =>
-  useSyncExternalStore(subscribeChatSettings, getChatSettings, getChatSettings);
+  useSyncExternalStore(subscribeChatSettings, getChatSettings, getServerChatSettings);
 
 // Short display names for the model dropdown.
 const SHORT_NAME: Record<string, string> = {

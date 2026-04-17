@@ -36,23 +36,28 @@ export default function Page() {
   const params = useSearchParams();
   const urlC = params.get("c");
 
-  // Current conversation id: URL wins. If the URL has none, mint a new
-  // one; the first message's save will create the DB row.
-  const [conversationId, setConversationId] = useState<string>(() => urlC || newConversationId());
+  // Current conversation id: URL wins. Null until we mint one or pick
+  // one up from the URL. Minting happens in an effect (not in useState
+  // initializer) so server and client agree on the initial render.
+  const [conversationId, setConversationId] = useState<string | null>(urlC ?? null);
 
-  // Keep state synced to URL.
   useEffect(() => {
-    if (urlC && urlC !== conversationId) setConversationId(urlC);
-  }, [urlC, conversationId]);
-
-  // When we mint a fresh id locally, push it to the URL so reload /
-  // share keeps working.
-  useEffect(() => {
-    if (!urlC && conversationId) {
-      router.replace(`/?c=${conversationId}`);
+    if (urlC) {
+      if (urlC !== conversationId) setConversationId(urlC);
+      return;
+    }
+    if (!conversationId) {
+      const id = newConversationId();
+      setConversationId(id);
+      router.replace(`/?c=${id}`);
     }
   }, [urlC, conversationId, router]);
 
+  // Transport is stable across the component's lifetime; it reads the
+  // latest conversation id from a ref so a change doesn't rebuild the
+  // runtime (which would wipe the thread).
+  const conversationIdRef = useRef<string | null>(conversationId);
+  conversationIdRef.current = conversationId;
   const transport = useMemo(
     () =>
       new AssistantChatTransport({
@@ -63,11 +68,11 @@ export default function Page() {
             model: s.model,
             thinkingLevel: s.thinkingLevel,
             battle: s.battleMode,
-            conversation_id: conversationId,
+            conversation_id: conversationIdRef.current,
           };
         },
       }),
-    [conversationId],
+    [],
   );
   const runtime = useChatRuntime({ transport });
   const runtimeRef = useRef(runtime);
@@ -76,7 +81,8 @@ export default function Page() {
   // Load persisted messages when switching conversations.
   const loadedId = useRef<string | null>(null);
   useEffect(() => {
-    if (!conversationId || loadedId.current === conversationId) return;
+    if (!conversationId) return;
+    if (loadedId.current === conversationId) return;
     loadedId.current = conversationId;
     void (async () => {
       try {
