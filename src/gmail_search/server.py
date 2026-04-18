@@ -6,7 +6,6 @@ from typing import Any
 
 from fastapi import Body, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import get_connection
@@ -21,11 +20,29 @@ SQL_TIMEOUT_SEC = 10.0
 
 _SQL_FORBIDDEN = re.compile(
     r"\b(ATTACH|DETACH|PRAGMA|VACUUM|ANALYZE|REINDEX|INSERT|UPDATE|"
-    r"DELETE|DROP|CREATE|REPLACE|TRUNCATE|ALTER|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b",
+    r"DELETE|DROP|CREATE|REPLACE|TRUNCATE|ALTER|BEGIN|COMMIT|ROLLBACK|"
+    r"SAVEPOINT|RELEASE|LOAD_EXTENSION|READFILE|WRITEFILE|EDIT|"
+    r"FTS3_TOKENIZER|SQLITE_COMPILEOPTION_GET|SQLITE_COMPILEOPTION_USED|"
+    r"SQLITE_SOURCE_ID|SQLITE_VERSION|SQLITE_LOG)\b",
     re.IGNORECASE,
 )
 
+# Block introspection of internal SQLite tables — schema is already exposed
+# via /api/sql_schema; sqlite_* tables can leak storage internals (page
+# numbers, payload byte ranges) and the embedded `embeddings` schema is huge.
+_SQL_BLOCKED_TABLES = re.compile(
+    r"\b(sqlite_master|sqlite_schema|sqlite_temp_master|sqlite_temp_schema|"
+    r"sqlite_sequence|sqlite_stat1|sqlite_stat4|sqlite_dbpage|sqlite_dbstat)\b",
+    re.IGNORECASE,
+)
+
+# Negative LIMIT bypasses our row cap (SQLite treats it as "no limit").
+_SQL_NEGATIVE_LIMIT = re.compile(r"\bLIMIT\s*-\s*\d", re.IGNORECASE)
+
 _SQL_STARTS_WITH_SELECT_OR_WITH = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
+
+_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
+_SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
 def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
@@ -36,6 +53,21 @@ def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _strip_for_validation(query: str) -> str:
+    """Strip comments + string literals so keyword checks see real tokens.
+
+    SQLite tolerates `IN/* */SERT`-style keyword splitting. We strip block
+    + line comments before pattern matching so an attacker can't smuggle a
+    forbidden keyword past the regex by interleaving comments. Read-only
+    mode at the connection level is still the primary defense.
+    """
+    stripped = _SQL_BLOCK_COMMENT.sub(" ", query)
+    stripped = _SQL_LINE_COMMENT.sub(" ", stripped)
+    stripped = re.sub(r"'([^'\\]|\\.)*'", "''", stripped)
+    stripped = re.sub(r'"([^"\\]|\\.)*"', '""', stripped)
+    return stripped
+
+
 def _validate_sql(query: str) -> str | None:
     """Return None if the query passes the safety gate, else an error string."""
     if not query or not query.strip():
@@ -44,12 +76,15 @@ def _validate_sql(query: str) -> str | None:
         return f"query too long (>{SQL_MAX_QUERY_CHARS} chars)"
     if not _SQL_STARTS_WITH_SELECT_OR_WITH.match(query):
         return "only SELECT / WITH queries are allowed"
-    # Strip string literals so keywords inside strings aren't flagged.
-    stripped = re.sub(r"'([^'\\]|\\.)*'", "''", query)
-    stripped = re.sub(r'"([^"\\]|\\.)*"', '""', stripped)
+    stripped = _strip_for_validation(query)
     hit = _SQL_FORBIDDEN.search(stripped)
     if hit:
         return f"disallowed SQL keyword: {hit.group(0).upper()}"
+    blocked = _SQL_BLOCKED_TABLES.search(stripped)
+    if blocked:
+        return f"introspection of {blocked.group(0)} is not allowed; use /api/sql_schema"
+    if _SQL_NEGATIVE_LIMIT.search(stripped):
+        return "negative LIMIT is not allowed"
     if ";" in stripped.rstrip().rstrip(";"):
         return "multiple statements are not allowed"
     return None
@@ -214,6 +249,12 @@ def create_app(
     data_dir: Path,
     config: dict[str, Any],
 ) -> FastAPI:
+    # Fail fast at startup if a developer added a table to SCHEMA without
+    # documenting it in TABLE_DOCS — the LLM would silently miss it.
+    from gmail_search.store.db import assert_table_docs_cover_schema
+
+    assert_table_docs_cover_schema()
+
     app = FastAPI(title="Gmail Search")
 
     templates_dir = Path(__file__).parent.parent.parent / "templates"
@@ -324,12 +365,12 @@ def create_app(
 
     @app.get("/api/search")
     async def api_search(
-        q: str = Query(...),
-        k: int = Query(20, le=100),
-        sort: str = Query("relevance"),
+        q: str = Query(..., min_length=1, max_length=1000),
+        k: int = Query(20, ge=1, le=100),
+        sort: str = Query("relevance", pattern="^(relevance|recent)$"),
         filter: bool = Query(True, alias="filter"),
-        date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)"),
-        date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)"),
+        date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
+        date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
     ):
         from gmail_search.summarize import get_summaries_bulk
 
@@ -772,6 +813,14 @@ def create_app(
         from gmail_search.store.db import JobProgress
 
         return JobProgress.get(db_path) or []
+
+    @app.get("/api/sql_schema")
+    async def api_sql_schema():
+        # Markdown description of every queryable table — surfaced to the
+        # chat LLM so the sql_query tool knows the real column shapes.
+        from gmail_search.store.db import describe_schema_for_llm
+
+        return {"markdown": describe_schema_for_llm()}
 
     @app.get("/api/status")
     async def api_status():

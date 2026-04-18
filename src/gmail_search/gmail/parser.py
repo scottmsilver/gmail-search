@@ -15,7 +15,8 @@ def _get_header(headers: list[dict], name: str) -> str:
 
 
 def _decode_body(data: str) -> str:
-    padded = data + "=" * (4 - len(data) % 4)
+    # Pad only when length is not already a multiple of 4 (see client.py).
+    padded = data + "=" * (-len(data) % 4)
     return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
 
 

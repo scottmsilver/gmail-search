@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 
@@ -176,6 +177,167 @@ CREATE VIRTUAL TABLE IF NOT EXISTS attachments_fts USING fts5(
     tokenize='porter unicode61'
 );
 """
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TABLE_DOCS — human-readable descriptions for every table the LLM may
+# query. Kept next to the schema so they don't drift. Surfaced to the
+# model via /api/sql_schema and inlined into the system prompt for the
+# sql_query tool. When you add or change a table above, add or update
+# its entry below.
+# ─────────────────────────────────────────────────────────────────────
+TABLE_DOCS: dict[str, str] = {
+    "messages": (
+        "One row per email message. Primary content store.\n"
+        "- id (TEXT PK): Gmail message ID. Use as cite_ref source via thread_id.\n"
+        "- thread_id (TEXT): Gmail thread this message belongs to.\n"
+        "- from_addr (TEXT): 'Name <email>' format — use LIKE '%@domain%' to match domains.\n"
+        "- to_addr (TEXT): comma-separated 'Name <email>' recipients.\n"
+        "- subject (TEXT): often starts with 'Re:' or 'Fwd:'.\n"
+        "- body_text (TEXT): plain-text body.\n"
+        "- body_html (TEXT): HTML body (rarely needed).\n"
+        "- date (TEXT): ISO 8601 UTC, e.g. '2026-04-17T14:32:00+00:00'. Sort and compare as strings.\n"
+        '- labels (TEXT): JSON array of Gmail labels, e.g. \'["INBOX","IMPORTANT"]\'. Use LIKE \'%"UNREAD"%\'.\n'
+        "- history_id (INT): Gmail incremental-sync watermark."
+    ),
+    "thread_summary": (
+        "Precomputed per-thread metadata — fastest way to enumerate threads without scanning messages.\n"
+        "- thread_id (TEXT PK).\n"
+        "- subject (TEXT): subject of the first message in the thread.\n"
+        "- participants (TEXT): JSON array of all 'Name <email>' strings ever on the thread.\n"
+        "- all_from_addrs (TEXT): JSON array of distinct senders.\n"
+        "- all_labels (TEXT): JSON array of every label any message in the thread has.\n"
+        "- message_count (INT): how many messages in the thread.\n"
+        "- date_first / date_last (TEXT): ISO UTC of earliest/latest message."
+    ),
+    "attachments": (
+        "One row per attachment. Linked via message_id.\n"
+        "- id (INT PK).\n"
+        "- message_id (TEXT FK -> messages.id).\n"
+        "- filename (TEXT).\n"
+        "- mime_type (TEXT): e.g. 'application/pdf', 'image/png'.\n"
+        "- size_bytes (INT).\n"
+        "- extracted_text (TEXT): parsed text (PDF/DOCX/TXT). NULL if image-only or extraction failed.\n"
+        "- image_path (TEXT): on-disk path to extracted image, NULL if non-image.\n"
+        "- raw_path (TEXT): on-disk path to original raw bytes."
+    ),
+    "topics": (
+        "Hierarchical clustering of messages by embedding similarity.\n"
+        "- topic_id (TEXT PK): dotted path like 'root.0.1.0.1' — depth = number of dots.\n"
+        "- parent_id (TEXT): NULL for root.\n"
+        "- label (TEXT): short human label (auto-generated).\n"
+        "- depth (INT).\n"
+        "- message_count (INT): how many messages fall under this topic (including descendants).\n"
+        "- top_senders, sample_subjects (TEXT): JSON arrays."
+    ),
+    "message_topics": (
+        "Many-to-many between messages and leaf topics.\n" "- message_id (TEXT FK), topic_id (TEXT FK)."
+    ),
+    "contact_frequency": (
+        "Per-email-address rollup of how often a contact appears as sender.\n"
+        "- email (TEXT PK): bare email address (no display name).\n"
+        "- message_count (INT): number of messages from this address.\n"
+        "- score (REAL): popularity score for ranking auto-suggest results."
+    ),
+    "message_summaries": (
+        "Local-LLM-generated 1-3 sentence summary per message. Backfilled by `gmail-search summarize`.\n"
+        "- message_id (TEXT PK FK).\n"
+        "- summary (TEXT): the actual summary.\n"
+        "- model (TEXT): which model produced it (e.g. 'qwen2.5:7b').\n"
+        "- created_at (TEXT)."
+    ),
+    "model_battles": (
+        "User vote results from A/B model comparisons in chat.\n"
+        "- id (INT PK), question (TEXT), variant_a/variant_b (TEXT JSON: model + thinking level).\n"
+        "- winner: 'a' | 'b' | 'tie' | 'both_bad'.\n"
+        "- request_id_a / request_id_b (TEXT): chat-log IDs for audit trail.\n"
+        "- created_at (TEXT)."
+    ),
+    "conversations": (
+        "User-facing chat conversations (sidebar list).\n"
+        "- id (TEXT PK), title (TEXT, may be NULL until auto-titled), created_at, updated_at."
+    ),
+    "conversation_messages": (
+        "Persisted chat history per conversation.\n"
+        "- id (INT PK), conversation_id (FK), seq (INT, ordered), role ('user'|'assistant'),\n"
+        "  parts (TEXT JSON: AI SDK message parts), created_at."
+    ),
+    "costs": (
+        "Per-API-call cost log for embeddings + summarization.\n"
+        "- id, timestamp, operation, model, input_tokens, image_count, estimated_cost_usd, message_id."
+    ),
+    "term_aliases": (
+        "Spell correction + personal-abbreviation expansion dictionary.\n"
+        "- term (TEXT PK): user's typed term.\n"
+        "- expansions (TEXT JSON): list of corrected/expanded terms.\n"
+        "- similarity (REAL): how confident the expansion is."
+    ),
+    "job_progress": (
+        "Live status of long-running jobs (sync, watch, update). Used by /api/status.\n"
+        "- job_id (TEXT PK), stage, status, total, completed, detail, started_at, updated_at."
+    ),
+    # Tables intentionally NOT documented for the LLM:
+    # - embeddings: huge BLOB column, never query directly (use search_emails).
+    # - sync_state: internal kv store.
+    # - query_cache: internal embedding cache.
+    # - messages_fts / attachments_fts: virtual FTS5 tables, not directly queryable.
+}
+
+
+# Tables that exist in SCHEMA but should not appear in the LLM-facing schema.
+# Either huge BLOB stores or internal kv/cache tables. Keep this in sync with
+# the "intentionally NOT documented" comment in TABLE_DOCS above.
+_INTERNAL_TABLES = {
+    "embeddings",
+    "sync_state",
+    "query_cache",
+    "messages_fts",
+    "attachments_fts",
+    "messages_fts_data",
+    "messages_fts_idx",
+    "messages_fts_docsize",
+    "messages_fts_config",
+    "attachments_fts_data",
+    "attachments_fts_idx",
+    "attachments_fts_docsize",
+    "attachments_fts_config",
+}
+
+_SCHEMA_TABLE_RE = re.compile(
+    r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)",
+    re.IGNORECASE,
+)
+
+
+def _schema_table_names() -> set[str]:
+    return {m.group(1) for m in _SCHEMA_TABLE_RE.finditer(SCHEMA)}
+
+
+def assert_table_docs_cover_schema() -> None:
+    """Fail fast if a developer adds a table to SCHEMA without docs.
+
+    Called once at server startup so a missing entry in TABLE_DOCS becomes a
+    visible error, not a silent omission from the LLM-facing schema.
+    """
+    schema_tables = _schema_table_names() - _INTERNAL_TABLES
+    documented = set(TABLE_DOCS.keys())
+    missing = schema_tables - documented
+    extra = documented - schema_tables
+    problems = []
+    if missing:
+        problems.append(f"missing TABLE_DOCS entries for: {sorted(missing)}")
+    if extra:
+        problems.append(f"TABLE_DOCS has stale entries (no matching CREATE TABLE): {sorted(extra)}")
+    if problems:
+        raise RuntimeError("schema/docs drift in db.py — " + "; ".join(problems))
+
+
+def describe_schema_for_llm() -> str:
+    """Return a Markdown summary of every table the LLM may query."""
+    parts = []
+    for name, doc in TABLE_DOCS.items():
+        parts.append(f"### {name}\n{doc}")
+    return "\n\n".join(parts)
 
 
 def init_db(db_path: Path) -> None:

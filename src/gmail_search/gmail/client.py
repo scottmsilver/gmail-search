@@ -3,13 +3,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from googleapiclient.discovery import Resource
-from tqdm import tqdm
-
 from gmail_search.gmail.parser import parse_message
 from gmail_search.store.db import get_connection
 from gmail_search.store.models import Attachment
 from gmail_search.store.queries import get_sync_state, set_sync_state, upsert_attachment, upsert_message
+from googleapiclient.discovery import Resource
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,10 @@ def _download_attachment_data(service: Resource, message_id: str, attachment_id:
 
     result = service.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id).execute()
     data = result.get("data", "")
-    padded = data + "=" * (4 - len(data) % 4)
+    # Pad only when length is not already a multiple of 4. The previous
+    # `4 - len(data) % 4` formula added 4 bogus '=' chars on already-aligned
+    # input — Python tolerated it but the math was wrong.
+    padded = data + "=" * (-len(data) % 4)
     return base64.urlsafe_b64decode(padded)
 
 
@@ -267,7 +269,8 @@ def sync_new_messages(
                 continue
             msg_att_dir = attachments_dir / msg.id
             msg_att_dir.mkdir(exist_ok=True)
-            raw_path = msg_att_dir / att_meta["filename"]
+            safe_name = _sanitize_filename(att_meta["filename"])
+            raw_path = msg_att_dir / safe_name
             try:
                 data = _download_attachment_data(service, msg.id, att_meta["attachment_id"])
                 raw_path.write_bytes(data)
@@ -277,7 +280,7 @@ def sync_new_messages(
             att = Attachment(
                 id=None,
                 message_id=msg.id,
-                filename=att_meta["filename"],
+                filename=safe_name,
                 mime_type=att_meta["mime_type"],
                 size_bytes=len(data),
                 raw_path=str(raw_path),
