@@ -1,5 +1,5 @@
 budget:
-  max_usd: 5.0
+  max_usd: 200.0
 embedding:
   model: gemini-embedding-2-preview
   dimensions: 3072
