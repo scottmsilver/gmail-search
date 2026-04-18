@@ -22,6 +22,18 @@ export type SearchThread = {
   date_last: string;
   user_replied: boolean;
   matches: ThreadMatch[];
+  topic_ids?: string[];
+};
+
+export type SearchFacet = {
+  topic_id: string;
+  label: string;
+  count: number;
+};
+
+export type SearchResponse = {
+  results: SearchThread[];
+  facets?: SearchFacet[];
 };
 
 export type QueryThread = {

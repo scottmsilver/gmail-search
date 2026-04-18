@@ -138,7 +138,7 @@ export default function Page() {
   }, [router]);
 
   return (
-    <div className="flex h-screen relative">
+    <div className="flex h-full relative">
       <ThemeEffect />
       <SidebarToggle />
       <ConversationSidebarHost activeId={conversationId} onNew={startNew} />

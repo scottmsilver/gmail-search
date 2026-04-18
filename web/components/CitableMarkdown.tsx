@@ -43,9 +43,21 @@ export const CitableMarkdown = ({ text, hints }: Props) => {
 
   return (
     <div className="prose prose-sm max-w-4xl prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0 prose-headings:my-2 prose-pre:my-2 prose-code:before:content-none prose-code:after:content-none">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={(url) => url}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeUrl}>
         {linkifyRefs(text, knownIds)}
       </ReactMarkdown>
     </div>
   );
+};
+
+// We pass through ref:// (citation chips) and otherwise allow http(s)/mailto
+// only. ReactMarkdown's default urlTransform strips most XSS schemes, but we
+// were overriding it with `(url) => url` to keep ref:// links from being
+// mangled — that opened javascript:/data:/vbscript: as side effects.
+const SAFE_SCHEMES = /^(?:https?|mailto|ref):/i;
+const safeUrl = (url: string): string => {
+  if (!url) return "";
+  // Relative URLs (no scheme) are fine.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
+  return SAFE_SCHEMES.test(url) ? url : "";
 };

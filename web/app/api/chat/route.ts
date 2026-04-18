@@ -24,6 +24,8 @@ import { lookupThreadByCiteRef } from "@/lib/backend";
 import { pickTwoRandomVariants } from "@/lib/battleVariants";
 import { ChatLogger } from "@/lib/chatLog";
 import { collectKnownRefs, findBrokenRefs } from "@/lib/citationCheck";
+import { sanitizeConversation } from "@/lib/sanitizeConversation";
+import { getSqlSchemaMarkdown } from "@/lib/sqlSchema";
 import { buildSystemPrompt } from "@/lib/systemPrompt";
 import { buildTools } from "@/lib/tools";
 
@@ -97,46 +99,8 @@ const saveConversation = async (
   }
 };
 
-const isEmptyMessage = (m: ModelMessage): boolean => {
-  const content = m.content;
-  if (typeof content === "string") return content.trim().length === 0;
-  if (Array.isArray(content)) return content.length === 0;
-  return false;
-};
-
-// Gemini APIs (especially 2.5 Flash) reject requests that contain empty
-// assistant turns OR consecutive same-role turns ("finishReason: error"
-// with no provider details). This happens when a prior battle variant
-// returned empty and the UI persisted that empty turn. We drop empties
-// and merge adjacent same-role turns to produce a clean alternating
-// transcript that every provider accepts.
-const sanitizeConversation = (messages: ModelMessage[]): ModelMessage[] => {
-  const nonEmpty = messages.filter((m) => !(m.role === "assistant" && isEmptyMessage(m)));
-  const merged: ModelMessage[] = [];
-  for (const m of nonEmpty) {
-    const prev = merged[merged.length - 1];
-    if (prev && prev.role === m.role) {
-      const prevContent = typeof prev.content === "string" ? prev.content : null;
-      const curContent = typeof m.content === "string" ? m.content : null;
-      if (prevContent !== null && curContent !== null) {
-        merged[merged.length - 1] = {
-          ...prev,
-          content: `${prevContent}\n\n${curContent}`,
-        } as ModelMessage;
-        continue;
-      }
-      if (Array.isArray(prev.content) && Array.isArray(m.content)) {
-        merged[merged.length - 1] = {
-          ...prev,
-          content: [...prev.content, ...m.content],
-        } as ModelMessage;
-        continue;
-      }
-    }
-    merged.push(m);
-  }
-  return merged;
-};
+// sanitizeConversation moved to web/lib/sanitizeConversation so it can be
+// unit-tested without spinning up a Next.js route.
 
 const lastUserText = (messages: UIMessage[]): string => {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -193,7 +157,10 @@ const runVariantOnce = async (
       // Dig for provider-level details: rawFinishReason from the model,
       // warnings, or the last step's raw response body (Gemini error
       // payloads land here when finishReason === "error").
-      const lastStep = result.steps[result.steps.length - 1];
+      const lastStep =
+        result.steps && result.steps.length > 0
+          ? result.steps[result.steps.length - 1]
+          : undefined;
       const bodyText = (() => {
         const body = (lastStep?.response as { body?: unknown } | undefined)?.body;
         if (!body) return "";
@@ -210,11 +177,12 @@ const runVariantOnce = async (
         .join("; ");
       const providerHint =
         warningsText || rawFinish || bodyText.slice(0, 240) || "";
+      // bodyText can echo email subject lines back from the provider request.
+      // Don't dump it in production logs.
+      const isProd = process.env.NODE_ENV === "production";
       console.error(
-        `[chat] battle variant ${model}/${thinkingLevel} empty finish=${finish} raw=${rawFinish} hint=${providerHint} warnings=`,
-        result.warnings,
-        "body=",
-        bodyText.slice(0, 500),
+        `[chat] battle variant ${model}/${thinkingLevel} empty finish=${finish} raw=${rawFinish} warnings=${warningsText ?? ""}`,
+        ...(isProd ? [] : ["body=", bodyText.slice(0, 500)]),
       );
       // finish_reason === "tool-calls" means the model wanted another
       // tool call but we stopped it at MAX_TOOL_STEPS — that's our cap,
@@ -274,7 +242,8 @@ export async function POST(req: NextRequest) {
 
   const google = createGoogleGenerativeAI({ apiKey: geminiApiKey() });
   const tools = buildTools();
-  const system = buildSystemPrompt(tools);
+  const sqlSchema = await getSqlSchemaMarkdown();
+  const system = buildSystemPrompt(tools, sqlSchema);
   const initialMessages = sanitizeConversation(await convertToModelMessages(messages));
 
   // ── Battle mode ─────────────────────────────────────────────────
@@ -442,6 +411,13 @@ export async function POST(req: NextRequest) {
 
       const conversation: ModelMessage[] = [...initialMessages];
       const knownRefs = new Set<string>();
+      // Convergence detector: if the same broken refs come back twice in a
+      // row, the model is stuck — stop hammering it.
+      let lastBrokenSig: string | null = null;
+      // Cumulative tool-call budget across all validation retries. Each retry
+      // could otherwise burn another 15 tool calls; cap the whole turn at 25.
+      const TURN_TOOL_BUDGET = 25;
+      let toolCallsSoFar = 0;
 
       for (let attempt = 0; attempt <= MAX_VALIDATION_RETRIES; attempt++) {
         await logger.log("attempt", { attempt: attempt + 1 });
@@ -488,6 +464,7 @@ export async function POST(req: NextRequest) {
 
         for (const step of steps) {
           for (const tc of step.toolCalls ?? []) {
+            toolCallsSoFar += 1;
             await logger.log("tool_call", {
               attempt: attempt + 1,
               name: tc.toolName,
@@ -538,6 +515,14 @@ export async function POST(req: NextRequest) {
             (broken.length ? ` (${broken.join(", ")})` : ""),
         );
 
+        // Convergence check: if the model produced the EXACT same broken
+        // refs as last attempt, more retries won't help — bail with the
+        // warning and stop burning tokens.
+        const brokenSig = broken.length > 0 ? broken.slice().sort().join(",") : null;
+        const stuck = brokenSig !== null && brokenSig === lastBrokenSig;
+        const overBudget = toolCallsSoFar > TURN_TOOL_BUDGET;
+        lastBrokenSig = brokenSig;
+
         if (broken.length === 0) {
           // For non-final attempts whose text we suppressed, replay the
           // validated answer as one text part so the UI sees it.
@@ -561,21 +546,33 @@ export async function POST(req: NextRequest) {
           }
           return;
         }
-        if (attempt === MAX_VALIDATION_RETRIES) {
+        if (attempt === MAX_VALIDATION_RETRIES || stuck || overBudget) {
+          const reason = stuck
+            ? "model produced the same broken refs again — stopped retrying"
+            : overBudget
+              ? `tool-call budget exhausted (${toolCallsSoFar}/${TURN_TOOL_BUDGET})`
+              : `${MAX_VALIDATION_RETRIES + 1} attempts exhausted`;
+          // For non-final attempts, the text was suppressed — replay it now
+          // so the user at least sees the partially-cited answer.
+          if (!isFinalAttempt) {
+            const id = `final-text-${attempt}`;
+            writer.write({ type: "text-start", id });
+            writer.write({ type: "text-delta", id, delta: finalText });
+            writer.write({ type: "text-end", id });
+          }
           writer.write({
             type: "data-citation-warning",
             id: `cw-${attempt}`,
             data: {
               broken,
-              message: `Could not validate ${broken.length} citation(s) after ${
-                MAX_VALIDATION_RETRIES + 1
-              } attempts.`,
+              message: `Could not validate ${broken.length} citation(s): ${reason}.`,
             },
           });
           await logger.log("done", {
             attempts: attempt + 1,
             ms: logger.elapsedMs(),
             unresolved_broken: broken,
+            stopped_for: stuck ? "convergence" : overBudget ? "budget" : "max_attempts",
           });
           return;
         }

@@ -181,11 +181,17 @@ const baseSearchEntry = (t: RawSearchResults[number]) => {
   };
 };
 
+// Strip RTL/LRO/zero-width control chars and other invisible bidi tricks an
+// attacker might embed in an email to hide injected instructions from the
+// human while still feeding them to the model.
+const sanitizeBodyExcerpt = (text: string): string =>
+  text.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "");
+
 const fetchTopBody = async (messageId: string | null): Promise<string | null> => {
   if (!messageId) return null;
   try {
     const msg = await getMessageBackend(messageId);
-    return (msg.body_text ?? "").slice(0, ENRICHED_BODY_CHARS);
+    return sanitizeBodyExcerpt((msg.body_text ?? "").slice(0, ENRICHED_BODY_CHARS));
   } catch {
     return null;
   }
@@ -220,7 +226,7 @@ const fetchLatestBodyForThread = async (threadId: string): Promise<string | null
     const detail = await getThreadBackend(threadId);
     if (detail.messages.length === 0) return null;
     const latest = detail.messages[detail.messages.length - 1];
-    return (latest.body_text ?? "").slice(0, QUERY_ENRICHED_BODY_CHARS);
+    return sanitizeBodyExcerpt((latest.body_text ?? "").slice(0, QUERY_ENRICHED_BODY_CHARS));
   } catch {
     return null;
   }
@@ -327,13 +333,7 @@ export const buildTools = () => ({
 
 BATCH: pass one OR many queries in \`queries\` and they run in parallel.
 
-Key tables:
-- messages(id TEXT PK, thread_id TEXT, from_addr TEXT, to_addr TEXT, subject TEXT, body_text TEXT, date TEXT [ISO UTC], labels TEXT [JSON array], history_id INT)
-- thread_summary(thread_id TEXT PK, subject TEXT, participants TEXT [JSON], all_from_addrs TEXT [JSON], all_labels TEXT [JSON], message_count INT, date_first TEXT, date_last TEXT)
-- attachments(id INT PK, message_id TEXT, filename TEXT, mime_type TEXT, size_bytes INT, extracted_text TEXT)
-- topics(topic_id TEXT PK, parent_id TEXT, label TEXT, depth INT, message_count INT)
-- message_topics(message_id TEXT, topic_id TEXT)
-- contact_frequency(addr TEXT PK, email_count INT, reply_count INT, last_email TEXT)
+The full schema (tables and columns) is in the <sql_schema> section of the system prompt — that is the AUTHORITATIVE source. Do not guess column names from memory; read <sql_schema> first.
 
 JSON fields (labels, participants, etc.) are text — use \`json_extract(labels, '$[0]')\` or \`labels LIKE '%"IMPORTANT"%'\`. Dates are ISO UTC strings; use SQLite's date() / datetime() functions (e.g. \`date(date) >= date('now', '-7 days')\`).
 
