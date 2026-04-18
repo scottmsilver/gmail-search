@@ -3,7 +3,6 @@ import logging
 from pathlib import Path
 
 import click
-
 from gmail_search.config import load_config
 from gmail_search.store.cost import check_budget, get_spend_breakdown, get_total_spend
 from gmail_search.store.db import get_connection, init_db
@@ -114,10 +113,9 @@ def sync(ctx):
 @common_options
 @click.pass_context
 def extract(ctx):
-    from tqdm import tqdm
-
     from gmail_search.extract import dispatch
     from gmail_search.store.queries import get_attachments_for_message
+    from tqdm import tqdm
 
     cfg = ctx.obj["config"]
     att_config = cfg.get("attachments", {})
@@ -625,6 +623,12 @@ def watch(ctx, interval, budget):
 
     progress.finish("stopped", f"ran {cycle} cycles")
     click.echo(f"Watch stopped after {cycle} cycles.")
+    # ScaNN / embedding pools spawn non-daemon threads that keep the
+    # interpreter alive after click returns. Force exit so systemd sees
+    # the unit terminate cleanly instead of leaving a zombie.
+    import sys as _sys
+
+    _sys.exit(0)
 
 
 @main.command(help="Show progress of running jobs and daemon status")
@@ -808,7 +812,6 @@ def summarize(ctx, model, concurrency, limit):
 @click.pass_context
 def serve(ctx, host, port):
     import uvicorn
-
     from gmail_search.server import create_app
 
     cfg = ctx.obj["config"]

@@ -60,18 +60,18 @@ export const ModelPicker = () => {
     : `${shortModel(settings.model)} · ${settings.thinkingLevel}`;
 
   return (
-    <div ref={rootRef} className="relative flex justify-end px-4 pt-2">
+    <div ref={rootRef} className="relative shrink-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="text-[11px] text-neutral-400 hover:text-neutral-700 font-mono px-2 py-0.5 rounded hover:bg-neutral-100 transition-colors"
+        className="text-[11px] text-neutral-400 hover:text-neutral-700 font-mono px-1.5 py-0.5 rounded hover:bg-neutral-100 transition-colors whitespace-nowrap"
         title="Change model / thinking / battle"
       >
         {triggerLabel} <span className="ml-0.5 opacity-60">▾</span>
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-4 mb-2 z-10 rounded-lg border border-neutral-200 bg-white shadow-lg p-3 min-w-[260px] text-xs text-neutral-600 flex flex-col gap-3">
+        <div className="absolute bottom-full left-0 mb-2 z-10 rounded-lg border border-neutral-200 bg-white shadow-lg p-3 min-w-[260px] text-xs text-neutral-600 flex flex-col gap-3">
           <div className={battleOn ? "opacity-40 pointer-events-none" : ""}>
             <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
               Model

@@ -30,7 +30,7 @@ import { buildTools } from "@/lib/tools";
 export const runtime = "nodejs";
 export const maxDuration = 180;
 
-const MAX_TOOL_STEPS = 6;
+const MAX_TOOL_STEPS = 15;
 const MAX_VALIDATION_RETRIES = 2;
 
 const buildCorrectionMessage = (broken: string[]): string =>
@@ -97,6 +97,47 @@ const saveConversation = async (
   }
 };
 
+const isEmptyMessage = (m: ModelMessage): boolean => {
+  const content = m.content;
+  if (typeof content === "string") return content.trim().length === 0;
+  if (Array.isArray(content)) return content.length === 0;
+  return false;
+};
+
+// Gemini APIs (especially 2.5 Flash) reject requests that contain empty
+// assistant turns OR consecutive same-role turns ("finishReason: error"
+// with no provider details). This happens when a prior battle variant
+// returned empty and the UI persisted that empty turn. We drop empties
+// and merge adjacent same-role turns to produce a clean alternating
+// transcript that every provider accepts.
+const sanitizeConversation = (messages: ModelMessage[]): ModelMessage[] => {
+  const nonEmpty = messages.filter((m) => !(m.role === "assistant" && isEmptyMessage(m)));
+  const merged: ModelMessage[] = [];
+  for (const m of nonEmpty) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === m.role) {
+      const prevContent = typeof prev.content === "string" ? prev.content : null;
+      const curContent = typeof m.content === "string" ? m.content : null;
+      if (prevContent !== null && curContent !== null) {
+        merged[merged.length - 1] = {
+          ...prev,
+          content: `${prevContent}\n\n${curContent}`,
+        } as ModelMessage;
+        continue;
+      }
+      if (Array.isArray(prev.content) && Array.isArray(m.content)) {
+        merged[merged.length - 1] = {
+          ...prev,
+          content: [...prev.content, ...m.content],
+        } as ModelMessage;
+        continue;
+      }
+    }
+    merged.push(m);
+  }
+  return merged;
+};
+
 const lastUserText = (messages: UIMessage[]): string => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -149,16 +190,49 @@ const runVariantOnce = async (
     // doesn't show an empty panel — the user deserves to see WHY.
     if (!result.text || result.text.trim().length === 0) {
       const finish = result.finishReason ?? "unknown";
-      return {
-        text: "",
-        tools: toolLog,
-        error: `Model returned no text (finish reason: ${finish}, ${toolLog.length} tool call(s)). This model may not be good at this kind of question — try a different variant.`,
-      };
+      // Dig for provider-level details: rawFinishReason from the model,
+      // warnings, or the last step's raw response body (Gemini error
+      // payloads land here when finishReason === "error").
+      const lastStep = result.steps[result.steps.length - 1];
+      const bodyText = (() => {
+        const body = (lastStep?.response as { body?: unknown } | undefined)?.body;
+        if (!body) return "";
+        if (typeof body === "string") return body;
+        try {
+          return JSON.stringify(body);
+        } catch {
+          return String(body);
+        }
+      })();
+      const rawFinish = (result as { rawFinishReason?: string }).rawFinishReason ?? "";
+      const warningsText = result.warnings
+        ?.map((w) => (w as { message?: string }).message ?? String(w))
+        .join("; ");
+      const providerHint =
+        warningsText || rawFinish || bodyText.slice(0, 240) || "";
+      console.error(
+        `[chat] battle variant ${model}/${thinkingLevel} empty finish=${finish} raw=${rawFinish} hint=${providerHint} warnings=`,
+        result.warnings,
+        "body=",
+        bodyText.slice(0, 500),
+      );
+      // finish_reason === "tool-calls" means the model wanted another
+      // tool call but we stopped it at MAX_TOOL_STEPS — that's our cap,
+      // not a model failure.
+      let error: string;
+      if (finish === "tool-calls") {
+        error = `Model reached its thinking budget after ${toolLog.length} tool call(s) and may have had more to say.`;
+      } else if (finish === "error") {
+        error = `Model request errored (${providerHint || "no details from provider"}). Try a different variant.`;
+      } else {
+        error = `Model returned no text (finish reason: ${finish}, ${toolLog.length} tool call(s)). This model may not be good at this kind of question — try a different variant.`;
+      }
+      return { text: "", tools: toolLog, error };
     }
     return { text: result.text, tools: toolLog };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[chat] battle variant ${model}/${thinkingLevel} failed:`, err);
+    console.error(`[chat] battle variant ${model}/${thinkingLevel} threw:`, err);
     return { text: "", tools: [], error: msg };
   }
 };
@@ -201,7 +275,7 @@ export async function POST(req: NextRequest) {
   const google = createGoogleGenerativeAI({ apiKey: geminiApiKey() });
   const tools = buildTools();
   const system = buildSystemPrompt(tools);
-  const initialMessages = await convertToModelMessages(messages);
+  const initialMessages = sanitizeConversation(await convertToModelMessages(messages));
 
   // ── Battle mode ─────────────────────────────────────────────────
   // Run two random variants in parallel and emit a single data-battle

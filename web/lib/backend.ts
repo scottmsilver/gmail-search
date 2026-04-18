@@ -204,6 +204,22 @@ export type AttachmentBytes = {
   sizeBytes: number;
 };
 
+export type CorpusStatus = {
+  messages: number;
+  embeddings: number;
+  date_oldest: string | null;
+  date_newest: string | null;
+  total_cost_usd: number;
+  budget_remaining_usd: number;
+  running_job: { stage?: string } | null;
+};
+
+export const getCorpusStatusBackend = async (): Promise<CorpusStatus> => {
+  const res = await fetch(`${pythonApiUrl()}/api/status`);
+  if (!res.ok) throw new Error(`status backend failed: ${res.status}`);
+  return (await res.json()) as CorpusStatus;
+};
+
 export const getAttachmentBytesBackend = async (attachmentId: number): Promise<AttachmentBytes> => {
   const res = await fetch(`${pythonApiUrl()}/api/attachment/${attachmentId}`);
   if (!res.ok) {

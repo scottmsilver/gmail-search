@@ -5,6 +5,8 @@ import { useEffect, useState } from "react";
 import { fetchThread } from "@/lib/threadCache";
 import type { ThreadDetail, ThreadMessage } from "@/lib/backend";
 
+import { Drawer } from "./Drawer";
+
 type Props = {
   threadId: string | null;
   onClose: () => void;
@@ -110,58 +112,21 @@ export const ThreadDrawer = ({ threadId, onClose, pythonBaseUrl }: Props) => {
     };
   }, [threadId]);
 
-  useEffect(() => {
-    if (!threadId) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [threadId, onClose]);
-
   const open = threadId !== null;
   const subject = detail?.messages[0]?.subject ?? (open ? "Loading…" : "");
+  const subtitle =
+    detail && `${detail.messages.length} message${detail.messages.length === 1 ? "" : "s"}`;
 
   return (
-    <>
-      <div
-        className={`fixed inset-0 bg-black/30 transition-opacity z-40 ${open ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-        onClick={onClose}
-      />
-      <aside
-        className={`fixed top-0 right-0 h-full w-full sm:w-[640px] bg-white shadow-2xl z-50 transition-transform duration-200 flex flex-col ${
-          open ? "translate-x-0" : "translate-x-full"
-        }`}
-        aria-hidden={!open}
-      >
-        <header className="px-5 py-4 border-b flex items-start gap-3">
-          <div className="flex-1 min-w-0">
-            <h2 className="font-semibold text-base text-neutral-900 truncate">{subject}</h2>
-            {detail && (
-              <p className="text-xs text-neutral-500 mt-0.5">
-                {detail.messages.length} message{detail.messages.length === 1 ? "" : "s"}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
-            aria-label="Close"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto px-5">
-          {error && <div className="py-8 text-sm text-red-600">{error}</div>}
-          {!error && !detail && open && (
-            <div className="py-8 text-sm text-neutral-500">Loading thread…</div>
-          )}
-          {detail && detail.messages.map((m) => <MessageCard key={m.id} msg={m} pythonBaseUrl={pythonBaseUrl} />)}
-        </div>
-      </aside>
-    </>
+    <Drawer open={open} onClose={onClose} title={subject} subtitle={subtitle}>
+      <div className="px-5">
+        {error && <div className="py-8 text-sm text-red-600">{error}</div>}
+        {!error && !detail && open && (
+          <div className="py-8 text-sm text-neutral-500">Loading thread…</div>
+        )}
+        {detail &&
+          detail.messages.map((m) => <MessageCard key={m.id} msg={m} pythonBaseUrl={pythonBaseUrl} />)}
+      </div>
+    </Drawer>
   );
 };

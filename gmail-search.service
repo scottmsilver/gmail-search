@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/gmail-search watch --interval 120
+ExecStart=%h/anaconda3/bin/gmail-search watch --interval 300
 WorkingDirectory=%h/development/gmail-search
-Environment=GEMINI_API_KEY=
+EnvironmentFile=%h/.config/gmail-search/env
 Restart=on-failure
 RestartSec=30
 

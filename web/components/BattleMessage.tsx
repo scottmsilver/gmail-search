@@ -1,15 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useState } from "react";
 
 import { extractThreadHints } from "@/lib/extractThreadHints";
-import { linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
 import { variantLabel, type BattleVariant } from "@/lib/battleVariants";
 
-import { CitationChip } from "./CitationChip";
-import { useThreadDrawer } from "./ThreadDrawerContext";
+import { CitableMarkdown } from "./CitableMarkdown";
+import { Drawer } from "./Drawer";
 
 type BattleData = {
   request_id: string;
@@ -69,78 +66,42 @@ const InspectorDrawer = ({
   onClose: () => void;
   label: string;
   tools: BattleTool[];
-}) => {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  return (
-    <>
-      <div
-        className={`fixed inset-0 bg-black/20 transition-opacity z-40 ${
-          open ? "opacity-100" : "opacity-0 pointer-events-none"
-        }`}
-        onClick={onClose}
-      />
-      <aside
-        className={`fixed top-0 right-0 h-full w-full sm:w-[560px] bg-white shadow-2xl z-50 transition-transform duration-200 flex flex-col ${
-          open ? "translate-x-0" : "translate-x-full"
-        }`}
-        aria-hidden={!open}
-      >
-        <header className="px-5 py-4 border-b flex items-start gap-3">
-          <div className="flex-1 min-w-0">
-            <h2 className="font-semibold text-sm text-neutral-900 truncate">Inspector — {label}</h2>
-            <p className="text-xs text-neutral-500 mt-0.5">
-              {tools.length} tool call{tools.length === 1 ? "" : "s"}
-            </p>
+}) => (
+  <Drawer
+    open={open}
+    onClose={onClose}
+    title={`Inspector — ${label}`}
+    subtitle={`${tools.length} tool call${tools.length === 1 ? "" : "s"}`}
+    widthClass="w-full sm:w-[560px]"
+  >
+    <div className="px-5 py-3 space-y-4">
+      {tools.length === 0 && (
+        <div className="text-xs text-neutral-400">No tool calls for this variant.</div>
+      )}
+      {tools.map((t, i) => (
+        <div key={i} className="rounded border border-neutral-200 overflow-hidden">
+          <div className="bg-neutral-50 px-3 py-2 text-xs font-mono text-neutral-700 border-b border-neutral-200">
+            {i + 1}. {t.name}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
-            aria-label="Close"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-4">
-          {tools.length === 0 && (
-            <div className="text-xs text-neutral-400">No tool calls for this variant.</div>
-          )}
-          {tools.map((t, i) => (
-            <div key={i} className="rounded border border-neutral-200 overflow-hidden">
-              <div className="bg-neutral-50 px-3 py-2 text-xs font-mono text-neutral-700 border-b border-neutral-200">
-                {i + 1}. {t.name}
-              </div>
-              <div className="p-3 space-y-2">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-0.5">Args</div>
-                  <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
-                    {formatJson(t.args)}
-                  </pre>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-0.5">Result</div>
-                  <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
-                    {formatJson(t.output)}
-                  </pre>
-                </div>
-              </div>
+          <div className="p-3 space-y-2">
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-0.5">Args</div>
+              <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
+                {formatJson(t.args)}
+              </pre>
             </div>
-          ))}
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-0.5">Result</div>
+              <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+                {formatJson(t.output)}
+              </pre>
+            </div>
+          </div>
         </div>
-      </aside>
-    </>
-  );
-};
+      ))}
+    </div>
+  </Drawer>
+);
 
 type Vote = "a" | "b" | "tie" | "both_bad";
 
@@ -161,12 +122,10 @@ const BattleSide = ({
   running: boolean;
   onInspect: () => void;
 }) => {
-  const { setOpenThreadId } = useThreadDrawer();
   // Walk tool outputs just like the normal renderer so [ref:] chips resolve.
   const hints = extractThreadHints(
     tools.map((t) => ({ type: "tool-call" as const, result: t.output })),
   );
-  const knownIds = hints.map((h) => h.thread_id);
 
   const colorCls =
     won === true
@@ -199,32 +158,7 @@ const BattleSide = ({
           <span className="ml-2">generating…</span>
         </div>
       ) : (
-      <div className="prose prose-sm max-w-none prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0 prose-headings:my-2 prose-pre:my-2">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          urlTransform={(url) => url}
-          components={{
-            a: ({ href, children, ...rest }) => {
-              if (href?.startsWith(REF_PREFIX)) {
-                return (
-                  <CitationChip
-                    threadId={href.slice(REF_PREFIX.length)}
-                    hints={hints}
-                    onOpen={setOpenThreadId}
-                  />
-                );
-              }
-              return (
-                <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline" {...rest}>
-                  {children}
-                </a>
-              );
-            },
-          }}
-        >
-          {linkifyRefs(text, knownIds)}
-        </ReactMarkdown>
-      </div>
+        <CitableMarkdown text={text} hints={hints} />
       )}
     </div>
   );
