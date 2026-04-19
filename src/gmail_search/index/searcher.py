@@ -1,3 +1,4 @@
+import heapq
 import json
 import logging
 from pathlib import Path
@@ -9,6 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class ScannSearcher:
+    """Loads a ScaNN index produced by either build_index (single) or
+    build_index_sharded (multi-shard). Sharded indexes query each shard
+    for top_k and merge by score.
+    """
+
     def __init__(self, index_dir: Path, dimensions: int):
         self.index_dir = index_dir
         self.dimensions = dimensions
@@ -18,22 +24,54 @@ class ScannSearcher:
             raise FileNotFoundError(f"Index not found at {index_dir}. Run 'gmail-search reindex' first.")
 
         self.embedding_ids: list[int] = json.loads(ids_file.read_text())
+        # List of (scann_searcher, local_ids) pairs. One entry for an
+        # unsharded legacy index; N entries for a sharded one. Empty list
+        # = empty index.
+        self._shards: list[tuple[object, list[int]]] = []
 
+        manifest_path = index_dir / "manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            self._load_sharded(manifest)
+        else:
+            self._load_legacy_single()
+
+    def _load_sharded(self, manifest: dict) -> None:
+        for i in range(manifest["num_shards"]):
+            shard_dir = self.index_dir / f"shard_{i}"
+            shard_ids = json.loads((shard_dir / "ids.json").read_text())
+            if not shard_ids:
+                continue
+            searcher = scann.scann_ops_pybind.load_searcher(str(shard_dir))
+            self._shards.append((searcher, shard_ids))
+        logger.info(
+            f"Loaded sharded ScaNN index: {len(self._shards)} shards, " f"{len(self.embedding_ids)} total vectors"
+        )
+
+    def _load_legacy_single(self) -> None:
         if not self.embedding_ids:
-            self.searcher = None
             logger.warning("Empty index loaded")
             return
-
-        self.searcher = scann.scann_ops_pybind.load_searcher(str(index_dir))
+        searcher = scann.scann_ops_pybind.load_searcher(str(self.index_dir))
+        self._shards.append((searcher, self.embedding_ids))
         logger.info(f"Loaded ScaNN index with {len(self.embedding_ids)} vectors")
 
     def search(self, query_vector: np.ndarray, top_k: int = 20) -> tuple[list[int], list[float]]:
-        if self.searcher is None or not self.embedding_ids:
+        if not self._shards:
             return [], []
 
-        neighbors, distances = self.searcher.search(query_vector, final_num_neighbors=top_k)
+        if len(self._shards) == 1:
+            # Fast path — avoid the merge step for unsharded indexes.
+            searcher, ids = self._shards[0]
+            neighbors, distances = searcher.search(query_vector, final_num_neighbors=top_k)
+            return [ids[i] for i in neighbors], distances.tolist()
 
-        embedding_ids = [self.embedding_ids[i] for i in neighbors]
-        scores = distances.tolist()
-
-        return embedding_ids, scores
+        # Sharded: get each shard's top_k, merge by score. For dot_product
+        # similarity, higher is better → heapq.nlargest.
+        candidates: list[tuple[float, int]] = []
+        for searcher, ids in self._shards:
+            neighbors, distances = searcher.search(query_vector, final_num_neighbors=top_k)
+            for idx, score in zip(neighbors, distances):
+                candidates.append((float(score), ids[idx]))
+        top = heapq.nlargest(top_k, candidates, key=lambda x: x[0])
+        return [eid for _, eid in top], [score for score, _ in top]
