@@ -238,9 +238,12 @@ export type RunningJob = {
   status: string;
   total: number;
   completed: number;
+  start_completed?: number;
   detail: string;
   started_at: string;
   updated_at: string;
+  rate_per_sec?: number; // server-computed — present only for running rows with enough signal
+  eta_seconds?: number;
 };
 
 export type JobsRunningResponse = {
@@ -248,6 +251,7 @@ export type JobsRunningResponse = {
   recent: RunningJob[];
   disk: { total_bytes: number; used_bytes: number; free_bytes: number };
   frontfill: { running: boolean; pid: number | null };
+  backfill: { running: boolean; pid: number | null };
 };
 
 export const getJobsRunningBackend = async (): Promise<JobsRunningResponse> => {

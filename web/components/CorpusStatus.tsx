@@ -55,7 +55,7 @@ export const CorpusStatus = () => {
   const latest = status.date_newest ? formatRelative(status.date_newest) : "?";
 
   return (
-    <div className="text-[10px] text-neutral-400 px-2 leading-tight truncate">
+    <div className="truncate px-2 text-[10px] leading-tight text-muted-foreground">
       {status.messages.toLocaleString()} · {oldest} → {latest}
     </div>
   );

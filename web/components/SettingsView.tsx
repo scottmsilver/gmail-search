@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import type { JobsRunningResponse, RunningJob } from "@/lib/backend";
 
 const formatBytes = (n: number): string => {
@@ -10,43 +14,89 @@ const formatBytes = (n: number): string => {
   return `${(n / 1024).toFixed(1)} KiB`;
 };
 
-const JobRow = ({ j }: { j: RunningJob }) => {
-  const pct = j.total > 0 ? Math.min(100, Math.round((j.completed / j.total) * 100)) : null;
-  return (
-    <div
-      className="flex items-center justify-between gap-4 px-3 py-2 rounded-md text-xs"
-      style={{ background: "var(--bg-secondary)" }}
-    >
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium" style={{ color: "var(--fg-primary)" }}>
-            {j.job_id}
-          </span>
-          <span style={{ color: "var(--fg-tertiary)" }}>·</span>
-          <span style={{ color: "var(--fg-secondary)" }}>{j.stage}</span>
-          {j.status !== "running" && (
-            <span className="uppercase tracking-wide" style={{ color: "var(--fg-tertiary)" }}>
-              {j.status}
-            </span>
+// Shared card for frontfill + backfill — both have the same shape
+// (start/stop + one numeric input). Rendering in one place keeps their
+// affordances identical.
+const JobControlCard = ({
+  title,
+  description,
+  running,
+  pid,
+  starting,
+  stopping,
+  onStart,
+  onStop,
+  inputId,
+  inputLabel,
+  inputUnit,
+  inputMin,
+  inputMax,
+  inputStep,
+  inputValue,
+  onInputChange,
+  alwaysShowInput = false,
+}: {
+  title: string;
+  description: string;
+  running: boolean;
+  pid: number | null;
+  starting: boolean;
+  stopping: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  inputId: string;
+  inputLabel: string;
+  inputUnit: string;
+  inputMin: number;
+  inputMax: number;
+  inputStep: number;
+  inputValue: number;
+  onInputChange: (v: number) => void;
+  alwaysShowInput?: boolean;
+}) => (
+  <Card>
+    <CardHeader className="flex-row items-start justify-between gap-4 space-y-0 pb-4">
+      <div className="space-y-1">
+        <CardTitle className="text-sm">{title}</CardTitle>
+        <CardDescription>
+          {description}
+          {running && pid !== null && (
+            <span className="ml-1 font-medium text-foreground">Running (pid {pid}).</span>
           )}
-        </div>
-        <div className="truncate mt-0.5" style={{ color: "var(--fg-tertiary)" }}>
-          {j.detail || "—"}
-        </div>
-        {pct !== null && (
-          <div className="mt-1.5 h-1 rounded overflow-hidden" style={{ background: "var(--bg-primary)" }}>
-            <div className="h-full" style={{ width: `${pct}%`, background: "var(--fg-secondary)" }} />
-          </div>
-        )}
+        </CardDescription>
       </div>
-      {pct !== null && (
-        <div className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--fg-tertiary)" }}>
-          {j.completed.toLocaleString()}/{j.total.toLocaleString()} ({pct}%)
-        </div>
+      {running ? (
+        <Button variant="outline" size="sm" disabled={stopping} onClick={onStop}>
+          {stopping ? "Stopping…" : "Stop"}
+        </Button>
+      ) : (
+        <Button size="sm" disabled={starting} onClick={onStart}>
+          {starting ? "Starting…" : "Start"}
+        </Button>
       )}
-    </div>
-  );
-};
+    </CardHeader>
+    {(alwaysShowInput || !running) && (
+      <CardContent className="pt-0">
+        <div className="flex items-center gap-3">
+          <Label htmlFor={inputId} className="whitespace-nowrap text-xs text-muted-foreground">
+            {inputLabel}
+          </Label>
+          <Input
+            id={inputId}
+            type="number"
+            min={inputMin}
+            max={inputMax}
+            step={inputStep}
+            value={inputValue}
+            onChange={(e) => onInputChange(Number(e.target.value))}
+            className="w-24 text-right tabular-nums"
+          />
+          <span className="text-xs text-muted-foreground">{inputUnit}</span>
+        </div>
+      </CardContent>
+    )}
+  </Card>
+);
 
 export const SettingsView = () => {
   const [data, setData] = useState<JobsRunningResponse | null>(null);
@@ -73,28 +123,25 @@ export const SettingsView = () => {
     return () => clearInterval(id);
   }, [refresh]);
 
+  type Kick = "frontfill" | "frontfill-stop" | "backfill" | "backfill-stop";
+
   const kickoff = useCallback(
-    async (kind: "frontfill" | "backfill" | "frontfill-stop") => {
+    async (kind: Kick) => {
+      const urls: Record<Kick, string> = {
+        frontfill: `/api/jobs/frontfill?interval=${encodeURIComponent(String(intervalSec))}`,
+        "frontfill-stop": "/api/jobs/frontfill/stop",
+        backfill: `/api/jobs/backfill?min_free_gb=${encodeURIComponent(String(minFreeGb))}`,
+        "backfill-stop": "/api/jobs/backfill/stop",
+      };
       setBusy(kind);
       setToast(null);
       try {
-        let url: string;
-        if (kind === "frontfill") {
-          url = `/api/jobs/frontfill?interval=${encodeURIComponent(String(intervalSec))}`;
-        } else if (kind === "frontfill-stop") {
-          url = "/api/jobs/frontfill/stop";
-        } else {
-          url = `/api/jobs/backfill?min_free_gb=${encodeURIComponent(String(minFreeGb))}`;
-        }
-        const res = await fetch(url, { method: "POST" });
+        const res = await fetch(urls[kind], { method: "POST" });
         const body = (await res.json()) as { ok: boolean; pid?: number; error?: string };
         if (!body.ok) {
           setToast(body.error ?? `failed: ${kind}`);
-        } else if (kind === "frontfill-stop") {
-          setToast(`watch stopped`);
-          await refresh();
         } else {
-          setToast(`${kind} started (pid ${body.pid})`);
+          setToast(kind.endsWith("-stop") ? `${kind.split("-")[0]} stopped` : `${kind} started (pid ${body.pid})`);
           await refresh();
         }
       } catch (e) {
@@ -106,200 +153,190 @@ export const SettingsView = () => {
     [intervalSec, minFreeGb, refresh],
   );
 
-  const running = data?.running ?? [];
   const recent = data?.recent ?? [];
   const disk = data?.disk;
   const frontfillRunning = data?.frontfill?.running ?? false;
   const frontfillPid = data?.frontfill?.pid ?? null;
-  const backfillRunning = running.some((j) => j.job_id === "update");
+  const backfillRunning = data?.backfill?.running ?? false;
+  const backfillPid = data?.backfill?.pid ?? null;
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-8 space-y-8">
+    <div className="mx-auto max-w-2xl space-y-6 px-6 py-8">
       <div>
-        <h1 className="text-base font-medium" style={{ color: "var(--fg-primary)" }}>
-          Settings
-        </h1>
-        <p className="text-xs mt-1" style={{ color: "var(--fg-tertiary)" }}>
-          Background jobs and disk usage.
-        </p>
+        <h1 className="text-xl font-semibold tracking-tight text-foreground">Settings</h1>
+        <p className="text-sm text-muted-foreground">Background jobs and disk usage.</p>
       </div>
 
       {error && (
-        <div className="text-xs px-3 py-2 rounded" style={{ color: "var(--fg-secondary)", background: "var(--bg-secondary)" }}>
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
 
-      <section className="space-y-2">
-        <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--fg-tertiary)" }}>
-          Disk
-        </h2>
-        {disk ? (
-          <div
-            className="text-xs px-3 py-2 rounded"
-            style={{ background: "var(--bg-secondary)", color: "var(--fg-secondary)" }}
-          >
-            <div className="flex justify-between">
-              <span>Free</span>
-              <span className="tabular-nums">{formatBytes(disk.free_bytes)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Used</span>
-              <span className="tabular-nums">{formatBytes(disk.used_bytes)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Total</span>
-              <span className="tabular-nums">{formatBytes(disk.total_bytes)}</span>
-            </div>
-          </div>
-        ) : (
-          <div className="text-xs" style={{ color: "var(--fg-tertiary)" }}>
-            loading…
-          </div>
-        )}
-      </section>
-
-      <section className="space-y-2">
-        <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--fg-tertiary)" }}>
-          Running jobs
-        </h2>
-        {running.length === 0 ? (
-          <div className="text-xs" style={{ color: "var(--fg-tertiary)" }}>
-            none
-          </div>
-        ) : (
-          <div className="space-y-1.5">
-            {running.map((j) => (
-              <JobRow key={j.job_id} j={j} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--fg-tertiary)" }}>
-          Actions
-        </h2>
-        <div className="space-y-3">
-          <div className="px-3 py-3 rounded-md space-y-3" style={{ background: "var(--bg-secondary)" }}>
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <div className="text-xs font-medium" style={{ color: "var(--fg-primary)" }}>
-                  Frontfill
-                </div>
-                <div className="text-[11px] mt-0.5" style={{ color: "var(--fg-tertiary)" }}>
-                  Continuously watch Gmail for new messages — sync, extract, embed, reindex every N seconds.
-                  {frontfillRunning && frontfillPid !== null && (
-                    <>
-                      {" "}
-                      <span style={{ color: "var(--fg-secondary)" }}>Running (pid {frontfillPid}).</span>
-                    </>
-                  )}
-                </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Disk</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1.5 text-sm">
+          {disk ? (
+            <>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Free</span>
+                <span className="tabular-nums">{formatBytes(disk.free_bytes)}</span>
               </div>
-              {frontfillRunning ? (
-                <button
-                  type="button"
-                  disabled={busy === "frontfill-stop"}
-                  onClick={() => void kickoff("frontfill-stop")}
-                  className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ background: "var(--bg-primary)", color: "var(--fg-primary)", border: "1px solid var(--border-subtle)" }}
-                >
-                  {busy === "frontfill-stop" ? "stopping…" : "Stop"}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={busy === "frontfill"}
-                  onClick={() => void kickoff("frontfill")}
-                  className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ background: "var(--fg-primary)", color: "var(--bg-primary)" }}
-                >
-                  {busy === "frontfill" ? "starting…" : "Start"}
-                </button>
-              )}
-            </div>
-            {!frontfillRunning && (
-              <label className="flex items-center gap-3 text-[11px]" style={{ color: "var(--fg-secondary)" }}>
-                <span>Check every</span>
-                <input
-                  type="number"
-                  min={10}
-                  max={86400}
-                  step={30}
-                  value={intervalSec}
-                  onChange={(e) => setIntervalSec(Math.max(10, Number(e.target.value) || 120))}
-                  className="w-20 px-2 py-1 rounded text-right tabular-nums"
-                  style={{
-                    background: "var(--bg-primary)",
-                    color: "var(--fg-primary)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
-                />
-                <span>seconds</span>
-              </label>
-            )}
-          </div>
-
-          <div className="px-3 py-3 rounded-md space-y-3" style={{ background: "var(--bg-secondary)" }}>
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <div className="text-xs font-medium" style={{ color: "var(--fg-primary)" }}>
-                  Backfill
-                </div>
-                <div className="text-[11px] mt-0.5" style={{ color: "var(--fg-tertiary)" }}>
-                  Pull older messages in batches. Stops automatically when free disk hits the floor below.
-                </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Used</span>
+                <span className="tabular-nums">{formatBytes(disk.used_bytes)}</span>
               </div>
-              <button
-                type="button"
-                disabled={busy === "backfill" || backfillRunning}
-                onClick={() => void kickoff("backfill")}
-                className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ background: "var(--fg-primary)", color: "var(--bg-primary)" }}
-              >
-                {backfillRunning ? "running…" : busy === "backfill" ? "starting…" : "Run now"}
-              </button>
-            </div>
-            <label className="flex items-center gap-3 text-[11px]" style={{ color: "var(--fg-secondary)" }}>
-              <span>Stop when free disk drops below</span>
-              <input
-                type="number"
-                min={1}
-                max={10000}
-                step={1}
-                value={minFreeGb}
-                onChange={(e) => setMinFreeGb(Math.max(1, Number(e.target.value) || 1))}
-                className="w-16 px-2 py-1 rounded text-right tabular-nums"
-                style={{
-                  background: "var(--bg-primary)",
-                  color: "var(--fg-primary)",
-                  border: "1px solid var(--border-subtle)",
-                }}
-              />
-              <span>GiB</span>
-            </label>
-          </div>
-        </div>
-        {toast && (
-          <div className="text-[11px]" style={{ color: "var(--fg-tertiary)" }}>
-            {toast}
-          </div>
-        )}
-      </section>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Total</span>
+                <span className="tabular-nums">{formatBytes(disk.total_bytes)}</span>
+              </div>
+            </>
+          ) : (
+            <div className="text-muted-foreground">loading…</div>
+          )}
+        </CardContent>
+      </Card>
 
-      {recent.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-xs uppercase tracking-wide" style={{ color: "var(--fg-tertiary)" }}>
-            Recent
-          </h2>
-          <div className="space-y-1.5">
-            {recent.map((j) => (
-              <JobRow key={`${j.job_id}-${j.started_at}`} j={j} />
-            ))}
-          </div>
-        </section>
-      )}
+      <JobControlCard
+        title="Frontfill"
+        description="Continuously watch Gmail for new messages — sync, extract, embed, reindex every N seconds."
+        running={frontfillRunning}
+        pid={frontfillPid}
+        starting={busy === "frontfill"}
+        stopping={busy === "frontfill-stop"}
+        onStart={() => void kickoff("frontfill")}
+        onStop={() => void kickoff("frontfill-stop")}
+        inputId="frontfill-interval"
+        inputLabel="Check every"
+        inputUnit="seconds"
+        inputMin={10}
+        inputMax={86400}
+        inputStep={30}
+        inputValue={intervalSec}
+        onInputChange={(v) => setIntervalSec(Math.max(10, v || 120))}
+      />
+
+      <JobControlCard
+        title="Backfill"
+        description="Pull older messages in batches. Stops automatically when free disk hits the floor below."
+        running={backfillRunning}
+        pid={backfillPid}
+        starting={busy === "backfill"}
+        stopping={busy === "backfill-stop"}
+        onStart={() => void kickoff("backfill")}
+        onStop={() => void kickoff("backfill-stop")}
+        inputId="backfill-min-free"
+        inputLabel="Stop when free disk <"
+        inputUnit="GiB"
+        inputMin={1}
+        inputMax={10000}
+        inputStep={1}
+        inputValue={minFreeGb}
+        onInputChange={(v) => setMinFreeGb(Math.max(1, v || 1))}
+        alwaysShowInput
+      />
+
+      {toast && <div className="text-xs text-muted-foreground">{toast}</div>}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Recent jobs</CardTitle>
+          <CardDescription>Most recent runs from the job_progress log.</CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {recent.length === 0 ? (
+            <div className="p-6 pt-0 text-sm text-muted-foreground">No job history yet.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b text-left text-muted-foreground">
+                    <th className="px-3 py-2 font-medium">Job</th>
+                    <th className="px-3 py-2 font-medium">Stage</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 text-right font-medium">Progress</th>
+                    <th className="px-3 py-2 font-medium">Detail</th>
+                    <th className="px-3 py-2 text-right font-medium">Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent.map((j) => (
+                    <JobTableRow key={`${j.job_id}-${j.started_at}`} j={j} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
+  );
+};
+
+const STATUS_BADGE: Record<string, string> = {
+  running: "bg-primary/15 text-primary",
+  done: "bg-muted text-foreground",
+  stopped: "bg-muted text-muted-foreground",
+  error: "bg-destructive/15 text-destructive",
+};
+
+const formatDuration = (seconds: number): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.round((seconds % 3600) / 60);
+    return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  }
+  const d = Math.floor(seconds / 86400);
+  const h = Math.round((seconds % 86400) / 3600);
+  return h === 0 ? `${d}d` : `${d}d ${h}h`;
+};
+
+const formatRelative = (iso: string): string => {
+  const dt = new Date(iso);
+  if (isNaN(dt.getTime())) return "?";
+  const diffSec = Math.floor((Date.now() - dt.getTime()) / 1000);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
+const JobTableRow = ({ j }: { j: RunningJob }) => {
+  const pct = j.total > 0 ? Math.min(100, Math.round((j.completed / j.total) * 100)) : null;
+  const statusClass = STATUS_BADGE[j.status] ?? "bg-muted text-muted-foreground";
+  const eta = j.eta_seconds !== undefined ? formatDuration(j.eta_seconds) : null;
+  const rate = j.rate_per_sec !== undefined ? j.rate_per_sec : null;
+  return (
+    <tr className="border-b last:border-0">
+      <td className="whitespace-nowrap px-3 py-2 font-medium text-foreground">{j.job_id}</td>
+      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{j.stage}</td>
+      <td className="whitespace-nowrap px-3 py-2">
+        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${statusClass}`}>
+          {j.status}
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
+        <div className="text-muted-foreground">
+          {pct === null ? "—" : `${j.completed.toLocaleString()}/${j.total.toLocaleString()} (${pct}%)`}
+        </div>
+        {eta && (
+          <div className="text-[10px] text-foreground">
+            ~{eta} left
+            {rate !== null && <span className="text-muted-foreground"> · {Math.round(rate * 60)}/min</span>}
+          </div>
+        )}
+      </td>
+      <td className="max-w-[200px] truncate px-3 py-2 text-muted-foreground" title={j.detail}>
+        {j.detail || "—"}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground">
+        {formatRelative(j.updated_at)}
+      </td>
+    </tr>
   );
 };

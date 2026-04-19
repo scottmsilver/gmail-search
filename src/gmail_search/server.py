@@ -856,120 +856,86 @@ def create_app(
             "running_job": running[0] if running else None,
         }
 
-    def _frontfill_status() -> dict:
-        """Truth source for the continuous watch daemon — the PID file
-        under data_dir. job_progress alone isn't enough because it only
-        updates on cycle boundaries, so a mid-cycle daemon that just
-        received SIGTERM could still look "running" in the DB briefly.
+    # ── Background-job plumbing (frontfill + backfill share everything) ──
+    #
+    # Both are long-running gmail-search subcommands spawned detached from
+    # the HTTP layer. Authoritative status is a PID file under data_dir;
+    # start writes it, stop SIGTERMs + unlinks it, status reads it. The
+    # two endpoints below are just (pid_name, argv) configuration — the
+    # shared helpers handle everything else.
+    #
+    # PID files:
+    #   data/watch.pid     frontfill (the watch daemon)
+    #   data/backfill.pid  backfill (the update pipeline)
+
+    def _pid_file_status(pid_path: Path) -> dict:
+        """Is the process at pid_path alive AND not a zombie?
+
+        os.kill(pid, 0) returns success for zombies (they still exist
+        in the process table after exiting, waiting to be reaped), so
+        we use psutil to distinguish zombie from live. When we spot
+        one, we also waitpid() to reap it if the server is the parent,
+        so the process table doesn't accumulate corpses.
         """
         import os
 
-        pid_path = data_dir / "watch.pid"
+        import psutil  # inline — formatter strips unused top-level imports
+
         if not pid_path.exists():
             return {"running": False, "pid": None}
-        try:
-            pid = int(pid_path.read_text().strip())
-            os.kill(pid, 0)
-            return {"running": True, "pid": pid}
-        except (ValueError, ProcessLookupError, PermissionError):
+
+        def _clean(pid: int | None = None):
             pid_path.unlink(missing_ok=True)
+            if pid is not None:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    pass
             return {"running": False, "pid": None}
 
-    @app.get("/api/jobs/running")
-    async def api_jobs_running():
-        """Everything the /settings UI needs: all running jobs (not just
-        the newest) + disk usage for the data_dir, so the backfill button
-        can warn when the disk is nearly full.
-        """
-        import shutil as _shutil
+        try:
+            pid = int(pid_path.read_text().strip())
+            proc = psutil.Process(pid)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return _clean(pid)
+            return {"running": True, "pid": pid}
+        except (ValueError, psutil.NoSuchProcess, psutil.AccessDenied):
+            return _clean()
 
-        from gmail_search.store.db import JobProgress
-
-        jobs = JobProgress.get(db_path) or []
-        running = [j for j in jobs if j["status"] == "running"]
-        usage = _shutil.disk_usage(str(data_dir))
-        return {
-            "running": running,
-            "recent": jobs[:5],  # job history for the settings panel
-            "disk": {
-                "total_bytes": usage.total,
-                "used_bytes": usage.used,
-                "free_bytes": usage.free,
-            },
-            "frontfill": _frontfill_status(),
-        }
-
-    def _spawn_gmail_search(args: list[str], log_name: str) -> dict:
-        """Shared body for the frontfill/backfill endpoints. Rejects if a
-        same-named job is already running (prevents two updates from
-        clobbering the same job_progress row).
-        """
-        from fastapi.responses import JSONResponse
-
-        from gmail_search.jobs import gmail_search_command, spawn_detached
-        from gmail_search.store.db import JobProgress
-
-        job_id = args[0]
-        jobs = JobProgress.get(db_path) or []
-        for j in jobs:
-            if j["job_id"] == job_id and j["status"] == "running":
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "ok": False,
-                        "error": f"{job_id} is already running (pid unknown, see log)",
-                    },
-                )
-
-        argv = gmail_search_command() + args + ["--data-dir", str(data_dir)]
-        log_path = data_dir / log_name
-        pid = spawn_detached(argv, log_path)
-        return {"ok": True, "pid": pid, "log": str(log_path)}
-
-    @app.post("/api/jobs/frontfill")
-    async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
-        """Start the continuous watch daemon: sync new messages every
-        `interval` seconds, extract, embed, reindex. Runs forever until
-        POST /api/jobs/frontfill/stop. Idempotent — 409 if already up.
-
-        PID is written to data/watch.pid, same convention as
-        `gmail-search start`, so the two paths stay compatible: you can
-        start from the UI and stop with the CLI or vice-versa.
+    def _start_detached_job(pid_filename: str, log_filename: str, extra_args: list[str]) -> dict:
+        """Spawn `gmail-search <extra_args> --data-dir <data_dir>` detached,
+        write pid to data_dir/pid_filename, return ok payload. 409 if the
+        pid file already points at a live process.
         """
         from fastapi.responses import JSONResponse
 
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
-        status = _frontfill_status()
+        pid_path = data_dir / pid_filename
+        status = _pid_file_status(pid_path)
         if status["running"]:
             return JSONResponse(
                 status_code=409,
                 content={"ok": False, "error": f"already running (pid {status['pid']})"},
             )
 
-        argv = gmail_search_command() + [
-            "watch",
-            "--interval",
-            str(interval),
-            "--data-dir",
-            str(data_dir),
-        ]
-        pid = spawn_detached(argv, data_dir / "watch.log")
-        (data_dir / "watch.pid").write_text(str(pid))
-        return {"ok": True, "pid": pid, "interval": interval}
+        argv = gmail_search_command() + extra_args + ["--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, data_dir / log_filename)
+        pid_path.write_text(str(pid))
+        return {"ok": True, "pid": pid}
 
-    @app.post("/api/jobs/frontfill/stop")
-    async def api_jobs_frontfill_stop():
-        """SIGTERM the watch daemon. Safe to call when it's not running
-        (idempotent). The daemon's signal handler calls progress.finish
-        so the job_progress row settles to `stopped` cleanly.
+    def _stop_detached_job(pid_filename: str):
+        """SIGTERM the pid recorded in data_dir/pid_filename and unlink
+        the file. Idempotent: 404 when not running, otherwise 200 whether
+        or not the process was still alive (the daemon's signal handler
+        does the clean job_progress finish).
         """
         import os
         import signal
 
         from fastapi.responses import JSONResponse
 
-        pid_path = data_dir / "watch.pid"
+        pid_path = data_dir / pid_filename
         if not pid_path.exists():
             return JSONResponse(status_code=404, content={"ok": False, "error": "not running"})
         try:
@@ -981,14 +947,92 @@ def create_app(
             pid_path.unlink(missing_ok=True)
             return {"ok": True, "detail": "process was already gone"}
 
+    def _enrich_with_eta(job: dict) -> dict:
+        """Add `rate_per_sec` + `eta_seconds` fields to a running job
+        row when enough signal exists to compute them. Works off the
+        `start_completed` baseline we record at job start, so the rate
+        is meaningful from the very first poll.
+        """
+        from datetime import datetime, timezone
+
+        if job["status"] != "running" or job["total"] <= 0:
+            return job
+        baseline = job.get("start_completed") or 0
+        delta = job["completed"] - baseline
+        if delta <= 0:
+            return job
+        try:
+            started = datetime.fromisoformat(job["started_at"])
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        except (ValueError, TypeError):
+            return job
+        if elapsed < 5:  # too little signal early on
+            return job
+        rate = delta / elapsed
+        remaining = max(0, job["total"] - job["completed"])
+        return {
+            **job,
+            "rate_per_sec": round(rate, 3),
+            "eta_seconds": round(remaining / rate) if rate > 0 else None,
+        }
+
+    @app.get("/api/jobs/running")
+    async def api_jobs_running():
+        """Everything /settings needs: all running job_progress rows +
+        disk usage + per-job (frontfill/backfill) authoritative status
+        from the pid files. Running rows are enriched with rate_per_sec
+        + eta_seconds when the baseline + elapsed time permit it.
+        """
+        import shutil as _shutil
+
+        from gmail_search.store.db import JobProgress
+
+        jobs = JobProgress.get(db_path) or []
+        enriched = [_enrich_with_eta(j) for j in jobs]
+        running = [j for j in enriched if j["status"] == "running"]
+        usage = _shutil.disk_usage(str(data_dir))
+        return {
+            "running": running,
+            "recent": enriched[:5],
+            "disk": {
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+            },
+            "frontfill": _pid_file_status(data_dir / "watch.pid"),
+            "backfill": _pid_file_status(data_dir / "backfill.pid"),
+        }
+
+    @app.post("/api/jobs/frontfill")
+    async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
+        """Start the continuous watch daemon: sync new messages every
+        `interval` seconds, then extract/embed/reindex. Writes
+        data/watch.pid, same convention as `gmail-search start`, so CLI
+        and UI stay interchangeable.
+        """
+        return _start_detached_job(
+            pid_filename="watch.pid",
+            log_filename="watch.log",
+            extra_args=["watch", "--interval", str(interval)],
+        )
+
+    @app.post("/api/jobs/frontfill/stop")
+    async def api_jobs_frontfill_stop():
+        return _stop_detached_job("watch.pid")
+
     @app.post("/api/jobs/backfill")
     async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
-        """Pull older messages and run them through the full pipeline.
-        Stops between batches once free disk drops below min_free_gb.
+        """Pull older messages through the full pipeline. Stops between
+        batches once free disk drops below min_free_gb.
         """
-        return _spawn_gmail_search(
-            ["update", "--min-free-gb", str(min_free_gb)],
-            log_name="backfill.log",
+        return _start_detached_job(
+            pid_filename="backfill.pid",
+            log_filename="backfill.log",
+            extra_args=["update", "--min-free-gb", str(min_free_gb)],
         )
+
+    @app.post("/api/jobs/backfill/stop")
+    async def api_jobs_backfill_stop():
+        return _stop_detached_job("backfill.pid")
 
     return app

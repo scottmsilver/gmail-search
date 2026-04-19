@@ -238,6 +238,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
+    from gmail_search.pipeline import reindex as _reindex
     from gmail_search.store.db import JobProgress
     from gmail_search.store.queries import get_attachments_for_message
 
@@ -253,17 +254,31 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
     max_msg = max_messages or cfg["download"].get("max_messages")
     index_dir = data_dir / "scann_index"
 
-    progress = JobProgress(db_path, "update")
+    # Starting message count is the baseline for rate/ETA math — the
+    # `completed` field represents total corpus size after this run, so
+    # rate = (completed - start_completed) / elapsed.
+    conn = get_connection(db_path)
+    start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    conn.close()
+
+    progress = JobProgress(db_path, "update", start_completed=start_count)
 
     total_downloaded = 0
     total_extracted = 0
     total_embedded = 0
     batch_num = 0
 
-    # Get starting message count
-    conn = get_connection(db_path)
-    start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    conn.close()
+    # Real denominator for the progress bar: the user's actual Gmail
+    # message count (from users.getProfile). Falls back to 0 if the call
+    # fails; the UI shows `—` rather than a misleading fraction.
+    account_total = 0
+    try:
+        profile = service.users().getProfile(userId="me").execute()
+        account_total = int(profile.get("messagesTotal", 0))
+    except Exception as e:
+        logger.warning(f"couldn't fetch account message total: {e}")
+    # Explicit --max-messages wins; otherwise aim at the whole account.
+    progress_total = max_msg or account_total or 0
 
     from gmail_search.locks import write_lock
 
@@ -289,7 +304,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
             click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
             click.echo(f"{'='*50}")
 
-            progress.update("download", total_downloaded, max_msg or current_limit, f"batch {batch_num}")
+            progress.update("download", start_count + total_downloaded, progress_total, f"batch {batch_num}")
 
             # Download one batch
             dl_count = download_messages(
@@ -309,7 +324,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
             click.echo(f"Downloaded {dl_count} messages.")
 
             # Extract new attachments
-            progress.update("extract", total_downloaded, max_msg or current_limit, f"+{dl_count} downloaded")
+            progress.update("extract", start_count + total_downloaded, progress_total, f"+{dl_count} downloaded")
             click.echo("Extracting attachments...")
             conn = get_connection(db_path)
             rows = conn.execute(
@@ -349,7 +364,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
             click.echo(f"Extracted {extracted} attachments.")
 
             # Embed new messages + attachments
-            progress.update("embed", total_downloaded, max_msg or current_limit, f"+{extracted} extracted")
+            progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
             click.echo("Embedding...")
             conn = get_connection(db_path)
             ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
@@ -364,7 +379,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
             # Reindex so search is live. light=True because the heavy
             # rebuilds (aliases, query cache wipe) are done once at the
             # end of the full update, not per-batch.
-            progress.update("reindex", total_downloaded, max_msg or current_limit, f"+{emb_count} embedded")
+            progress.update("reindex", start_count + total_downloaded, progress_total, f"+{emb_count} embedded")
             click.echo("Reindexing...")
             _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
 

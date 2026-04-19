@@ -83,37 +83,27 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
     <button
       type="button"
       onClick={() => onOpen(thread.thread_id)}
-      className="w-full text-left flex items-start gap-3 px-4 py-3 transition-colors group"
-      style={{ borderBottom: "1px solid var(--border-subtle)" }}
+      className="group flex w-full items-start gap-3 border-b px-4 py-3 text-left transition-colors hover:bg-accent/50"
     >
       <Avatar from={senderForAvatar} />
-      <div className="flex-1 min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-3">
-          <div
-            className="text-sm font-medium truncate"
-            style={{ color: "var(--fg-primary)" }}
-          >
+          <div className="truncate text-sm font-medium text-foreground">
             {thread.user_replied && <ReplyIcon />}
             {shortPeople(thread.participants)}
             {thread.message_count > 1 && (
-              <span className="ml-1.5 text-xs font-normal" style={{ color: "var(--fg-tertiary)" }}>
-                {thread.message_count}
-              </span>
+              <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
             )}
           </div>
-          <div className="text-xs shrink-0" style={{ color: "var(--fg-tertiary)" }}>
-            {formatDate(thread.date_last)}
-          </div>
+          <div className="shrink-0 text-xs text-muted-foreground">{formatDate(thread.date_last)}</div>
         </div>
-        <div className="mt-0.5 text-sm truncate" style={{ color: "var(--fg-secondary)" }}>
+        <div className="mt-0.5 truncate text-sm text-muted-foreground">
           {hasAttachment && <PaperclipIcon />}
-          <span className="font-medium" style={{ color: "var(--fg-primary)" }}>
-            {thread.subject}
-          </span>
+          <span className="font-medium text-foreground">{thread.subject}</span>
           {snippet && (
             <>
-              <span className="mx-1.5" style={{ color: "var(--fg-tertiary)" }}>—</span>
-              <span style={{ color: "var(--fg-tertiary)" }}>{snippet}</span>
+              <span className="mx-1.5 text-muted-foreground">—</span>
+              <span className="text-muted-foreground">{snippet}</span>
             </>
           )}
         </div>

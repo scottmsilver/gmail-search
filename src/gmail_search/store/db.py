@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS job_progress (
     status TEXT NOT NULL DEFAULT 'running',
     total INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0,
+    -- `completed` at job start — used to compute rate/ETA for backfill
+    -- where completed tracks total corpus size (starts nonzero).
+    start_completed INTEGER NOT NULL DEFAULT 0,
     detail TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -343,6 +346,12 @@ def describe_schema_for_llm() -> str:
 def init_db(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
+    # Backfill: older DBs predate the start_completed column. ALTER TABLE
+    # ADD COLUMN is free on SQLite.
+    try:
+        conn.execute("ALTER TABLE job_progress ADD COLUMN start_completed INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -991,7 +1000,12 @@ def rebuild_contact_frequency(db_path: Path) -> int:
 class JobProgress:
     """Track progress of a long-running job via SQLite (queryable from other processes)."""
 
-    def __init__(self, db_path: Path, job_id: str):
+    def __init__(self, db_path: Path, job_id: str, start_completed: int = 0):
+        """`start_completed` is the baseline used for rate/ETA math:
+        how many units the job had already completed before this run
+        began. For backfill it's the existing corpus size; for sync-style
+        jobs it's 0.
+        """
         self.db_path = db_path
         self.job_id = job_id
         from datetime import datetime, timezone
@@ -999,8 +1013,10 @@ class JobProgress:
         now = datetime.now(timezone.utc).isoformat()
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "INSERT OR REPLACE INTO job_progress (job_id, stage, status, total, completed, detail, started_at, updated_at) VALUES (?, '', 'running', 0, 0, '', ?, ?)",
-            (job_id, now, now),
+            "INSERT OR REPLACE INTO job_progress "
+            "(job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at) "
+            "VALUES (?, '', 'running', 0, ?, ?, '', ?, ?)",
+            (job_id, start_completed, start_completed, now, now),
         )
         conn.commit()
         conn.close()

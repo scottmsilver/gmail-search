@@ -32,23 +32,19 @@ const ResultsList = ({
 }) => {
   const { setOpenThreadId } = useThreadDrawer();
   if (loading) {
-    return (
-      <div className="px-6 py-12 text-center text-sm" style={{ color: "var(--fg-tertiary)" }}>
-        Searching…
-      </div>
-    );
+    return <div className="px-6 py-12 text-center text-sm text-muted-foreground">Searching…</div>;
   }
   if (!query.trim()) {
     return (
-      <div className="px-6 py-24 text-center" style={{ color: "var(--fg-tertiary)" }}>
-        <div className="text-sm">Search your archive — try a person, topic, or phrase.</div>
+      <div className="px-6 py-24 text-center text-sm text-muted-foreground">
+        Search your archive — try a person, topic, or phrase.
       </div>
     );
   }
   if (results.length === 0) {
     return (
-      <div className="px-6 py-12 text-center text-sm" style={{ color: "var(--fg-tertiary)" }}>
-        No results for <span style={{ color: "var(--fg-secondary)" }}>“{query}”</span>.
+      <div className="px-6 py-12 text-center text-sm text-muted-foreground">
+        No results for <span className="text-foreground">“{query}”</span>.
       </div>
     );
   }
@@ -165,26 +161,16 @@ const SearchInner = () => {
     : results;
 
   return (
-    <div
-      className="flex flex-col h-full w-full"
-      style={{ background: "var(--bg-primary)" }}
-    >
-      <div
-        className="px-6 pt-6 pb-3 max-w-4xl w-full mx-auto"
-        style={{ background: "var(--bg-primary)" }}
-      >
+    <div className="flex h-full w-full flex-col bg-background">
+      <div className="mx-auto w-full max-w-4xl px-6 pb-3 pt-6">
         <form
           onSubmit={(e) => {
             e.preventDefault();
             submit(query, sort);
           }}
-          className="flex items-center gap-2 rounded-2xl border px-4 py-2.5 transition-colors focus-within:shadow-sm"
-          style={{
-            borderColor: "var(--border-subtle)",
-            background: "var(--bg-secondary)",
-          }}
+          className="flex items-center gap-2 rounded-2xl border bg-card px-4 py-2.5 transition-colors focus-within:shadow-sm"
         >
-          <span style={{ color: "var(--fg-tertiary)" }}>
+          <span className="text-muted-foreground">
             <SearchIcon />
           </span>
           <input
@@ -194,13 +180,9 @@ const SearchInner = () => {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search your archive…"
             autoFocus
-            className="flex-1 bg-transparent focus:outline-none text-sm placeholder:opacity-60"
-            style={{ color: "var(--fg-primary)" }}
+            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
-          <div
-            className="flex items-center gap-0.5 rounded-full p-0.5 text-[11px]"
-            style={{ background: "var(--bg-primary)" }}
-          >
+          <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 text-[11px]">
             {(["relevance", "recent"] as Sort[]).map((s) => (
               <button
                 key={s}
@@ -211,13 +193,8 @@ const SearchInner = () => {
                 }}
                 className={
                   s === sort
-                    ? "px-2.5 py-0.5 rounded-full font-medium"
-                    : "px-2.5 py-0.5 rounded-full opacity-60 hover:opacity-100"
-                }
-                style={
-                  s === sort
-                    ? { background: "var(--bg-secondary)", color: "var(--fg-primary)" }
-                    : { color: "var(--fg-secondary)" }
+                    ? "rounded-full bg-background px-2.5 py-0.5 font-medium text-foreground shadow-sm"
+                    : "rounded-full px-2.5 py-0.5 text-muted-foreground hover:text-foreground"
                 }
               >
                 {s}
@@ -229,7 +206,7 @@ const SearchInner = () => {
           <CorpusStatus />
         </div>
       </div>
-      <div className="flex-1 min-h-0 flex">
+      <div className="flex min-h-0 flex-1">
         <FacetSidebar
           facets={facets}
           totalCount={results.length}
@@ -237,7 +214,7 @@ const SearchInner = () => {
           onSelectTopic={setActiveTopic}
         />
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-4xl mx-auto">
+          <div className="mx-auto max-w-4xl">
             <ResultsList results={visibleResults} loading={loading} query={lastQueryRef.current} />
           </div>
         </div>

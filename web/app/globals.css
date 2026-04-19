@@ -23,6 +23,7 @@
   --border-default: #d4d4d4;
   --accent: #2563eb;
   --accent-fg: #ffffff;
+  --radius: 0.5rem;
 }
 
 [data-theme="dark"] {
@@ -39,6 +40,7 @@
   --border-default: #404040;
   --accent: #3b82f6;
   --accent-fg: #ffffff;
+  --radius: 0.5rem;
 }
 
 [data-theme="sepia"] {
@@ -55,6 +57,7 @@
   --border-default: #c4aa81;
   --accent: #8b5e3c;
   --accent-fg: #fbf5e9;
+  --radius: 0.5rem;
 }
 
 [data-theme="slate"] {
@@ -71,6 +74,7 @@
   --border-default: #4b5563;
   --accent: #60a5fa;
   --accent-fg: #0f172a;
+  --radius: 0.5rem;
 }
 
 html,
