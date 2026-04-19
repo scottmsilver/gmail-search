@@ -12,7 +12,14 @@ const formatDate = (iso: string): string => {
   if (diffSec < 3600) return RTF.format(-Math.floor(diffSec / 60), "minute");
   if (diffSec < 86400) return RTF.format(-Math.floor(diffSec / 3600), "hour");
   if (diffSec < 86400 * 7) return RTF.format(-Math.floor(diffSec / 86400), "day");
-  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // Include the year only when it's different from the current year —
+  // "Apr 5" is fine for this year, "Apr 5, 2024" disambiguates older.
+  const sameYear = dt.getFullYear() === new Date().getFullYear();
+  return dt.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
 };
 
 const cleanSender = (raw: string): string => {
