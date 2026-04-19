@@ -9,6 +9,7 @@ import numpy as np
 
 from gmail_search.embed.client import GeminiEmbedder
 from gmail_search.index.searcher import ScannSearcher
+from gmail_search.search.parser import ParsedQuery, parse_query  # noqa: F401  (ParsedQuery re-exported)
 from gmail_search.store.db import get_connection
 from gmail_search.store.queries import search_fts  # noqa: F401
 
@@ -79,77 +80,6 @@ def _thread_size_score(message_count: int) -> float:
     if message_count <= 1:
         return 0.0
     return min(math.log(message_count) / math.log(50), 1.0)
-
-
-@dataclass
-class ParsedQuery:
-    """Structured query with filters extracted."""
-
-    text: str  # the freetext portion to embed
-    from_filter: str | None = None
-    to_filter: str | None = None
-    after_filter: str | None = None
-    before_filter: str | None = None
-    temporal_boost: float = 0.0  # 0.0 = no time intent, up to 0.35 for strong time intent
-
-
-def parse_query(raw: str) -> ParsedQuery:
-    """Extract structured filters and temporal intent from a query string."""
-    import re
-
-    text_parts: list[str] = []
-    from_filter = None
-    to_filter = None
-    after_filter = None
-    before_filter = None
-
-    tokens = raw.split()
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        # from:value or from: value
-        for prefix, setter in [("from:", "from"), ("to:", "to"), ("after:", "after"), ("before:", "before")]:
-            if token.lower().startswith(prefix):
-                val = token[len(prefix) :]
-                if not val and i + 1 < len(tokens):
-                    i += 1
-                    val = tokens[i]
-                if setter == "from":
-                    from_filter = val
-                elif setter == "to":
-                    to_filter = val
-                elif setter == "after":
-                    after_filter = val
-                elif setter == "before":
-                    before_filter = val
-                break
-        else:
-            text_parts.append(token)
-        i += 1
-
-    text = " ".join(text_parts)
-
-    # Detect temporal intent from freetext
-    temporal_boost = 0.0
-    time_patterns = [
-        (r"\b(today|yesterday|this morning|tonight)\b", 0.35),
-        (r"\b(this week|last week|few days ago)\b", 0.30),
-        (r"\b(this month|last month|recently|recent)\b", 0.25),
-        (r"\b(this year|last year|past year)\b", 0.15),
-        (r"\b(latest|newest|most recent)\b", 0.30),
-    ]
-    for pattern, boost in time_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            temporal_boost = max(temporal_boost, boost)
-
-    return ParsedQuery(
-        text=text,
-        from_filter=from_filter,
-        to_filter=to_filter,
-        after_filter=after_filter,
-        before_filter=before_filter,
-        temporal_boost=temporal_boost,
-    )
 
 
 def _contact_frequency_score(from_addrs: list[str], freq_map: dict[str, float]) -> float:
@@ -502,6 +432,11 @@ class SearchEngine:
         pq = parse_query(expanded_query)
         query_vector = self._embed_query(pq.text or expanded_query)
 
+        # Merge: explicit endpoint-level date_from/date_to win over values
+        # derived from operators in the query string (`after:`/`newer_than:`/…).
+        date_from = date_from or pq.date_from
+        date_to = date_to or pq.date_to
+
         # When a date filter is present, ScaNN's top-K might all fall
         # outside the window, leaving us zero results even though there
         # are relevant matches further down the similarity ranking.
@@ -681,40 +616,18 @@ class SearchEngine:
 
             user_replied = self._user_in_participants(from_addrs)
 
-            # Apply structured filters — skip threads that don't match
+            # Apply structured filters — skip threads that don't match.
+            # Date filters flow through the shared post-filter below,
+            # so we don't repeat that logic here.
             if pq.from_filter:
                 if not any(pq.from_filter.lower() in a.lower() for a in from_addrs):
                     continue
             if pq.to_filter:
-                # Check to_addr on matching messages
-                skip = True
-                for m in matches:
-                    # We don't have to_addr on ThreadMatch, check via participants
-                    if pq.to_filter.lower() in " ".join(participants).lower():
-                        skip = False
-                        break
-                if skip:
+                if pq.to_filter.lower() not in " ".join(participants).lower():
                     continue
-            if pq.after_filter:
-                try:
-                    from dateutil.parser import parse as _dateparse
-
-                    after_dt = _dateparse(pq.after_filter)
-                    thread_dt = datetime.fromisoformat(date_last) if date_last else None
-                    if thread_dt and thread_dt < after_dt:
-                        continue
-                except Exception:
-                    pass
-            if pq.before_filter:
-                try:
-                    from dateutil.parser import parse as _dateparse
-
-                    before_dt = _dateparse(pq.before_filter)
-                    thread_dt = datetime.fromisoformat(date_first) if date_first else None
-                    if thread_dt and thread_dt > before_dt:
-                        continue
-                except Exception:
-                    pass
+            if pq.subject_filter:
+                if pq.subject_filter.lower() not in (subject or "").lower():
+                    continue
 
             # Compute blended score
             sim = tdata["best_sim"]
@@ -782,6 +695,23 @@ class SearchEngine:
                     t.matches = kept
                     filtered.append(t)
             thread_results = filtered
+
+        # has:attachment — restrict to threads where at least one message
+        # carries an attachment. One SQL pass against the candidate
+        # thread_ids keeps this O(K) rather than O(K) queries.
+        if pq.has_attachment and thread_results:
+            tid_list = [t.thread_id for t in thread_results]
+            placeholders = ",".join("?" * len(tid_list))
+            conn_a = get_connection(self.db_path)
+            rows = conn_a.execute(
+                f"""SELECT DISTINCT m.thread_id FROM messages m
+                    JOIN attachments a ON a.message_id = m.id
+                    WHERE m.thread_id IN ({placeholders})""",
+                tid_list,
+            ).fetchall()
+            conn_a.close()
+            with_att = {r["thread_id"] for r in rows}
+            thread_results = [t for t in thread_results if t.thread_id in with_att]
 
         if sort == "recent":
             thread_results.sort(key=lambda t: t.date_last, reverse=True)

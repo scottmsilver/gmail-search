@@ -182,3 +182,119 @@ def test_search_engine_deduplicates_by_message(tmp_path):
 
     msg1_results = [r for r in results if r.message_id == "msg1"]
     assert len(msg1_results) == 1
+
+
+def _engine_for(tmp_path, dims=16, n=50):
+    db_path, index_dir = _setup_db_with_index(tmp_path, dims=dims, n=n)
+    mock_embedder = MagicMock()
+    mock_embedder.embed_query.return_value = [0.9] * dims
+    mock_embedder.model = "test-model"
+    mock_embedder.dimensions = dims
+    cfg = load_config(data_dir=tmp_path / "data")
+    cfg["embedding"]["model"] = "test-model"
+    cfg["embedding"]["dimensions"] = dims
+    # Disable reranker + off-topic filter — both call out to Gemini or
+    # prune results on score spread, both of which would muddy the
+    # filter-under-test.
+    cfg["search"] = {"rerank": False}
+    return SearchEngine(db_path, index_dir, cfg, embedder=mock_embedder), db_path
+
+
+def test_search_threads_subject_filter_restricts_to_matching_subjects(tmp_path):
+    engine, _ = _engine_for(tmp_path, n=30)
+    results = engine.search_threads("subject:Subject test", top_k=20, filter_offtopic=False)
+    assert results
+    for r in results:
+        assert "subject" in r.subject.lower()
+
+    # A subject filter that matches nothing must return zero threads.
+    none_results = engine.search_threads("subject:doesnotmatch test", top_k=20, filter_offtopic=False)
+    assert none_results == []
+
+
+def test_search_threads_has_attachment_only_returns_threads_with_attachments(tmp_path):
+    dims = 16
+    db_path = tmp_path / "test.db"
+    init_db(db_path)
+    conn = get_connection(db_path)
+
+    # One thread with an attachment, one without. Both get embeddings
+    # so ScaNN sees them as candidates.
+    for idx, (msg_id, tid, has_att) in enumerate([("withAtt", "tA", True), ("noAtt", "tB", False)]):
+        upsert_message(
+            conn,
+            Message(
+                id=msg_id,
+                thread_id=tid,
+                from_addr="a@b.com",
+                to_addr="me@test.com",
+                subject="report",
+                body_text="report body",
+                body_html="",
+                date=datetime(2025, 1, 1 + idx),
+                labels=["INBOX"],
+                history_id=idx,
+                raw_json="{}",
+            ),
+        )
+        if has_att:
+            upsert_attachment(
+                conn,
+                Attachment(
+                    id=None,
+                    message_id=msg_id,
+                    filename="report.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=1024,
+                ),
+            )
+        insert_embedding(
+            conn,
+            EmbeddingRecord(
+                id=None,
+                message_id=msg_id,
+                attachment_id=None,
+                chunk_type="message",
+                chunk_text="report",
+                embedding=_make_vec(dims, 0.9),
+                model="test-model",
+            ),
+        )
+    conn.close()
+
+    index_dir = tmp_path / "scann_index"
+    build_index(db_path, index_dir, model="test-model", dimensions=dims)
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_query.return_value = [0.9] * dims
+    cfg = load_config(data_dir=tmp_path / "data")
+    cfg["embedding"]["model"] = "test-model"
+    cfg["embedding"]["dimensions"] = dims
+    cfg["search"] = {"rerank": False}
+    engine = SearchEngine(db_path, index_dir, cfg, embedder=mock_embedder)
+
+    # Without the filter, both threads come back.
+    all_threads = engine.search_threads("report", top_k=10, filter_offtopic=False)
+    assert {t.thread_id for t in all_threads} == {"tA", "tB"}
+
+    # With has:attachment, only the attachment-bearing thread remains.
+    filtered = engine.search_threads("has:attachment report", top_k=10, filter_offtopic=False)
+    assert {t.thread_id for t in filtered} == {"tA"}
+
+
+def test_search_threads_query_param_date_from_wins_over_newer_than(tmp_path):
+    """Explicit endpoint-level date_from must override the value the
+    parser derived from newer_than: / after: in the raw query. This
+    matters because the UI may set both (via URL param + operator).
+    """
+    engine, _ = _engine_for(tmp_path, n=30)
+    # newer_than:1d would restrict to yesterday+, a tight window. An
+    # explicit date_from=2020-01-01 widens it to cover the whole fake
+    # 2025 corpus.
+    results = engine.search_threads(
+        "subject newer_than:1d",
+        top_k=10,
+        date_from="2020-01-01",
+        filter_offtopic=False,
+    )
+    assert results, "explicit date_from should have widened the window"
