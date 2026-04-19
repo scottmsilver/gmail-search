@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { JobsRunningResponse, RunningJob } from "@/lib/backend";
+import { formatSmartDate } from "@/lib/datetime";
 
 const formatBytes = (n: number): string => {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
@@ -296,20 +297,6 @@ const formatDuration = (seconds: number): string => {
   return h === 0 ? `${d}d` : `${d}d ${h}h`;
 };
 
-const formatRelative = (iso: string): string => {
-  const dt = new Date(iso);
-  if (isNaN(dt.getTime())) return "?";
-  const diffSec = Math.floor((Date.now() - dt.getTime()) / 1000);
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  const sameYear = dt.getFullYear() === new Date().getFullYear();
-  return dt.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
-};
 
 const JobTableRow = ({ j }: { j: RunningJob }) => {
   const pct = j.total > 0 ? Math.min(100, Math.round((j.completed / j.total) * 100)) : null;
@@ -340,7 +327,7 @@ const JobTableRow = ({ j }: { j: RunningJob }) => {
         {j.detail || "—"}
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground">
-        {formatRelative(j.updated_at)}
+        {formatSmartDate(j.updated_at)}
       </td>
     </tr>
   );

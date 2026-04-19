@@ -1,26 +1,7 @@
 "use client";
 
 import type { SearchThread } from "@/lib/backend";
-
-const RTF = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-
-const formatDate = (iso: string): string => {
-  const dt = new Date(iso);
-  if (isNaN(dt.getTime())) return "?";
-  const diffSec = Math.floor((Date.now() - dt.getTime()) / 1000);
-  if (diffSec < 60) return RTF.format(-diffSec, "second");
-  if (diffSec < 3600) return RTF.format(-Math.floor(diffSec / 60), "minute");
-  if (diffSec < 86400) return RTF.format(-Math.floor(diffSec / 3600), "hour");
-  if (diffSec < 86400 * 7) return RTF.format(-Math.floor(diffSec / 86400), "day");
-  // Include the year only when it's different from the current year —
-  // "Apr 5" is fine for this year, "Apr 5, 2024" disambiguates older.
-  const sameYear = dt.getFullYear() === new Date().getFullYear();
-  return dt.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(sameYear ? {} : { year: "numeric" }),
-  });
-};
+import { formatSmartDate } from "@/lib/datetime";
 
 const cleanSender = (raw: string): string => {
   const angle = raw.match(/^([^<]+)</);
@@ -102,7 +83,7 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
               <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
             )}
           </div>
-          <div className="shrink-0 text-xs text-muted-foreground">{formatDate(thread.date_last)}</div>
+          <div className="shrink-0 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
         </div>
         <div className="mt-0.5 truncate text-sm text-muted-foreground">
           {hasAttachment && <PaperclipIcon />}
