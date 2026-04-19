@@ -80,6 +80,7 @@ const SearchInner = () => {
   const [results, setResults] = useState<SearchThread[]>([]);
   const [facets, setFacets] = useState<SearchFacet[]>([]);
   const [loading, setLoading] = useState(false);
+  const [showTopics, setShowTopics] = useState(false);
   // Active topic is URL-driven: ?topic=root.0.1.0.1
   const activeTopic = urlTopic;
   const inputRef = useRef<HTMLInputElement>(null);
@@ -201,18 +202,33 @@ const SearchInner = () => {
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={() => setShowTopics((v) => !v)}
+            aria-label="Toggle topics"
+            title={showTopics ? "Hide topics" : "Show topics"}
+            className={
+              showTopics
+                ? "rounded-full bg-secondary px-2.5 py-1 text-[11px] font-medium text-foreground"
+                : "rounded-full px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+            }
+          >
+            topics
+          </button>
         </form>
         <div className="mt-2">
           <CorpusStatus />
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
-        <FacetSidebar
-          facets={facets}
-          totalCount={results.length}
-          activeTopic={activeTopic}
-          onSelectTopic={setActiveTopic}
-        />
+        {showTopics && (
+          <FacetSidebar
+            facets={facets}
+            totalCount={results.length}
+            activeTopic={activeTopic}
+            onSelectTopic={setActiveTopic}
+          />
+        )}
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-4xl">
             <ResultsList results={visibleResults} loading={loading} query={lastQueryRef.current} />

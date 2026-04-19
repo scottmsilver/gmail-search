@@ -810,7 +810,12 @@ def status(ctx):
 
 @main.command(help="Generate per-message summaries via a local Ollama model")
 @click.option("--model", default=None, help="Ollama model tag (default: qwen2.5:7b)")
-@click.option("--concurrency", type=int, default=4, help="Parallel requests (default 4)")
+@click.option(
+    "--concurrency",
+    type=int,
+    default=12,
+    help="Parallel Ollama requests (default 12). Match OLLAMA_NUM_PARALLEL for best throughput.",
+)
 @click.option("--limit", type=int, default=None, help="Max messages to process this run")
 @common_options
 @click.pass_context

@@ -27,8 +27,16 @@ const senderColor = (raw: string): string => {
   return PALETTE[h % PALETTE.length];
 };
 
+// Embedding chunks are stored with a metadata prefix
+// ("From: ... | To: ... | Date: ... | Subject: ... | <body>") so the
+// embedder sees context. Strip the whole run from display snippets so
+// the UI shows just the message body.
 const cleanSnippet = (s: string): string =>
-  s.replace(/^From:.*?\| /g, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+  s
+    .replace(/^(?:(?:From|To|Date|Subject):[^|]*\|\s*)+/i, "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const shortPeople = (participants: string[]): string => {
   const names = participants.map(cleanSender).filter(Boolean);
@@ -63,7 +71,11 @@ type Props = {
 
 export const ResultRow = ({ thread, onOpen }: Props) => {
   const top = thread.matches[0];
-  const snippet = top ? cleanSnippet(top.snippet).slice(0, 180) : "";
+  // Prefer the LLM-generated summary (populated by `gmail-search
+  // summarize`) over the raw matched snippet — snippets often repeat
+  // the subject/sender/date that we already render as structured
+  // fields above. Falls back to the snippet when no summary exists.
+  const preview = (top?.summary && top.summary.trim()) || cleanSnippet(top?.snippet ?? "").slice(0, 180);
   const hasAttachment = thread.matches.some((m) => m.attachment_filename);
   const senderForAvatar = top?.from_addr ?? thread.participants[0] ?? "?";
 
@@ -76,24 +88,24 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
       <Avatar from={senderForAvatar} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-3">
-          <div className="truncate text-sm font-medium text-foreground">
+          <div className="min-w-0 flex-1 truncate text-sm">
             {thread.user_replied && <ReplyIcon />}
-            {shortPeople(thread.participants)}
+            <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
             {thread.message_count > 1 && (
               <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
+            )}
+            {preview && (
+              <>
+                <span className="mx-1.5 text-muted-foreground">—</span>
+                <span className="text-muted-foreground">{preview}</span>
+              </>
             )}
           </div>
           <div className="shrink-0 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
         </div>
-        <div className="mt-0.5 truncate text-sm text-muted-foreground">
+        <div className="mt-0.5 truncate text-xs text-muted-foreground">
           {hasAttachment && <PaperclipIcon />}
-          <span className="font-medium text-foreground">{thread.subject}</span>
-          {snippet && (
-            <>
-              <span className="mx-1.5 text-muted-foreground">—</span>
-              <span className="text-muted-foreground">{snippet}</span>
-            </>
-          )}
+          {thread.subject}
         </div>
       </div>
     </button>
