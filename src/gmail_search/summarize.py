@@ -162,6 +162,120 @@ def _clean_llm_output(raw: str) -> str:
     return raw
 
 
+# ─── batched summarization ────────────────────────────────────────────────
+
+_BATCH_SYSTEM_PROMPT = """You summarize emails for a retrieval index.
+
+Input: multiple emails, each marked `--- email id=<id> ---`.
+
+Output: ONE JSON object. Keys are the exact ids. Values are 1-2 sentence
+summaries, each under 300 characters, capturing who sent it, specific
+facts (amounts, dates, names, decisions), and any explicit ask.
+
+Rules:
+- Only include an ask when the sender explicitly requests an action. No
+  filler like "no action required" or "no next step mentioned".
+- Do not begin a summary with "This email...", "The email...", "It
+  looks like...", "Based on...", etc.
+- Output ONLY the JSON object. No prose around it, no markdown fencing.
+"""
+
+
+def _build_batch_user_prompt(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        body = _truncate_body(_clean_body(m["body_text"] or ""))
+        parts.append(f"--- email id={m['id']} ---\nFrom: {m['from_addr']}\nSubject: {m['subject']}\n\n{body}")
+    return "\n\n".join(parts)
+
+
+def summarize_batch(
+    client: httpx.Client,
+    messages: list[dict],
+    model: str = DEFAULT_MODEL,
+) -> dict[str, str]:
+    """Summarize N messages in one LLM call, returning {id: summary}.
+
+    Auto-classifiable mail (promotions/social/forums) bypasses the LLM
+    entirely. The remaining messages go into a single prompt with
+    Ollama's `format: "json"` constraint. If the response fails to
+    parse or omits any id, the missing ids retry via summarize_one —
+    so a bad batch never loses work, it just costs an extra call.
+
+    Accepts dicts with keys: id, from_addr, subject, body_text,
+    labels_json (optional, defaults to "[]").
+    """
+    if not messages:
+        return {}
+
+    out: dict[str, str] = {}
+    llm_work: list[dict] = []
+    for m in messages:
+        auto = _auto_mail_summary(m.get("labels_json", "[]"), m["from_addr"])
+        if auto:
+            out[m["id"]] = auto
+        else:
+            llm_work.append(m)
+
+    if not llm_work:
+        return out
+
+    parsed: dict = {}
+    try:
+        resp = client.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": model,
+                "stream": False,
+                "format": "json",
+                "messages": [
+                    {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": _build_batch_user_prompt(llm_work)},
+                ],
+                "options": {
+                    "temperature": 0.1,
+                    # Scale output + context room with batch size; leave
+                    # headroom so a chatty summary on one email doesn't
+                    # truncate the rest.
+                    "num_predict": 180 * len(llm_work),
+                    "num_ctx": max(2048, 768 * len(llm_work)),
+                },
+            },
+            timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        raw = (resp.json().get("message") or {}).get("content", "").strip()
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            parsed = obj
+    except (httpx.HTTPError, ValueError):
+        parsed = {}
+
+    for m in llm_work:
+        val = parsed.get(m["id"])
+        if isinstance(val, str) and val.strip():
+            out[m["id"]] = _clean_llm_output(val)
+
+    # Per-email fallback for anything the batch didn't produce.
+    missing = [m for m in llm_work if m["id"] not in out]
+    for m in missing:
+        try:
+            s = summarize_one(
+                client,
+                from_addr=m["from_addr"],
+                subject=m["subject"],
+                body_text=m["body_text"],
+                labels_json=m.get("labels_json", "[]"),
+                model=model,
+            )
+            if s:
+                out[m["id"]] = s
+        except Exception as e:
+            logger.warning(f"per-email fallback failed for {m['id']}: {e!s}")
+
+    return out
+
+
 def summarize_one(
     client: httpx.Client,
     *,
@@ -242,10 +356,16 @@ def backfill(
     *,
     model: str = DEFAULT_MODEL,
     concurrency: int = 12,
+    batch_size: int = 1,
     limit: int | None = None,
     progress: bool = True,
 ) -> dict:
     """Summarize every message that doesn't yet have a summary for `model`.
+
+    When `batch_size > 1`, messages are grouped into batches of that size
+    and each batch is summarized in a single LLM call via summarize_batch
+    (with per-email fallback for any ids the batch misses). The JSON-
+    structured output cuts per-email prompt-prefix overhead.
 
     Commits one message at a time so a crash mid-run doesn't lose work.
     Returns counters, including `auto_classified` for mail short-circuited
@@ -264,45 +384,24 @@ def backfill(
     start = time.time()
     last_log = start
 
+    def _persist(summaries_by_id: dict[str, str], batch_messages: list[dict]) -> None:
+        nonlocal done, auto_classified, failed
+        for m in batch_messages:
+            summary = summaries_by_id.get(m["id"])
+            if summary:
+                _store_summary(conn, m["id"], summary, model)
+                done += 1
+                if _auto_mail_summary(m["labels"], m["from_addr"]) is not None:
+                    auto_classified += 1
+            else:
+                failed += 1
+        conn.commit()
+
     with httpx.Client() as client:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {
-                pool.submit(
-                    summarize_one,
-                    client,
-                    from_addr=m["from_addr"],
-                    subject=m["subject"],
-                    body_text=m["body_text"],
-                    labels_json=m["labels"],
-                    model=model,
-                ): m
-                for m in pending
-            }
-            for fut in as_completed(futures):
-                m = futures[fut]
-                try:
-                    summary = fut.result()
-                    if summary:
-                        _store_summary(conn, m["id"], summary, model)
-                        conn.commit()
-                        done += 1
-                        if _auto_mail_summary(m["labels"], m["from_addr"]) is not None:
-                            auto_classified += 1
-                    else:
-                        failed += 1
-                except Exception as e:
-                    failed += 1
-                    logger.warning(f"summarize failed for {m['id']}: {e!s}")
-                if progress and time.time() - last_log > 3:
-                    elapsed = time.time() - start
-                    rate = (done + failed) / max(elapsed, 0.001)
-                    eta = (total - done - failed) / max(rate, 0.001)
-                    logger.info(
-                        f"summarize: {done + failed}/{total} "
-                        f"({rate:.1f}/s, eta {eta / 60:.1f}min, "
-                        f"ok={done} auto={auto_classified} fail={failed})"
-                    )
-                    last_log = time.time()
+        if batch_size <= 1:
+            _run_per_email(client, pending, concurrency, model, _persist, progress, start, total)
+        else:
+            _run_batched(client, pending, concurrency, batch_size, model, _persist, progress, start, total)
 
     conn.close()
     elapsed = time.time() - start
@@ -313,6 +412,83 @@ def backfill(
         "failed": failed,
         "seconds": round(elapsed, 1),
     }
+
+
+def _run_per_email(client, pending, concurrency, model, persist, progress, start, total):
+    last_log = start
+    processed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(
+                summarize_one,
+                client,
+                from_addr=m["from_addr"],
+                subject=m["subject"],
+                body_text=m["body_text"],
+                labels_json=m["labels"],
+                model=model,
+            ): m
+            for m in pending
+        }
+        for fut in as_completed(futures):
+            m = futures[fut]
+            try:
+                summary = fut.result()
+                persist({m["id"]: summary} if summary else {}, [m])
+            except Exception as e:
+                logger.warning(f"summarize failed for {m['id']}: {e!s}")
+                persist({}, [m])
+            processed += 1
+            if progress and time.time() - last_log > 3:
+                _log_progress(processed, total, start)
+                last_log = time.time()
+
+
+def _run_batched(client, pending, concurrency, batch_size, model, persist, progress, start, total):
+    """Chunk `pending` into `batch_size`-sized batches and submit each
+    batch as one future. Concurrency is the number of IN-FLIGHT BATCHES,
+    each of which internally does one LLM call.
+    """
+    last_log = start
+    processed = 0
+    batches = [
+        [
+            {
+                "id": m["id"],
+                "from_addr": m["from_addr"],
+                "subject": m["subject"],
+                "body_text": m["body_text"],
+                "labels_json": m["labels"],
+            }
+            for m in pending[i : i + batch_size]
+        ]
+        for i in range(0, len(pending), batch_size)
+    ]
+    # `pending` rows carry "labels"; our persist callback expects the
+    # original shape, so keep a parallel list for it.
+    originals = [pending[i : i + batch_size] for i in range(0, len(pending), batch_size)]
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(summarize_batch, client, batch, model): i for i, batch in enumerate(batches)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                summaries = fut.result()
+            except Exception as e:
+                logger.warning(f"batch failed: {e!s}")
+                summaries = {}
+            persist(summaries, originals[i])
+            processed += len(originals[i])
+            if progress and time.time() - last_log > 3:
+                _log_progress(processed, total, start)
+                last_log = time.time()
+
+
+def _log_progress(processed: int, total: int, start: float) -> None:
+    elapsed = time.time() - start
+    rate = processed / max(elapsed, 0.001)
+    eta = (total - processed) / max(rate, 0.001)
+    logger.info(f"summarize: {processed}/{total} ({rate:.2f}/s, eta {eta / 60:.1f}min)")
 
 
 def get_summary(conn: sqlite3.Connection, message_id: str, model: str = DEFAULT_MODEL) -> str | None:
