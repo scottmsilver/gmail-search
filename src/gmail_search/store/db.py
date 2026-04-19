@@ -1040,6 +1040,30 @@ class JobProgress:
         return [dict(r) for r in rows]
 
 
+def reap_stale_jobs(conn: sqlite3.Connection, staleness_seconds: int = 600) -> int:
+    """Mark any `running` job whose updated_at is older than the
+    threshold as `stopped`.
+
+    Used to clean up zombie rows left behind when a worker process gets
+    killed (OOM, SIGKILL, …) before it can mark itself done. Without
+    this, the UI keeps showing a phantom "syncing…" banner indefinitely.
+
+    Returns the number of rows reaped. Only touches rows with
+    status='running' — historical done/stopped/error rows are never
+    rewritten.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=staleness_seconds)).isoformat()
+    cur = conn.execute(
+        "UPDATE job_progress SET status='stopped', detail='stale — process gone' "
+        "WHERE status='running' AND updated_at < ?",
+        (cutoff,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def clear_query_cache(db_path: Path) -> int:
     """Clear the query embedding cache. Call after re-embedding or reindexing."""
     conn = sqlite3.connect(db_path)

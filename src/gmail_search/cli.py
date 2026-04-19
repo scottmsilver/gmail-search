@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 import click
+
 from gmail_search.config import load_config
 from gmail_search.store.cost import check_budget, get_spend_breakdown, get_total_spend
 from gmail_search.store.db import get_connection, init_db
@@ -113,9 +114,10 @@ def sync(ctx):
 @common_options
 @click.pass_context
 def extract(ctx):
+    from tqdm import tqdm
+
     from gmail_search.extract import dispatch
     from gmail_search.store.queries import get_attachments_for_message
-    from tqdm import tqdm
 
     cfg = ctx.obj["config"]
     att_config = cfg.get("attachments", {})
@@ -243,9 +245,15 @@ def reindex(ctx):
 @click.option("--max-messages", type=int, default=None, help="Max messages to download")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
 @click.option("--batch-size", type=int, default=500, help="Messages per batch before extract+embed")
+@click.option(
+    "--min-free-gb",
+    type=float,
+    default=None,
+    help="Stop between batches if free disk drops below this many GiB",
+)
 @common_options
 @click.pass_context
-def update(ctx, max_messages, budget, batch_size):
+def update(ctx, max_messages, budget, batch_size, min_free_gb):
     from gmail_search.embed.pipeline import run_embedding_pipeline
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
@@ -286,6 +294,13 @@ def update(ctx, max_messages, budget, batch_size):
     conn.close()
 
     while True:
+        if min_free_gb is not None:
+            import shutil as _shutil
+
+            free_gb = _shutil.disk_usage(str(data_dir)).free / (1024**3)
+            if free_gb < min_free_gb:
+                click.echo(f"Free disk {free_gb:.2f} GiB < min {min_free_gb} GiB — stopping backfill.")
+                break
         batch_num += 1
         # How many to download this round — cap at batch_size new messages
         current_limit = start_count + total_downloaded + batch_size
@@ -488,9 +503,10 @@ def stop(ctx):
 @main.command(help="Watch for new emails and process them continuously")
 @click.option("--interval", type=int, default=120, help="Seconds between sync checks")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
+@click.option("--max-cycles", type=int, default=None, help="Exit after N cycles (for one-shot 'frontfill' runs)")
 @common_options
 @click.pass_context
-def watch(ctx, interval, budget):
+def watch(ctx, interval, budget, max_cycles):
     """Poll for new emails, extract, embed, and reindex continuously."""
     import signal
     import time as _time
@@ -524,11 +540,16 @@ def watch(ctx, interval, budget):
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
-    click.echo(f"Watching for new emails every {interval}s. Ctrl+C to stop.")
+    if max_cycles:
+        click.echo(f"Watching for new emails — will exit after {max_cycles} cycle(s).")
+    else:
+        click.echo(f"Watching for new emails every {interval}s. Ctrl+C to stop.")
     cycle = 0
 
     while running:
         cycle += 1
+        if max_cycles is not None and cycle > max_cycles:
+            break
         progress.update("sync", cycle, 0, "checking for new emails")
 
         # Sync new messages
@@ -629,6 +650,26 @@ def watch(ctx, interval, budget):
     import sys as _sys
 
     _sys.exit(0)
+
+
+@main.command(help="Clean up zombie running jobs (stale job_progress rows and their orphan processes)")
+@click.option(
+    "--staleness-seconds", type=int, default=600, help="Treat jobs idle longer than this as zombies (default 600)"
+)
+@click.option("--kill-timeout-sec", type=float, default=5.0, help="Seconds to wait after SIGTERM before SIGKILL")
+@common_options
+@click.pass_context
+def reap(ctx, staleness_seconds, kill_timeout_sec):
+    from gmail_search.reap import reap_zombie_jobs
+
+    report = reap_zombie_jobs(
+        ctx.obj["db_path"],
+        staleness_seconds=staleness_seconds,
+        kill_timeout_sec=kill_timeout_sec,
+    )
+    click.echo(f"Reaped {report.rows_reaped} stale row(s), killed {report.processes_killed} process(es).")
+    for line in report.details:
+        click.echo(f"  {line}")
 
 
 @main.command(help="Show progress of running jobs and daemon status")
@@ -812,6 +853,7 @@ def summarize(ctx, model, concurrency, limit):
 @click.pass_context
 def serve(ctx, host, port):
     import uvicorn
+
     from gmail_search.server import create_app
 
     cfg = ctx.obj["config"]

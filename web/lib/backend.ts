@@ -232,6 +232,41 @@ export const getCorpusStatusBackend = async (): Promise<CorpusStatus> => {
   return (await res.json()) as CorpusStatus;
 };
 
+export type RunningJob = {
+  job_id: string;
+  stage: string;
+  status: string;
+  total: number;
+  completed: number;
+  detail: string;
+  started_at: string;
+  updated_at: string;
+};
+
+export type JobsRunningResponse = {
+  running: RunningJob[];
+  recent: RunningJob[];
+  disk: { total_bytes: number; used_bytes: number; free_bytes: number };
+};
+
+export const getJobsRunningBackend = async (): Promise<JobsRunningResponse> => {
+  const res = await fetch(`${pythonApiUrl()}/api/jobs/running`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`jobs running backend failed: ${res.status}`);
+  return (await res.json()) as JobsRunningResponse;
+};
+
+export const postFrontfillBackend = async (): Promise<{ ok: boolean; pid?: number; error?: string }> => {
+  const res = await fetch(`${pythonApiUrl()}/api/jobs/frontfill`, { method: "POST" });
+  return (await res.json()) as { ok: boolean; pid?: number; error?: string };
+};
+
+export const postBackfillBackend = async (minFreeGb: number): Promise<{ ok: boolean; pid?: number; error?: string }> => {
+  const url = new URL(`${pythonApiUrl()}/api/jobs/backfill`);
+  url.searchParams.set("min_free_gb", String(minFreeGb));
+  const res = await fetch(url.toString(), { method: "POST" });
+  return (await res.json()) as { ok: boolean; pid?: number; error?: string };
+};
+
 export const getAttachmentBytesBackend = async (attachmentId: number): Promise<AttachmentBytes> => {
   const res = await fetch(`${pythonApiUrl()}/api/attachment/${attachmentId}`);
   if (!res.ok) {

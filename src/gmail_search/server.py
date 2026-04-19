@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import get_connection
@@ -251,9 +252,18 @@ def create_app(
 ) -> FastAPI:
     # Fail fast at startup if a developer added a table to SCHEMA without
     # documenting it in TABLE_DOCS — the LLM would silently miss it.
-    from gmail_search.store.db import assert_table_docs_cover_schema
+    from gmail_search.store.db import assert_table_docs_cover_schema, get_connection, reap_stale_jobs
 
     assert_table_docs_cover_schema()
+
+    # Sweep stale `running` job_progress rows left by crashed workers so
+    # /api/status never surfaces a zombie banner on a fresh boot. Pure DB
+    # — no process inspection here (that's the `gmail-search reap` CLI).
+    _conn = get_connection(db_path)
+    try:
+        reap_stale_jobs(_conn)
+    finally:
+        _conn.close()
 
     app = FastAPI(title="Gmail Search")
 
@@ -845,5 +855,76 @@ def create_app(
             "budget_remaining_usd": round(remaining, 4),
             "running_job": running[0] if running else None,
         }
+
+    @app.get("/api/jobs/running")
+    async def api_jobs_running():
+        """Everything the /settings UI needs: all running jobs (not just
+        the newest) + disk usage for the data_dir, so the backfill button
+        can warn when the disk is nearly full.
+        """
+        import shutil as _shutil
+
+        from gmail_search.store.db import JobProgress
+
+        jobs = JobProgress.get(db_path) or []
+        running = [j for j in jobs if j["status"] == "running"]
+        usage = _shutil.disk_usage(str(data_dir))
+        return {
+            "running": running,
+            "recent": jobs[:5],  # job history for the settings panel
+            "disk": {
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "free_bytes": usage.free,
+            },
+        }
+
+    def _spawn_gmail_search(args: list[str], log_name: str) -> dict:
+        """Shared body for the frontfill/backfill endpoints. Rejects if a
+        same-named job is already running (prevents two updates from
+        clobbering the same job_progress row).
+        """
+        from fastapi.responses import JSONResponse
+
+        from gmail_search.jobs import gmail_search_command, spawn_detached
+        from gmail_search.store.db import JobProgress
+
+        job_id = args[0]
+        jobs = JobProgress.get(db_path) or []
+        for j in jobs:
+            if j["job_id"] == job_id and j["status"] == "running":
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "error": f"{job_id} is already running (pid unknown, see log)",
+                    },
+                )
+
+        argv = gmail_search_command() + args + ["--data-dir", str(data_dir)]
+        log_path = data_dir / log_name
+        pid = spawn_detached(argv, log_path)
+        return {"ok": True, "pid": pid, "log": str(log_path)}
+
+    @app.post("/api/jobs/frontfill")
+    async def api_jobs_frontfill():
+        """One-cycle watch — sync new messages, extract, embed, reindex.
+        Returns as soon as the subprocess is spawned; progress lives in
+        job_progress and is surfaced via /api/jobs/running.
+        """
+        return _spawn_gmail_search(
+            ["watch", "--max-cycles", "1", "--interval", "1"],
+            log_name="frontfill.log",
+        )
+
+    @app.post("/api/jobs/backfill")
+    async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
+        """Pull older messages and run them through the full pipeline.
+        Stops between batches once free disk drops below min_free_gb.
+        """
+        return _spawn_gmail_search(
+            ["update", "--min-free-gb", str(min_free_gb)],
+            log_name="backfill.log",
+        )
 
     return app

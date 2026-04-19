@@ -57,9 +57,6 @@ export const CorpusStatus = () => {
   return (
     <div className="text-[10px] text-neutral-400 px-2 leading-tight truncate">
       {status.messages.toLocaleString()} · {oldest} → {latest}
-      {status.running_job && (
-        <span className="text-amber-600"> · syncing{status.running_job.stage ? ` (${status.running_job.stage})` : ""}…</span>
-      )}
     </div>
   );
 };
