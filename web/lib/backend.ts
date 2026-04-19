@@ -252,6 +252,7 @@ export type JobsRunningResponse = {
   disk: { total_bytes: number; used_bytes: number; free_bytes: number };
   frontfill: { running: boolean; pid: number | null };
   backfill: { running: boolean; pid: number | null };
+  summarize: { running: boolean; pid: number | null };
 };
 
 export const getJobsRunningBackend = async (): Promise<JobsRunningResponse> => {

@@ -1001,6 +1001,7 @@ def create_app(
             },
             "frontfill": _pid_file_status(data_dir / "watch.pid"),
             "backfill": _pid_file_status(data_dir / "backfill.pid"),
+            "summarize": _pid_file_status(data_dir / "summarize.pid"),
         }
 
     @app.post("/api/jobs/frontfill")
@@ -1034,5 +1035,29 @@ def create_app(
     @app.post("/api/jobs/backfill/stop")
     async def api_jobs_backfill_stop():
         return _stop_detached_job("backfill.pid")
+
+    @app.post("/api/jobs/summarize")
+    async def api_jobs_summarize(
+        concurrency: int = Query(12, ge=1, le=64),
+        batch_size: int = Query(1, ge=1, le=16),
+    ):
+        """Run `gmail-search summarize` in the background. Rate + ETA
+        land in /api/jobs/running via the `summarize` job_progress row.
+        """
+        return _start_detached_job(
+            pid_filename="summarize.pid",
+            log_filename="summarize.log",
+            extra_args=[
+                "summarize",
+                "--concurrency",
+                str(concurrency),
+                "--batch-size",
+                str(batch_size),
+            ],
+        )
+
+    @app.post("/api/jobs/summarize/stop")
+    async def api_jobs_summarize_stop():
+        return _stop_detached_job("summarize.pid")
 
     return app

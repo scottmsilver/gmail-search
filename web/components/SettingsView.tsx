@@ -104,6 +104,7 @@ export const SettingsView = () => {
   const [error, setError] = useState<string | null>(null);
   const [minFreeGb, setMinFreeGb] = useState(5);
   const [intervalSec, setIntervalSec] = useState(120);
+  const [summarizeConcurrency, setSummarizeConcurrency] = useState(12);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -124,7 +125,13 @@ export const SettingsView = () => {
     return () => clearInterval(id);
   }, [refresh]);
 
-  type Kick = "frontfill" | "frontfill-stop" | "backfill" | "backfill-stop";
+  type Kick =
+    | "frontfill"
+    | "frontfill-stop"
+    | "backfill"
+    | "backfill-stop"
+    | "summarize"
+    | "summarize-stop";
 
   const kickoff = useCallback(
     async (kind: Kick) => {
@@ -133,6 +140,8 @@ export const SettingsView = () => {
         "frontfill-stop": "/api/jobs/frontfill/stop",
         backfill: `/api/jobs/backfill?min_free_gb=${encodeURIComponent(String(minFreeGb))}`,
         "backfill-stop": "/api/jobs/backfill/stop",
+        summarize: `/api/jobs/summarize?concurrency=${encodeURIComponent(String(summarizeConcurrency))}`,
+        "summarize-stop": "/api/jobs/summarize/stop",
       };
       setBusy(kind);
       setToast(null);
@@ -151,7 +160,7 @@ export const SettingsView = () => {
         setBusy(null);
       }
     },
-    [intervalSec, minFreeGb, refresh],
+    [intervalSec, minFreeGb, summarizeConcurrency, refresh],
   );
 
   const recent = data?.recent ?? [];
@@ -160,6 +169,8 @@ export const SettingsView = () => {
   const frontfillPid = data?.frontfill?.pid ?? null;
   const backfillRunning = data?.backfill?.running ?? false;
   const backfillPid = data?.backfill?.pid ?? null;
+  const summarizeRunning = data?.summarize?.running ?? false;
+  const summarizePid = data?.summarize?.pid ?? null;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 px-6 py-8">
@@ -237,6 +248,25 @@ export const SettingsView = () => {
         inputValue={minFreeGb}
         onInputChange={(v) => setMinFreeGb(Math.max(1, v || 1))}
         alwaysShowInput
+      />
+
+      <JobControlCard
+        title="Summarize"
+        description="Generate per-message summaries via local Ollama (gemma4). Live rate + ETA below."
+        running={summarizeRunning}
+        pid={summarizePid}
+        starting={busy === "summarize"}
+        stopping={busy === "summarize-stop"}
+        onStart={() => void kickoff("summarize")}
+        onStop={() => void kickoff("summarize-stop")}
+        inputId="summarize-concurrency"
+        inputLabel="Concurrency"
+        inputUnit="parallel"
+        inputMin={1}
+        inputMax={64}
+        inputStep={1}
+        inputValue={summarizeConcurrency}
+        onInputChange={(v) => setSummarizeConcurrency(Math.max(1, v || 12))}
       />
 
       {toast && <div className="text-xs text-muted-foreground">{toast}</div>}

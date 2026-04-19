@@ -29,12 +29,17 @@ from typing import Iterable
 
 import httpx
 
+from gmail_search.llm import get_backend
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "gemma4:latest"
+# The `model_id` recorded in message_summaries.model is provided by
+# whichever backend get_backend() returns, so switching backends (or
+# models within a backend) naturally triggers a re-summarize pass —
+# old rows with a different model_id aren't counted as "done".
+DEFAULT_MODEL = get_backend().model_id
+
 MAX_BODY_CHARS = 6000  # head cap before head+tail truncation
 TAIL_CHARS = 1500  # for long bodies, keep this many from the end
 HTTP_TIMEOUT = 120.0
@@ -192,15 +197,15 @@ def _build_batch_user_prompt(messages: list[dict]) -> str:
 def summarize_batch(
     client: httpx.Client,
     messages: list[dict],
-    model: str = DEFAULT_MODEL,
+    backend: Backend,
 ) -> dict[str, str]:
     """Summarize N messages in one LLM call, returning {id: summary}.
 
     Auto-classifiable mail (promotions/social/forums) bypasses the LLM
     entirely. The remaining messages go into a single prompt with
-    Ollama's `format: "json"` constraint. If the response fails to
-    parse or omits any id, the missing ids retry via summarize_one —
-    so a bad batch never loses work, it just costs an extra call.
+    JSON-object response formatting. If the response fails to parse or
+    omits any id, the missing ids retry via summarize_one — so a bad
+    batch never loses work, it just costs an extra call.
 
     Accepts dicts with keys: id, from_addr, subject, body_text,
     labels_json (optional, defaults to "[]").
@@ -222,30 +227,16 @@ def summarize_batch(
 
     parsed: dict = {}
     try:
-        resp = client.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": model,
-                "stream": False,
-                "format": "json",
-                "messages": [
-                    {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
-                    {"role": "user", "content": _build_batch_user_prompt(llm_work)},
-                ],
-                "options": {
-                    "temperature": 0.1,
-                    # Scale output + context room with batch size; leave
-                    # headroom so a chatty summary on one email doesn't
-                    # truncate the rest.
-                    "num_predict": 180 * len(llm_work),
-                    "num_ctx": max(2048, 768 * len(llm_work)),
-                },
-            },
-            timeout=HTTP_TIMEOUT,
+        raw = backend.chat(
+            client,
+            messages=[
+                {"role": "system", "content": _BATCH_SYSTEM_PROMPT},
+                {"role": "user", "content": _build_batch_user_prompt(llm_work)},
+            ],
+            max_tokens=180 * len(llm_work),
+            json_format=True,
         )
-        resp.raise_for_status()
-        raw = (resp.json().get("message") or {}).get("content", "").strip()
-        obj = json.loads(raw)
+        obj = json.loads((raw or "").strip())
         if isinstance(obj, dict):
             parsed = obj
     except (httpx.HTTPError, ValueError):
@@ -266,7 +257,7 @@ def summarize_batch(
                 subject=m["subject"],
                 body_text=m["body_text"],
                 labels_json=m.get("labels_json", "[]"),
-                model=model,
+                backend=backend,
             )
             if s:
                 out[m["id"]] = s
@@ -283,32 +274,21 @@ def summarize_one(
     subject: str,
     body_text: str,
     labels_json: str = "[]",
-    model: str = DEFAULT_MODEL,
+    backend: Backend,
 ) -> str:
     """Summarize one message. Auto-classify short-circuit first, LLM fallback."""
     auto = _auto_mail_summary(labels_json, from_addr)
     if auto is not None:
         return auto
 
-    resp = client.post(
-        f"{OLLAMA_URL}/api/chat",
-        json={
-            "model": model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_prompt(from_addr, subject, body_text)},
-            ],
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 160,
-            },
-        },
-        timeout=HTTP_TIMEOUT,
+    raw = backend.chat(
+        client,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_prompt(from_addr, subject, body_text)},
+        ],
+        max_tokens=160,
     )
-    resp.raise_for_status()
-    data = resp.json()
-    raw = (data.get("message") or {}).get("content", "")
     return _clean_llm_output(raw)
 
 
@@ -354,23 +334,35 @@ def _store_summary(conn: sqlite3.Connection, message_id: str, summary: str, mode
 def backfill(
     db_path: Path,
     *,
-    model: str = DEFAULT_MODEL,
     concurrency: int = 12,
     batch_size: int = 1,
     limit: int | None = None,
     progress: bool = True,
 ) -> dict:
-    """Summarize every message that doesn't yet have a summary for `model`.
+    """Summarize every message that doesn't yet have a summary under the
+    active backend's model.
+
+    The backend (Ollama / vLLM) is chosen by the LLM_BACKEND env var and
+    owns both the model identity (recorded in message_summaries.model)
+    and its own lifecycle — vLLM, for instance, spawns its server on
+    enter and tears it down on exit.
 
     When `batch_size > 1`, messages are grouped into batches of that size
     and each batch is summarized in a single LLM call via summarize_batch
-    (with per-email fallback for any ids the batch misses). The JSON-
-    structured output cuts per-email prompt-prefix overhead.
+    (with per-email fallback for any ids the batch misses).
 
     Commits one message at a time so a crash mid-run doesn't lose work.
-    Returns counters, including `auto_classified` for mail short-circuited
-    by `_auto_mail_summary` without an LLM call.
     """
+    from gmail_search.store.db import JobProgress
+
+    # Backend (Ollama / vLLM) chosen by env var. The `with backend:`
+    # block owns lifecycle — e.g. vLLM spawns its own subprocess on
+    # enter and tears it down on exit so the GPU isn't pinned between
+    # jobs. model_id is the key under which summaries are stored; a
+    # backend/model change naturally re-queues everything.
+    backend = get_backend()
+    model = backend.model_id
+
     conn = get_connection(db_path)
     pending = _messages_needing_summary(conn, model, limit)
     total = len(pending)
@@ -378,11 +370,16 @@ def backfill(
         conn.close()
         return {"total": 0, "done": 0, "auto_classified": 0, "failed": 0, "seconds": 0.0}
 
+    # Publish progress to job_progress so /api/jobs/running can surface
+    # live rate + ETA for the /settings summarizer card. start_completed=0
+    # because unlike backfill, this run starts from scratch (nothing of
+    # the target already "done" at t=0).
+    job = JobProgress(db_path, "summarize", start_completed=0)
+
     done = 0
     auto_classified = 0
     failed = 0
     start = time.time()
-    last_log = start
 
     def _persist(summaries_by_id: dict[str, str], batch_messages: list[dict]) -> None:
         nonlocal done, auto_classified, failed
@@ -396,14 +393,37 @@ def backfill(
             else:
                 failed += 1
         conn.commit()
+        processed = done + failed
+        job.update(
+            "summarizing",
+            processed,
+            total,
+            f"{done} ok · {auto_classified} auto · {failed} failed",
+        )
 
-    with httpx.Client() as client:
-        if batch_size <= 1:
-            _run_per_email(client, pending, concurrency, model, _persist, progress, start, total)
-        else:
-            _run_batched(client, pending, concurrency, batch_size, model, _persist, progress, start, total)
+    job.update("starting backend", 0, total, f"loading {backend.model_id}")
+    try:
+        with backend:
+            try:
+                with httpx.Client() as client:
+                    if batch_size <= 1:
+                        _run_per_email(client, pending, concurrency, backend, _persist, progress, start, total)
+                    else:
+                        _run_batched(
+                            client, pending, concurrency, batch_size, backend, _persist, progress, start, total
+                        )
+            finally:
+                job.finish(
+                    "done",
+                    f"{done}/{total} summarized ({auto_classified} auto, {failed} failed)",
+                )
+    except Exception as e:
+        logger.error("backend failed: %s", e)
+        job.finish("error", f"backend error: {e}")
+        raise
+    finally:
+        conn.close()
 
-    conn.close()
     elapsed = time.time() - start
     return {
         "total": total,
@@ -414,7 +434,7 @@ def backfill(
     }
 
 
-def _run_per_email(client, pending, concurrency, model, persist, progress, start, total):
+def _run_per_email(client, pending, concurrency, backend, persist, progress, start, total):
     last_log = start
     processed = 0
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -426,7 +446,7 @@ def _run_per_email(client, pending, concurrency, model, persist, progress, start
                 subject=m["subject"],
                 body_text=m["body_text"],
                 labels_json=m["labels"],
-                model=model,
+                backend=backend,
             ): m
             for m in pending
         }
@@ -444,7 +464,7 @@ def _run_per_email(client, pending, concurrency, model, persist, progress, start
                 last_log = time.time()
 
 
-def _run_batched(client, pending, concurrency, batch_size, model, persist, progress, start, total):
+def _run_batched(client, pending, concurrency, batch_size, backend, persist, progress, start, total):
     """Chunk `pending` into `batch_size`-sized batches and submit each
     batch as one future. Concurrency is the number of IN-FLIGHT BATCHES,
     each of which internally does one LLM call.
@@ -469,7 +489,7 @@ def _run_batched(client, pending, concurrency, batch_size, model, persist, progr
     originals = [pending[i : i + batch_size] for i in range(0, len(pending), batch_size)]
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {pool.submit(summarize_batch, client, batch, model): i for i, batch in enumerate(batches)}
+        futures = {pool.submit(summarize_batch, client, batch, backend): i for i, batch in enumerate(batches)}
         for fut in as_completed(futures):
             i = futures[fut]
             try:

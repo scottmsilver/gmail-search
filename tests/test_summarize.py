@@ -1,9 +1,10 @@
 """Tests for the summarize module — auto-classify logic and the
 multi-email batching path.
 
-LLM calls themselves are mocked via httpx.MockTransport so we can pin
-behavior (JSON parse failures, missing IDs, mixed-quality bodies) without
-running a real Ollama.
+LLM transport is stubbed via a FakeBackend — no httpx, no Ollama, no
+vLLM. The Backend abstraction (gmail_search.llm) is the right seam: we
+plug in a class that returns canned responses and track the calls it
+received.
 """
 
 from __future__ import annotations
@@ -13,21 +14,34 @@ import json
 import httpx
 
 
-def _mock_ollama(responder):
-    """Build an httpx.Client whose /api/chat returns whatever `responder(req_body)`
-    produces. Each response is wrapped in Ollama's chat envelope.
+class FakeBackend:
+    """Canned-response Backend for tests. `responder(messages)` receives
+    the chat messages list and returns the raw content string.
     """
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        req_body = json.loads(request.content.decode("utf-8"))
-        content = responder(req_body)
-        return httpx.Response(
-            200,
-            json={"message": {"role": "assistant", "content": content}, "done": True},
-        )
+    model_id = "fake-model"
 
-    transport = httpx.MockTransport(handler)
-    return httpx.Client(transport=transport)
+    def __init__(self, responder):
+        self.responder = responder
+        self.calls: list[list[dict]] = []
+
+    def chat(self, client, messages, *, max_tokens, json_format=False):
+        self.calls.append(list(messages))
+        return self.responder(messages)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+
+def _unused_client():
+    """summarize_* takes an httpx.Client as an abstraction hook. Under
+    test we never actually make HTTP calls (FakeBackend short-circuits
+    everything) so a plain Client is fine.
+    """
+    return httpx.Client()
 
 
 # ─── _auto_mail_summary ────────────────────────────────────────────────────
@@ -112,14 +126,12 @@ def test_batch_summarizes_all_emails_when_json_parses():
         {"id": "m2", "from_addr": "b@x.com", "subject": "s2", "body_text": "b2", "labels_json": "[]"},
         {"id": "m3", "from_addr": "c@x.com", "subject": "s3", "body_text": "b3", "labels_json": "[]"},
     ]
+    backend = FakeBackend(lambda _msgs: json.dumps({"m1": "one", "m2": "two", "m3": "three"}))
 
-    def responder(_req):
-        return json.dumps({"m1": "summary one", "m2": "summary two", "m3": "summary three"})
+    with _unused_client() as client:
+        out = summarize_batch(client, messages, backend)
 
-    with _mock_ollama(responder) as client:
-        out = summarize_batch(client, messages, model="fake")
-
-    assert out == {"m1": "summary one", "m2": "summary two", "m3": "summary three"}
+    assert out == {"m1": "one", "m2": "two", "m3": "three"}
 
 
 def test_batch_short_circuits_auto_classified_messages():
@@ -139,21 +151,17 @@ def test_batch_short_circuits_auto_classified_messages():
         },
         {"id": "real", "from_addr": "alice@example.com", "subject": "lunch", "body_text": "noon?", "labels_json": "[]"},
     ]
-    calls = []
+    backend = FakeBackend(lambda _msgs: json.dumps({"real": "Alice asks about lunch at noon."}))
 
-    def responder(req):
-        calls.append(req)
-        return json.dumps({"real": "Alice asks about lunch at noon."})
-
-    with _mock_ollama(responder) as client:
-        out = summarize_batch(client, messages, model="fake")
+    with _unused_client() as client:
+        out = summarize_batch(client, messages, backend)
 
     assert out["mp"].startswith("Promotional")
     assert "Alice" in out["real"]
     # Only one LLM call — `mp` bypassed it.
-    assert len(calls) == 1
+    assert len(backend.calls) == 1
     # That one call didn't include the promo message in its body.
-    user_msg = next(m for m in calls[0]["messages"] if m["role"] == "user")
+    user_msg = next(m for m in backend.calls[0] if m["role"] == "user")
     assert "Acme" not in user_msg["content"]
 
 
@@ -166,20 +174,14 @@ def test_batch_falls_back_to_per_email_on_parse_failure():
     ]
     # First call (batch) returns un-parseable text. Subsequent calls
     # (per-email fallback) return plain summary strings.
-    responses = [
-        "not json at all, just prose",
-        "fallback summary for A",
-        "fallback summary for B",
-    ]
-    idx = {"i": 0}
+    responses = ["not json at all, just prose", "fallback summary for A", "fallback summary for B"]
 
-    def responder(_req):
-        r = responses[idx["i"]]
-        idx["i"] += 1
-        return r
+    def responder(_msgs):
+        return responses.pop(0)
 
-    with _mock_ollama(responder) as client:
-        out = summarize_batch(client, messages, model="fake")
+    backend = FakeBackend(responder)
+    with _unused_client() as client:
+        out = summarize_batch(client, messages, backend)
 
     assert out == {"a": "fallback summary for A", "b": "fallback summary for B"}
 
@@ -194,19 +196,11 @@ def test_batch_fills_missing_ids_via_per_email_fallback():
         {"id": "a", "from_addr": "x@x.com", "subject": "sA", "body_text": "bA", "labels_json": "[]"},
         {"id": "b", "from_addr": "y@y.com", "subject": "sB", "body_text": "bB", "labels_json": "[]"},
     ]
-    responses = [
-        json.dumps({"a": "batch summary A"}),  # missing "b"
-        "per-email summary B",
-    ]
-    idx = {"i": 0}
+    responses = [json.dumps({"a": "batch summary A"}), "per-email summary B"]  # "b" missing
+    backend = FakeBackend(lambda _msgs: responses.pop(0))
 
-    def responder(_req):
-        r = responses[idx["i"]]
-        idx["i"] += 1
-        return r
-
-    with _mock_ollama(responder) as client:
-        out = summarize_batch(client, messages, model="fake")
+    with _unused_client() as client:
+        out = summarize_batch(client, messages, backend)
 
     assert out["a"] == "batch summary A"
     assert out["b"] == "per-email summary B"
@@ -215,6 +209,7 @@ def test_batch_fills_missing_ids_via_per_email_fallback():
 def test_batch_with_empty_input():
     from gmail_search.summarize import summarize_batch
 
-    with _mock_ollama(lambda _: "{}") as client:
-        out = summarize_batch(client, [], model="fake")
+    backend = FakeBackend(lambda _msgs: "{}")
+    with _unused_client() as client:
+        out = summarize_batch(client, [], backend)
     assert out == {}

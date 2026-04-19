@@ -808,34 +808,36 @@ def status(ctx):
     conn.close()
 
 
-@main.command(help="Generate per-message summaries via a local Ollama model")
-@click.option("--model", default=None, help="Ollama model tag (default: gemma4:latest)")
+@main.command(help="Generate per-message summaries via the configured local LLM backend")
 @click.option(
     "--concurrency",
     type=int,
     default=12,
-    help="Parallel Ollama requests (default 12). Match OLLAMA_NUM_PARALLEL for best throughput.",
+    help="Parallel LLM requests (default 12).",
 )
 @click.option(
     "--batch-size",
     type=int,
     default=1,
-    help="Emails per LLM call (default 1). Try 3-5 for better throughput; larger risks model conflation.",
+    help="Emails per LLM call (default 1). Batching regresses on small GPUs — leave at 1 unless benched.",
 )
 @click.option("--limit", type=int, default=None, help="Max messages to process this run")
 @common_options
 @click.pass_context
-def summarize(ctx, model, concurrency, batch_size, limit):
+def summarize(ctx, concurrency, batch_size, limit):
     import logging
 
-    from gmail_search.summarize import DEFAULT_MODEL, backfill
+    from gmail_search.llm import get_backend
+    from gmail_search.summarize import backfill
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    chosen = model or DEFAULT_MODEL
-    click.echo(f"Summarizing with {chosen} (concurrency={concurrency}, batch_size={batch_size}, limit={limit})")
+    backend = get_backend()
+    click.echo(
+        f"Summarizing via {type(backend).__name__} (model={backend.model_id}, "
+        f"concurrency={concurrency}, batch_size={batch_size}, limit={limit})"
+    )
     result = backfill(
         ctx.obj["db_path"],
-        model=chosen,
         concurrency=concurrency,
         batch_size=batch_size,
         limit=limit,
