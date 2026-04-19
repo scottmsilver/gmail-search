@@ -206,39 +206,19 @@ def embed(ctx, model, budget, force, batch_api):
     click.echo(f"Embedded {count} new chunks.")
 
 
-@main.command(help="Rebuild the ScaNN search index and FTS index")
+@main.command(help="Rebuild the ScaNN search index and all downstream surfaces")
 @common_options
 @click.pass_context
 def reindex(ctx):
-    from gmail_search.index.builder import build_index
-    from gmail_search.store.db import (
-        clear_query_cache,
-        rebuild_contact_frequency,
-        rebuild_fts,
-        rebuild_spell_dictionary,
-        rebuild_term_aliases,
-        rebuild_thread_summary,
-        rebuild_topics,
-    )
+    from gmail_search.pipeline import reindex as _reindex
 
-    cfg = ctx.obj["config"]
-    db = ctx.obj["db_path"]
-    index_dir = ctx.obj["data_dir"] / "scann_index"
-    cleared = clear_query_cache(db)
-    if cleared:
-        click.echo(f"Cleared {cleared} cached query embeddings.")
-    build_index(
-        db_path=db, index_dir=index_dir, model=cfg["embedding"]["model"], dimensions=cfg["embedding"]["dimensions"]
+    _reindex(
+        db_path=ctx.obj["db_path"],
+        data_dir=ctx.obj["data_dir"],
+        cfg=ctx.obj["config"],
+        light=False,
     )
-    fts_count = rebuild_fts(db)
-    thread_count = rebuild_thread_summary(db)
-    contact_count = rebuild_contact_frequency(db)
-    word_count = rebuild_spell_dictionary(db, ctx.obj["data_dir"])
-    topic_count = rebuild_topics(db)
-    alias_count = rebuild_term_aliases(db)
-    click.echo(
-        f"Index rebuilt. ScaNN + {fts_count} FTS + {thread_count} threads + {contact_count} contacts + {word_count} words + {topic_count} topics + {alias_count} aliases."
-    )
+    click.echo("Index rebuilt (ScaNN + FTS + thread summary + contacts + spell + topics + aliases).")
 
 
 @main.command(help="Run full pipeline in rolling batches: download → extract → embed → reindex")
@@ -258,15 +238,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
-    from gmail_search.index.builder import build_index
-    from gmail_search.store.db import (  # noqa: E501
-        JobProgress,
-        rebuild_contact_frequency,
-        rebuild_fts,
-        rebuild_spell_dictionary,
-        rebuild_thread_summary,
-        rebuild_topics,
-    )
+    from gmail_search.store.db import JobProgress
     from gmail_search.store.queries import get_attachments_for_message
 
     cfg = ctx.obj["config"]
@@ -293,6 +265,8 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
     start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     conn.close()
 
+    from gmail_search.locks import write_lock
+
     while True:
         if min_free_gb is not None:
             import shutil as _shutil
@@ -301,112 +275,110 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
             if free_gb < min_free_gb:
                 click.echo(f"Free disk {free_gb:.2f} GiB < min {min_free_gb} GiB — stopping backfill.")
                 break
-        batch_num += 1
-        # How many to download this round — cap at batch_size new messages
-        current_limit = start_count + total_downloaded + batch_size
-        if max_msg:
-            current_limit = min(current_limit, max_msg)
 
-        click.echo(f"\n{'='*50}")
-        click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
-        click.echo(f"{'='*50}")
+        # Serialise with the watch daemon (SQLite is single-writer).
+        # Held for one batch; watch preempts between batches.
+        with write_lock(data_dir):
+            batch_num += 1
+            # How many to download this round — cap at batch_size new messages
+            current_limit = start_count + total_downloaded + batch_size
+            if max_msg:
+                current_limit = min(current_limit, max_msg)
 
-        progress.update("download", total_downloaded, max_msg or current_limit, f"batch {batch_num}")
+            click.echo(f"\n{'='*50}")
+            click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
+            click.echo(f"{'='*50}")
 
-        # Download one batch
-        dl_count = download_messages(
-            service=service,
-            db_path=db_path,
-            data_dir=data_dir,
-            batch_size=cfg["download"]["batch_size"],
-            max_messages=current_limit,
-            max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
-        )
-        total_downloaded += dl_count
+            progress.update("download", total_downloaded, max_msg or current_limit, f"batch {batch_num}")
 
-        if dl_count == 0:
-            click.echo("No new messages to download.")
-            break
+            # Download one batch
+            dl_count = download_messages(
+                service=service,
+                db_path=db_path,
+                data_dir=data_dir,
+                batch_size=cfg["download"]["batch_size"],
+                max_messages=current_limit,
+                max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+            )
+            total_downloaded += dl_count
 
-        click.echo(f"Downloaded {dl_count} messages.")
+            if dl_count == 0:
+                click.echo("No new messages to download.")
+                break
 
-        # Extract new attachments
-        progress.update("extract", total_downloaded, max_msg or current_limit, f"+{dl_count} downloaded")
-        click.echo("Extracting attachments...")
-        conn = get_connection(db_path)
-        rows = conn.execute(
-            "SELECT DISTINCT m.id FROM messages m "
-            "JOIN attachments a ON a.message_id = m.id "
-            "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
-        ).fetchall()
-        extracted = 0
-        for row in rows:
-            attachments = get_attachments_for_message(conn, row["id"])
-            for att in attachments:
-                if att.extracted_text or att.image_path:
-                    continue
-                if not att.raw_path or not Path(att.raw_path).exists():
-                    continue
-                try:
-                    result = dispatch(att.mime_type, Path(att.raw_path), att_config)
-                except Exception as e:
-                    logger.warning(f"Failed to extract {att.filename}: {e}")
-                    continue
-                if result is None:
-                    continue
-                updates = {}
-                if result.text:
-                    updates["extracted_text"] = result.text
-                if result.images:
-                    updates["image_path"] = str(result.images[0].parent if len(result.images) > 1 else result.images[0])
-                if updates:
-                    set_clause = ", ".join(f"{k} = ?" for k in updates)
-                    conn.execute(f"UPDATE attachments SET {set_clause} WHERE id = ?", (*updates.values(), att.id))
-                    conn.commit()
-                    extracted += 1
-        conn.close()
-        total_extracted += extracted
-        click.echo(f"Extracted {extracted} attachments.")
+            click.echo(f"Downloaded {dl_count} messages.")
 
-        # Embed new messages + attachments
-        progress.update("embed", total_downloaded, max_msg or current_limit, f"+{extracted} extracted")
-        click.echo("Embedding...")
-        conn = get_connection(db_path)
-        ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
-        conn.close()
-        if not ok:
-            click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
-            break
-        emb_count = run_embedding_pipeline(db_path, cfg)
-        total_embedded += emb_count
-        click.echo(f"Embedded {emb_count} chunks.")
+            # Extract new attachments
+            progress.update("extract", total_downloaded, max_msg or current_limit, f"+{dl_count} downloaded")
+            click.echo("Extracting attachments...")
+            conn = get_connection(db_path)
+            rows = conn.execute(
+                "SELECT DISTINCT m.id FROM messages m "
+                "JOIN attachments a ON a.message_id = m.id "
+                "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
+            ).fetchall()
+            extracted = 0
+            for row in rows:
+                attachments = get_attachments_for_message(conn, row["id"])
+                for att in attachments:
+                    if att.extracted_text or att.image_path:
+                        continue
+                    if not att.raw_path or not Path(att.raw_path).exists():
+                        continue
+                    try:
+                        result = dispatch(att.mime_type, Path(att.raw_path), att_config)
+                    except Exception as e:
+                        logger.warning(f"Failed to extract {att.filename}: {e}")
+                        continue
+                    if result is None:
+                        continue
+                    updates = {}
+                    if result.text:
+                        updates["extracted_text"] = result.text
+                    if result.images:
+                        updates["image_path"] = str(
+                            result.images[0].parent if len(result.images) > 1 else result.images[0]
+                        )
+                    if updates:
+                        set_clause = ", ".join(f"{k} = ?" for k in updates)
+                        conn.execute(f"UPDATE attachments SET {set_clause} WHERE id = ?", (*updates.values(), att.id))
+                        conn.commit()
+                        extracted += 1
+            conn.close()
+            total_extracted += extracted
+            click.echo(f"Extracted {extracted} attachments.")
 
-        # Reindex so search is live
-        progress.update("reindex", total_downloaded, max_msg or current_limit, f"+{emb_count} embedded")
-        click.echo("Reindexing...")
-        build_index(
-            db_path=db_path,
-            index_dir=index_dir,
-            model=cfg["embedding"]["model"],
-            dimensions=cfg["embedding"]["dimensions"],
-        )
-        rebuild_fts(db_path)
-        rebuild_thread_summary(db_path)
-        rebuild_contact_frequency(db_path)
-        rebuild_spell_dictionary(db_path, data_dir)
-        rebuild_topics(db_path)
+            # Embed new messages + attachments
+            progress.update("embed", total_downloaded, max_msg or current_limit, f"+{extracted} extracted")
+            click.echo("Embedding...")
+            conn = get_connection(db_path)
+            ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+            conn.close()
+            if not ok:
+                click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
+                break
+            emb_count = run_embedding_pipeline(db_path, cfg)
+            total_embedded += emb_count
+            click.echo(f"Embedded {emb_count} chunks.")
 
-        conn = get_connection(db_path)
-        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-        cost = get_total_spend(conn)
-        conn.close()
-        click.echo(f"Status: {msg_count:,} messages | {emb_total:,} embeddings | ${cost:.2f} spent")
+            # Reindex so search is live. light=True because the heavy
+            # rebuilds (aliases, query cache wipe) are done once at the
+            # end of the full update, not per-batch.
+            progress.update("reindex", total_downloaded, max_msg or current_limit, f"+{emb_count} embedded")
+            click.echo("Reindexing...")
+            _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
 
-        # Check if we've hit the limit
-        if max_msg and msg_count >= max_msg:
-            click.echo("Reached max message limit.")
-            break
+            conn = get_connection(db_path)
+            msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            cost = get_total_spend(conn)
+            conn.close()
+            click.echo(f"Status: {msg_count:,} messages | {emb_total:,} embeddings | ${cost:.2f} spent")
+
+            # Check if we've hit the limit
+            if max_msg and msg_count >= max_msg:
+                click.echo("Reached max message limit.")
+                break
 
     progress.finish("done", f"+{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded")
 
@@ -515,8 +487,8 @@ def watch(ctx, interval, budget, max_cycles):
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import sync_new_messages
-    from gmail_search.index.builder import build_index
-    from gmail_search.store.db import JobProgress, rebuild_fts, rebuild_thread_summary
+    from gmail_search.pipeline import reindex as _reindex
+    from gmail_search.store.db import JobProgress
     from gmail_search.store.queries import get_attachments_for_message
 
     cfg = ctx.obj["config"]
@@ -546,95 +518,95 @@ def watch(ctx, interval, budget, max_cycles):
         click.echo(f"Watching for new emails every {interval}s. Ctrl+C to stop.")
     cycle = 0
 
+    from gmail_search.locks import write_lock
+
     while running:
         cycle += 1
         if max_cycles is not None and cycle > max_cycles:
             break
-        progress.update("sync", cycle, 0, "checking for new emails")
 
-        # Sync new messages
-        try:
-            count = sync_new_messages(
-                service=service,
-                db_path=db_path,
-                data_dir=data_dir,
-                max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
-            )
-        except Exception as e:
-            logger.warning(f"Sync failed: {e}")
-            count = 0
+        # Hold the write lock for the whole cycle body so a concurrent
+        # `update` backfill can't race our upserts/reindex. Released
+        # before the sleep — backfill preempts between cycles.
+        with write_lock(data_dir):
+            progress.update("sync", cycle, 0, "checking for new emails")
 
-        if count > 0:
-            click.echo(f"[cycle {cycle}] Synced {count} new messages")
-
-            # Extract attachments
-            progress.update("extract", cycle, 0, f"+{count} synced")
-            conn = get_connection(db_path)
             try:
-                rows = conn.execute(
-                    "SELECT DISTINCT m.id FROM messages m "
-                    "JOIN attachments a ON a.message_id = m.id "
-                    "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
-                ).fetchall()
-                for row in rows:
-                    attachments = get_attachments_for_message(conn, row["id"])
-                    for att in attachments:
-                        if att.extracted_text or att.image_path or not att.raw_path:
-                            continue
-                        if not Path(att.raw_path).exists():
-                            continue
-                        try:
-                            result = dispatch(att.mime_type, Path(att.raw_path), att_config)
-                        except Exception:
-                            continue
-                        if result is None:
-                            continue
-                        updates = {}
-                        if result.text:
-                            updates["extracted_text"] = result.text
-                        if result.images:
-                            updates["image_path"] = str(
-                                result.images[0].parent if len(result.images) > 1 else result.images[0]
-                            )
-                        if updates:
-                            set_clause = ", ".join(f"{k} = ?" for k in updates)
-                            conn.execute(
-                                f"UPDATE attachments SET {set_clause} WHERE id = ?", (*updates.values(), att.id)
-                            )
-                            conn.commit()
-            finally:
+                count = sync_new_messages(
+                    service=service,
+                    db_path=db_path,
+                    data_dir=data_dir,
+                    max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+                )
+            except Exception as e:
+                logger.warning(f"Sync failed: {e}")
+                count = 0
+
+            if count > 0:
+                click.echo(f"[cycle {cycle}] Synced {count} new messages")
+
+                # Extract attachments
+                progress.update("extract", cycle, 0, f"+{count} synced")
+                conn = get_connection(db_path)
+                try:
+                    rows = conn.execute(
+                        "SELECT DISTINCT m.id FROM messages m "
+                        "JOIN attachments a ON a.message_id = m.id "
+                        "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
+                    ).fetchall()
+                    for row in rows:
+                        attachments = get_attachments_for_message(conn, row["id"])
+                        for att in attachments:
+                            if att.extracted_text or att.image_path or not att.raw_path:
+                                continue
+                            if not Path(att.raw_path).exists():
+                                continue
+                            try:
+                                result = dispatch(att.mime_type, Path(att.raw_path), att_config)
+                            except Exception:
+                                continue
+                            if result is None:
+                                continue
+                            updates = {}
+                            if result.text:
+                                updates["extracted_text"] = result.text
+                            if result.images:
+                                updates["image_path"] = str(
+                                    result.images[0].parent if len(result.images) > 1 else result.images[0]
+                                )
+                            if updates:
+                                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                                conn.execute(
+                                    f"UPDATE attachments SET {set_clause} WHERE id = ?",
+                                    (*updates.values(), att.id),
+                                )
+                                conn.commit()
+                finally:
+                    conn.close()
+
+                # Embed
+                progress.update("embed", cycle, 0, "embedding new messages")
+                conn = get_connection(db_path)
+                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
                 conn.close()
+                if ok:
+                    emb_count = run_embedding_pipeline(db_path, cfg)
+                    if emb_count:
+                        click.echo(f"[cycle {cycle}] Embedded {emb_count} chunks")
+                else:
+                    click.echo(f"[cycle {cycle}] Budget exhausted (${spent:.2f})")
 
-            # Embed
-            progress.update("embed", cycle, 0, "embedding new messages")
-            conn = get_connection(db_path)
-            ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
-            conn.close()
-            if ok:
-                emb_count = run_embedding_pipeline(db_path, cfg)
-                if emb_count:
-                    click.echo(f"[cycle {cycle}] Embedded {emb_count} chunks")
+                # Reindex — light=True keeps the hot path fast.
+                progress.update("reindex", cycle, 0, "updating indexes")
+                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
+
+                conn = get_connection(db_path)
+                msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+                conn.close()
+                click.echo(f"[cycle {cycle}] {msg_count:,} messages | {emb_total:,} embeddings")
             else:
-                click.echo(f"[cycle {cycle}] Budget exhausted (${spent:.2f})")
-
-            # Reindex (lightweight — just ScaNN, FTS, thread summary)
-            progress.update("reindex", cycle, 0, "updating indexes")
-            build_index(
-                db_path=db_path,
-                index_dir=index_dir,
-                model=cfg["embedding"]["model"],
-                dimensions=cfg["embedding"]["dimensions"],
-            )
-            rebuild_fts(db_path)
-            rebuild_thread_summary(db_path)
-
-            conn = get_connection(db_path)
-            msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-            conn.close()
-            click.echo(f"[cycle {cycle}] {msg_count:,} messages | {emb_total:,} embeddings")
-        else:
-            progress.update("idle", cycle, 0, "no new messages")
+                progress.update("idle", cycle, 0, "no new messages")
 
         # Sleep in small increments so Ctrl+C is responsive
         for _ in range(interval):

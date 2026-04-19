@@ -52,6 +52,7 @@ export const SettingsView = () => {
   const [data, setData] = useState<JobsRunningResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [minFreeGb, setMinFreeGb] = useState(5);
+  const [intervalSec, setIntervalSec] = useState(120);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -73,18 +74,25 @@ export const SettingsView = () => {
   }, [refresh]);
 
   const kickoff = useCallback(
-    async (kind: "frontfill" | "backfill") => {
+    async (kind: "frontfill" | "backfill" | "frontfill-stop") => {
       setBusy(kind);
       setToast(null);
       try {
-        const url =
-          kind === "frontfill"
-            ? "/api/jobs/frontfill"
-            : `/api/jobs/backfill?min_free_gb=${encodeURIComponent(String(minFreeGb))}`;
+        let url: string;
+        if (kind === "frontfill") {
+          url = `/api/jobs/frontfill?interval=${encodeURIComponent(String(intervalSec))}`;
+        } else if (kind === "frontfill-stop") {
+          url = "/api/jobs/frontfill/stop";
+        } else {
+          url = `/api/jobs/backfill?min_free_gb=${encodeURIComponent(String(minFreeGb))}`;
+        }
         const res = await fetch(url, { method: "POST" });
         const body = (await res.json()) as { ok: boolean; pid?: number; error?: string };
         if (!body.ok) {
-          setToast(body.error ?? `failed to start ${kind}`);
+          setToast(body.error ?? `failed: ${kind}`);
+        } else if (kind === "frontfill-stop") {
+          setToast(`watch stopped`);
+          await refresh();
         } else {
           setToast(`${kind} started (pid ${body.pid})`);
           await refresh();
@@ -95,13 +103,14 @@ export const SettingsView = () => {
         setBusy(null);
       }
     },
-    [minFreeGb, refresh],
+    [intervalSec, minFreeGb, refresh],
   );
 
   const running = data?.running ?? [];
   const recent = data?.recent ?? [];
   const disk = data?.disk;
-  const frontfillRunning = running.some((j) => j.job_id === "watch");
+  const frontfillRunning = data?.frontfill?.running ?? false;
+  const frontfillPid = data?.frontfill?.pid ?? null;
   const backfillRunning = running.some((j) => j.job_id === "update");
 
   return (
@@ -172,24 +181,64 @@ export const SettingsView = () => {
           Actions
         </h2>
         <div className="space-y-3">
-          <div className="flex items-center justify-between gap-4 px-3 py-3 rounded-md" style={{ background: "var(--bg-secondary)" }}>
-            <div>
-              <div className="text-xs font-medium" style={{ color: "var(--fg-primary)" }}>
-                Frontfill
+          <div className="px-3 py-3 rounded-md space-y-3" style={{ background: "var(--bg-secondary)" }}>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-xs font-medium" style={{ color: "var(--fg-primary)" }}>
+                  Frontfill
+                </div>
+                <div className="text-[11px] mt-0.5" style={{ color: "var(--fg-tertiary)" }}>
+                  Continuously watch Gmail for new messages — sync, extract, embed, reindex every N seconds.
+                  {frontfillRunning && frontfillPid !== null && (
+                    <>
+                      {" "}
+                      <span style={{ color: "var(--fg-secondary)" }}>Running (pid {frontfillPid}).</span>
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="text-[11px] mt-0.5" style={{ color: "var(--fg-tertiary)" }}>
-                Pull new messages since last sync → extract → embed → reindex. One cycle.
-              </div>
+              {frontfillRunning ? (
+                <button
+                  type="button"
+                  disabled={busy === "frontfill-stop"}
+                  onClick={() => void kickoff("frontfill-stop")}
+                  className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ background: "var(--bg-primary)", color: "var(--fg-primary)", border: "1px solid var(--border-subtle)" }}
+                >
+                  {busy === "frontfill-stop" ? "stopping…" : "Stop"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={busy === "frontfill"}
+                  onClick={() => void kickoff("frontfill")}
+                  className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ background: "var(--fg-primary)", color: "var(--bg-primary)" }}
+                >
+                  {busy === "frontfill" ? "starting…" : "Start"}
+                </button>
+              )}
             </div>
-            <button
-              type="button"
-              disabled={busy === "frontfill" || frontfillRunning}
-              onClick={() => void kickoff("frontfill")}
-              className="text-xs px-3 py-1.5 rounded-full font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ background: "var(--fg-primary)", color: "var(--bg-primary)" }}
-            >
-              {frontfillRunning ? "running…" : busy === "frontfill" ? "starting…" : "Run now"}
-            </button>
+            {!frontfillRunning && (
+              <label className="flex items-center gap-3 text-[11px]" style={{ color: "var(--fg-secondary)" }}>
+                <span>Check every</span>
+                <input
+                  type="number"
+                  min={10}
+                  max={86400}
+                  step={30}
+                  value={intervalSec}
+                  onChange={(e) => setIntervalSec(Math.max(10, Number(e.target.value) || 120))}
+                  className="w-20 px-2 py-1 rounded text-right tabular-nums"
+                  style={{
+                    background: "var(--bg-primary)",
+                    color: "var(--fg-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                />
+                <span>seconds</span>
+              </label>
+            )}
           </div>
 
           <div className="px-3 py-3 rounded-md space-y-3" style={{ background: "var(--bg-secondary)" }}>

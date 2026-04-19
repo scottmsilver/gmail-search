@@ -1105,5 +1105,9 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Wait up to 60s for a peer writer before raising 'database is locked'.
+    # The file lock in gmail_search.locks normally prevents contention,
+    # but this is the belt+suspenders for anything that bypasses it.
+    conn.execute("PRAGMA busy_timeout=60000")
     conn.row_factory = sqlite3.Row
     return conn

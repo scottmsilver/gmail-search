@@ -247,6 +247,7 @@ export type JobsRunningResponse = {
   running: RunningJob[];
   recent: RunningJob[];
   disk: { total_bytes: number; used_bytes: number; free_bytes: number };
+  frontfill: { running: boolean; pid: number | null };
 };
 
 export const getJobsRunningBackend = async (): Promise<JobsRunningResponse> => {

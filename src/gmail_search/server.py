@@ -856,6 +856,25 @@ def create_app(
             "running_job": running[0] if running else None,
         }
 
+    def _frontfill_status() -> dict:
+        """Truth source for the continuous watch daemon — the PID file
+        under data_dir. job_progress alone isn't enough because it only
+        updates on cycle boundaries, so a mid-cycle daemon that just
+        received SIGTERM could still look "running" in the DB briefly.
+        """
+        import os
+
+        pid_path = data_dir / "watch.pid"
+        if not pid_path.exists():
+            return {"running": False, "pid": None}
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)
+            return {"running": True, "pid": pid}
+        except (ValueError, ProcessLookupError, PermissionError):
+            pid_path.unlink(missing_ok=True)
+            return {"running": False, "pid": None}
+
     @app.get("/api/jobs/running")
     async def api_jobs_running():
         """Everything the /settings UI needs: all running jobs (not just
@@ -877,6 +896,7 @@ def create_app(
                 "used_bytes": usage.used,
                 "free_bytes": usage.free,
             },
+            "frontfill": _frontfill_status(),
         }
 
     def _spawn_gmail_search(args: list[str], log_name: str) -> dict:
@@ -907,15 +927,59 @@ def create_app(
         return {"ok": True, "pid": pid, "log": str(log_path)}
 
     @app.post("/api/jobs/frontfill")
-    async def api_jobs_frontfill():
-        """One-cycle watch — sync new messages, extract, embed, reindex.
-        Returns as soon as the subprocess is spawned; progress lives in
-        job_progress and is surfaced via /api/jobs/running.
+    async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
+        """Start the continuous watch daemon: sync new messages every
+        `interval` seconds, extract, embed, reindex. Runs forever until
+        POST /api/jobs/frontfill/stop. Idempotent — 409 if already up.
+
+        PID is written to data/watch.pid, same convention as
+        `gmail-search start`, so the two paths stay compatible: you can
+        start from the UI and stop with the CLI or vice-versa.
         """
-        return _spawn_gmail_search(
-            ["watch", "--max-cycles", "1", "--interval", "1"],
-            log_name="frontfill.log",
-        )
+        from fastapi.responses import JSONResponse
+
+        from gmail_search.jobs import gmail_search_command, spawn_detached
+
+        status = _frontfill_status()
+        if status["running"]:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": f"already running (pid {status['pid']})"},
+            )
+
+        argv = gmail_search_command() + [
+            "watch",
+            "--interval",
+            str(interval),
+            "--data-dir",
+            str(data_dir),
+        ]
+        pid = spawn_detached(argv, data_dir / "watch.log")
+        (data_dir / "watch.pid").write_text(str(pid))
+        return {"ok": True, "pid": pid, "interval": interval}
+
+    @app.post("/api/jobs/frontfill/stop")
+    async def api_jobs_frontfill_stop():
+        """SIGTERM the watch daemon. Safe to call when it's not running
+        (idempotent). The daemon's signal handler calls progress.finish
+        so the job_progress row settles to `stopped` cleanly.
+        """
+        import os
+        import signal
+
+        from fastapi.responses import JSONResponse
+
+        pid_path = data_dir / "watch.pid"
+        if not pid_path.exists():
+            return JSONResponse(status_code=404, content={"ok": False, "error": "not running"})
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            pid_path.unlink(missing_ok=True)
+            return {"ok": True, "pid": pid}
+        except (ValueError, ProcessLookupError, PermissionError):
+            pid_path.unlink(missing_ok=True)
+            return {"ok": True, "detail": "process was already gone"}
 
     @app.post("/api/jobs/backfill")
     async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
