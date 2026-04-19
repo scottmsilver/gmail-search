@@ -34,6 +34,21 @@ const QUERY_ENRICH_TOP_N = 3;
 const QUERY_ENRICHED_BODY_CHARS = 2000;
 const MAX_BATCH = 10;
 
+// Per-message body cap for get_thread. A single chatty newsletter thread
+// with 30 quoted-reply messages × 50KB bodies × 10 threads in one batch
+// can ship >15MB back to the model, blowing Gemini's 1M-token input cap
+// on the next agent step. 20K chars (~5K tokens) preserves the most
+// recent reply in full for ~99% of real email threads; the model sees
+// a `body_text_truncated: true` flag + the original length when we cut.
+const THREAD_BODY_CHAR_CAP = 20000;
+
+// Per-cell cap for sql_query results. sql_query caps at 500 rows but
+// not cell size — `SELECT body_text FROM messages LIMIT 500` can ship
+// 10+ MB of text. 8K chars per string cell covers normal columns
+// (subject, from_addr, etc.) with huge headroom and truncates long
+// body_text cleanly.
+const SQL_CELL_CHAR_CAP = 8000;
+
 // Tune: below these thresholds we tell the model the result is thin
 // and it should consider broadening. Empirically most useful answers
 // have at least 3 hits and top score > 0.45.
@@ -154,6 +169,52 @@ const runBatchedBinary = async (
     };
   });
   return { results };
+};
+
+// Cap a per-message body for get_thread. Returns the clipped text plus
+// metadata the model can use to decide whether to dig deeper.
+const capThreadBody = (
+  body: string,
+): { body_text: string; original_chars: number; body_text_truncated?: true } => {
+  const original = body ?? "";
+  if (original.length <= THREAD_BODY_CHAR_CAP) {
+    return { body_text: original, original_chars: original.length };
+  }
+  return {
+    body_text: original.slice(0, THREAD_BODY_CHAR_CAP),
+    original_chars: original.length,
+    body_text_truncated: true,
+  };
+};
+
+// Clamp a single sql_query cell. Non-strings pass through. Long strings
+// are clipped with a sentinel so the model knows content was dropped.
+const capSqlCell = (cell: unknown): { value: unknown; truncated: boolean } => {
+  if (typeof cell !== "string" || cell.length <= SQL_CELL_CHAR_CAP) {
+    return { value: cell, truncated: false };
+  }
+  const kept = cell.slice(0, SQL_CELL_CHAR_CAP);
+  return {
+    value: `${kept}… [truncated: original ${cell.length} chars]`,
+    truncated: true,
+  };
+};
+
+// Walk every cell in a SqlResult and clamp long strings. Adds a
+// `cells_truncated` count so the model sees the scope of the clip.
+const capSqlResult = <T extends { rows: unknown[][] }>(
+  result: T,
+): T & { cells_truncated?: number } => {
+  let truncatedCount = 0;
+  const cappedRows = result.rows.map((row) =>
+    row.map((cell) => {
+      const { value, truncated } = capSqlCell(cell);
+      if (truncated) truncatedCount += 1;
+      return value;
+    }),
+  );
+  if (truncatedCount === 0) return result;
+  return { ...result, rows: cappedRows, cells_truncated: truncatedCount };
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -359,7 +420,7 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
           queries,
           (q) => ({ query: q }),
           async (q) => {
-            const r = await runSqlBackend(q);
+            const r = capSqlResult(await runSqlBackend(q));
             if (r.row_count === 0) {
               return {
                 ...r,
@@ -434,7 +495,7 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
                 to_addr: m.to_addr,
                 date: m.date,
                 subject: m.subject,
-                body_text: m.body_text,
+                ...capThreadBody(m.body_text),
                 attachments: m.attachments,
               })),
               ...(note ? { quality_note: note } : {}),

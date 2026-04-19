@@ -3,7 +3,7 @@ import typography from "@tailwindcss/typography";
 import animate from "tailwindcss-animate";
 
 const config: Config = {
-  darkMode: ["class", '[data-theme="dark"]', '[data-theme="slate"]'],
+  darkMode: ["variant", ['[data-theme="dark"] &', '[data-theme="slate"] &']],
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {

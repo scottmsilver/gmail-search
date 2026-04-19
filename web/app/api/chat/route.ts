@@ -35,6 +35,15 @@ export const maxDuration = 180;
 const MAX_TOOL_STEPS = 15;
 const MAX_VALIDATION_RETRIES = 2;
 
+// Map known provider errors to something a user can act on. Gemini's
+// 1,048,576-token input cap surfaces as a verbose stack trace otherwise.
+const friendlyModelError = (msg: string): string => {
+  if (/input token count exceeds the maximum|exceeds the maximum number of tokens/i.test(msg)) {
+    return "This variant ran out of context while investigating (over 1M tokens). Try a narrower question, or the other variant may still have an answer.";
+  }
+  return msg;
+};
+
 const buildCorrectionMessage = (broken: string[]): string =>
   `Your previous answer cited refs that are not in any tool result: ${broken
     .map((b) => `[ref:${b}]`)
@@ -201,7 +210,7 @@ const runVariantOnce = async (
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[chat] battle variant ${model}/${thinkingLevel} threw:`, err);
-    return { text: "", tools: [], error: msg };
+    return { text: "", tools: [], error: friendlyModelError(msg) };
   }
 };
 
@@ -585,7 +594,7 @@ export async function POST(req: NextRequest) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error(`[chat ${logger.id}] stream error:`, error);
       void logger.log("error", { source: "stream", message: msg });
-      return msg;
+      return friendlyModelError(msg);
     },
   });
 
