@@ -25,6 +25,14 @@ dependencies = [
     "pillow-heif>=0.16.0",
     "dateparser>=1.2.0",
     "psutil>=5.9.0",
+    # Postgres backend (dual-backend via DB_BACKEND env; see store/db.py).
+    # `psycopg[binary]` pins the C-impl wheel so no local libpq-dev needed.
+    "psycopg[binary,pool]>=3.1.18",
+    "python-pptx>=1.0.0",
+    "docx2txt>=0.8",  # fallback if LibreOffice not installed
+    "xlrd>=2.0.0",  # legacy .xls (xlsx is openpyxl above)
+    "gdown>=6.0.0",  # Drive URL parsing (gmail/drive.py)
+    "beautifulsoup4>=4.12.0",
 ]
 
 [project.optional-dependencies]

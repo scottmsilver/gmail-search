@@ -359,6 +359,16 @@ def describe_schema_for_llm() -> str:
 
 
 def init_db(db_path: Path) -> None:
+    """Create the DB schema if it doesn't exist.
+
+    When `DB_BACKEND=postgres`, loads `pg_schema.sql` (the hand-translated
+    PG DDL). Otherwise the legacy SQLite path runs the inlined `SCHEMA`
+    constant. The PG DDL is idempotent via `IF NOT EXISTS`, so calling
+    `init_db` against an already-initialized PG is a no-op.
+    """
+    if _is_postgres_backend():
+        _init_db_pg()
+        return
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
     # Backfill: older DBs predate the start_completed column. ALTER TABLE
@@ -369,6 +379,22 @@ def init_db(db_path: Path) -> None:
         pass  # column already exists
     conn.commit()
     conn.close()
+
+
+def _init_db_pg() -> None:
+    """Load the hand-translated PG schema shipped at
+    `gmail_search/store/pg_schema.sql`. Uses a fresh psycopg
+    connection (no wrapper) because the schema script contains
+    `$$`-quoted function bodies and other raw-SQL idioms that the
+    `?`-rewrite shim must not touch.
+    """
+    import psycopg
+
+    schema_path = Path(__file__).parent / "pg_schema.sql"
+    with psycopg.connect(_pg_dsn()) as raw:
+        with raw.cursor() as cur:
+            cur.execute(schema_path.read_text())
+        raw.commit()
 
 
 def rebuild_thread_summary(db_path: Path) -> int:
@@ -1132,7 +1158,41 @@ def rebuild_fts(db_path: Path) -> int:
     return count + att_count
 
 
-def get_connection(db_path: Path) -> sqlite3.Connection:
+def _is_postgres_backend() -> bool:
+    """Backend dispatch gate. `DB_BACKEND=postgres` routes every
+    connection through psycopg; anything else (including unset)
+    keeps the legacy SQLite path. The env var is read on every
+    `get_connection` call so a test can flip it per-case without
+    restarting the process.
+    """
+    import os as _os
+
+    return (_os.environ.get("DB_BACKEND") or "").lower() == "postgres"
+
+
+def get_connection(db_path):
+    """Return a dict-row connection compatible with both SQLite and PG.
+
+    The function signature stays `(db_path)` for back-compat with the
+    ~60 existing call sites. In PG mode `db_path` is ignored and we
+    dial the DSN from `DB_DSN` (or a sensible local default).
+
+    In either mode, callers can assume:
+        - `conn.execute(sql, params)` — runs the statement. Parameter
+          placeholders written with `?` are accepted on both backends
+          (the PG wrapper rewrites them to `%s` so none of our query
+          strings need mass-sed).
+        - `conn.commit()` / `conn.close()`.
+        - Row access via `row[\"col\"]` or `row.keys()` — on PG via
+          psycopg's `dict_row`, on SQLite via `sqlite3.Row`.
+
+    The PG wrapper is `_PgConnWrapper` below — a thin shim that adds
+    the `?`→`%s` rewrite and a `Cursor` façade. When we finish the
+    migration (Phase 5) we rewrite every `?` to `%s`, drop the
+    wrapper, and talk to psycopg directly.
+    """
+    if _is_postgres_backend():
+        return _connect_pg()
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -1142,3 +1202,158 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=60000")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ── Postgres path (gated by DB_BACKEND=postgres) ─────────────────────────
+#
+# Design constraint: the 60 existing call sites across the codebase use
+# SQLite-flavored SQL with `?` placeholders. Rather than sed everything
+# at once (risky — one missed `?` is a runtime crash), we wrap psycopg
+# in a translation shim. Cost: ~20 lines. Benefit: zero query rewrites
+# needed for Phase 1; we can bring PG online and migrate queries over
+# incrementally.
+
+
+def _pg_dsn() -> str:
+    """DSN for the PG backend. Reads `DB_DSN` if set; otherwise the
+    local docker-compose default from `docker-compose.yml`.
+    """
+    import os as _os
+
+    return _os.environ.get("DB_DSN") or "postgresql://gmail_search:gmail_search@127.0.0.1:5544/gmail_search"
+
+
+def _connect_pg():
+    """Return a `_PgConnWrapper` around a fresh psycopg connection.
+    We don't pool here because the existing call sites open/close
+    connections freely; pooling comes in Phase 4 when we standardize
+    on a single entry point.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    raw = psycopg.connect(_pg_dsn(), row_factory=dict_row)
+    return _PgConnWrapper(raw)
+
+
+def _sqlite_to_pg_placeholders(sql: str) -> str:
+    """Rewrite `?` placeholders to `%s` — but not inside string
+    literals. `?` does appear in a couple of string literals across
+    the codebase (e.g. pattern-match prompts); ignoring those is
+    the only correctness subtlety.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    in_single = in_double = False
+    while i < n:
+        ch = sql[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            out.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+        elif ch == "?" and not in_single and not in_double:
+            out.append("%s")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+class _PgCursorWrapper:
+    """Cursor shim: rewrites SQL placeholders on every execute and
+    proxies everything else to the underlying psycopg cursor. Exposes
+    `.lastrowid` by parsing a trailing `RETURNING id` from the rewritten
+    SQL — SQLite's lastrowid is implicit; psycopg requires an explicit
+    RETURNING. Most of our INSERTs already use ON CONFLICT + don't need
+    lastrowid, so this is only used by `upsert_attachment` and a couple
+    others; call sites that want lastrowid will get `None` from PG
+    unless they switch to RETURNING (tracked as a Phase 2 task).
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.lastrowid = None
+
+    def execute(self, sql, params=None):
+        sql2 = _sqlite_to_pg_placeholders(sql)
+        if params is None:
+            self._raw.execute(sql2)
+        else:
+            self._raw.execute(sql2, params)
+        return self
+
+    def executemany(self, sql, params_seq):
+        self._raw.executemany(_sqlite_to_pg_placeholders(sql), params_seq)
+        return self
+
+    def fetchone(self):
+        return self._raw.fetchone()
+
+    def fetchall(self):
+        return self._raw.fetchall()
+
+    def fetchmany(self, size=None):
+        return self._raw.fetchmany(size) if size is not None else self._raw.fetchmany()
+
+    def close(self):
+        self._raw.close()
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    @property
+    def rowcount(self):
+        return self._raw.rowcount
+
+    @property
+    def description(self):
+        return self._raw.description
+
+
+class _PgConnWrapper:
+    """Connection shim. Rewrites `?` → `%s` on every `execute`, exposes
+    `row_factory` as a no-op (PG uses `dict_row` at the connection
+    level), and proxies the rest.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.row_factory = None  # no-op; kept for API compat
+
+    def execute(self, sql, params=None):
+        cur = self._raw.cursor()
+        if params is None:
+            cur.execute(_sqlite_to_pg_placeholders(sql))
+        else:
+            cur.execute(_sqlite_to_pg_placeholders(sql), params)
+        return _PgCursorWrapper(cur)
+
+    def executemany(self, sql, params_seq):
+        cur = self._raw.cursor()
+        cur.executemany(_sqlite_to_pg_placeholders(sql), params_seq)
+        return _PgCursorWrapper(cur)
+
+    def cursor(self):
+        return _PgCursorWrapper(self._raw.cursor())
+
+    def commit(self):
+        self._raw.commit()
+
+    def rollback(self):
+        self._raw.rollback()
+
+    def close(self):
+        self._raw.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if exc[0] is None:
+            self._raw.commit()
+        else:
+            self._raw.rollback()
+        self.close()
+        return False

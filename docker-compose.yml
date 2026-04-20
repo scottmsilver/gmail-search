@@ -1,0 +1,37 @@
+services:
+  pg:
+    image: postgres:16-alpine
+    container_name: gmail-search-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gmail_search
+      POSTGRES_PASSWORD: gmail_search
+      POSTGRES_DB: gmail_search
+      POSTGRES_INITDB_ARGS: --encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    command:
+    - postgres
+    - -c
+    - shared_buffers=1GB
+    - -c
+    - effective_cache_size=4GB
+    - -c
+    - work_mem=32MB
+    - -c
+    - maintenance_work_mem=512MB
+    - -c
+    - max_connections=50
+    - -c
+    - max_wal_size=2GB
+    - -c
+    - log_min_duration_statement=500
+    ports:
+    - 127.0.0.1:5544:5432
+    volumes:
+    - ./data/pg:/var/lib/postgresql/data
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U gmail_search
+      interval: 5s
+      timeout: 3s
+      retries: 10
