@@ -148,10 +148,15 @@ def upsert_drive_stub(
     `(message_id, filename)` dedup index enforces idempotency).
     """
     filename = f"Drive: [{drive_id}]"
+    # Use `ON CONFLICT DO NOTHING` (portable SQLite >= 3.24 + Postgres)
+    # instead of `INSERT OR IGNORE` (SQLite-only). Both produce
+    # rowcount=0 on skip and rowcount=1 on insert, which is what the
+    # caller relies on for idempotency reporting.
     cursor = conn.execute(
-        """INSERT OR IGNORE INTO attachments
+        """INSERT INTO attachments
            (message_id, filename, mime_type, size_bytes)
-           VALUES (?, ?, ?, 0)""",
+           VALUES (?, ?, ?, 0)
+           ON CONFLICT (message_id, filename) DO NOTHING""",
         (message_id, filename, mime_type),
     )
     return cursor.rowcount

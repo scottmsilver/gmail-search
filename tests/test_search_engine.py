@@ -14,8 +14,7 @@ def _make_vec(dims, value):
     return struct.pack(f"{dims}f", *([value] * dims))
 
 
-def _setup_db_with_index(tmp_path, dims=16, n=50):
-    db_path = tmp_path / "test.db"
+def _setup_db_with_index(tmp_path, db_path, dims=16, n=50):
     init_db(db_path)
     conn = get_connection(db_path)
 
@@ -54,9 +53,10 @@ def _setup_db_with_index(tmp_path, dims=16, n=50):
     return db_path, index_dir
 
 
-def test_search_engine_returns_results(tmp_path):
+def test_search_engine_returns_results(db_backend, tmp_path):
     dims = 16
-    db_path, index_dir = _setup_db_with_index(tmp_path, dims=dims)
+    db_path = db_backend["db_path"]
+    db_path, index_dir = _setup_db_with_index(tmp_path, db_path, dims=dims)
 
     mock_embedder = MagicMock()
     mock_embedder.embed_query.return_value = [0.9] * dims
@@ -78,9 +78,9 @@ def test_search_engine_returns_results(tmp_path):
         assert results[i].score >= results[i + 1].score
 
 
-def test_search_engine_deduplicates_by_message(tmp_path):
+def test_search_engine_deduplicates_by_message(db_backend, tmp_path):
     dims = 16
-    db_path = tmp_path / "test.db"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 
@@ -184,8 +184,8 @@ def test_search_engine_deduplicates_by_message(tmp_path):
     assert len(msg1_results) == 1
 
 
-def _engine_for(tmp_path, dims=16, n=50):
-    db_path, index_dir = _setup_db_with_index(tmp_path, dims=dims, n=n)
+def _engine_for(tmp_path, db_path, dims=16, n=50):
+    db_path, index_dir = _setup_db_with_index(tmp_path, db_path, dims=dims, n=n)
     mock_embedder = MagicMock()
     mock_embedder.embed_query.return_value = [0.9] * dims
     mock_embedder.model = "test-model"
@@ -200,8 +200,8 @@ def _engine_for(tmp_path, dims=16, n=50):
     return SearchEngine(db_path, index_dir, cfg, embedder=mock_embedder), db_path
 
 
-def test_search_threads_subject_filter_restricts_to_matching_subjects(tmp_path):
-    engine, _ = _engine_for(tmp_path, n=30)
+def test_search_threads_subject_filter_restricts_to_matching_subjects(db_backend, tmp_path):
+    engine, _ = _engine_for(tmp_path, db_backend["db_path"], n=30)
     results = engine.search_threads("subject:Subject test", top_k=20, filter_offtopic=False)
     assert results
     for r in results:
@@ -212,9 +212,9 @@ def test_search_threads_subject_filter_restricts_to_matching_subjects(tmp_path):
     assert none_results == []
 
 
-def test_search_threads_has_attachment_only_returns_threads_with_attachments(tmp_path):
+def test_search_threads_has_attachment_only_returns_threads_with_attachments(db_backend, tmp_path):
     dims = 16
-    db_path = tmp_path / "test.db"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 
@@ -282,12 +282,12 @@ def test_search_threads_has_attachment_only_returns_threads_with_attachments(tmp
     assert {t.thread_id for t in filtered} == {"tA"}
 
 
-def test_search_threads_query_param_date_from_wins_over_newer_than(tmp_path):
+def test_search_threads_query_param_date_from_wins_over_newer_than(db_backend, tmp_path):
     """Explicit endpoint-level date_from must override the value the
     parser derived from newer_than: / after: in the raw query. This
     matters because the UI may set both (via URL param + operator).
     """
-    engine, _ = _engine_for(tmp_path, n=30)
+    engine, _ = _engine_for(tmp_path, db_backend["db_path"], n=30)
     # newer_than:1d would restrict to yesterday+, a tight window. An
     # explicit date_from=2020-01-01 widens it to cover the whole fake
     # 2025 corpus.

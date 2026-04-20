@@ -1214,6 +1214,68 @@ def _pg_dsn() -> str:
     return _os.environ.get("DB_DSN") or "postgresql://gmail_search:gmail_search@127.0.0.1:5544/gmail_search"
 
 
+class _CompatRow:
+    """Row type that mimics `sqlite3.Row` semantics so the same code
+    works under either backend.
+
+    SQLite's `sqlite3.Row` supports BOTH dict-style (`row["name"]`)
+    AND positional (`row[0]`) access. psycopg's `dict_row` only does
+    the former; `tuple_row` only the latter. Call sites across the
+    app mix both — e.g. `row[0]` for single-column `COUNT(*)` queries
+    vs `row["subject"]` for full-record pulls. Rewriting every one
+    was deemed riskier than a small row shim.
+
+    Kept intentionally minimal: indexing, `keys()`, iteration over
+    values, `len`, `dict(row)` conversion, and a `.get()` helper.
+    """
+
+    __slots__ = ("_cols", "_values", "_map")
+
+    def __init__(self, cols, values):
+        self._cols = cols
+        # Normalize to a tuple so indexing is cheap + immutable.
+        self._values = tuple(values)
+        self._map = dict(zip(cols, self._values))
+
+    def __getitem__(self, k):
+        if isinstance(k, int):
+            return self._values[k]
+        return self._map[k]
+
+    def __contains__(self, k):
+        return k in self._map
+
+    def keys(self):
+        return list(self._cols)
+
+    def values(self):
+        return list(self._values)
+
+    def items(self):
+        return list(self._map.items())
+
+    def get(self, k, default=None):
+        return self._map.get(k, default)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __repr__(self):
+        return f"_CompatRow({self._map!r})"
+
+
+def _compat_row_factory(cursor):
+    """psycopg row_factory that produces `_CompatRow` instances.
+    Called once per cursor; returns a `make_row(values)` closure.
+    """
+    desc = cursor.description
+    cols = [d.name for d in desc] if desc is not None else []
+    return lambda values: _CompatRow(cols, values)
+
+
 def _connect_pg():
     """Return a `_PgConnWrapper` around a fresh psycopg connection.
     We don't pool here because the existing call sites open/close
@@ -1221,9 +1283,8 @@ def _connect_pg():
     on a single entry point.
     """
     import psycopg
-    from psycopg.rows import dict_row
 
-    raw = psycopg.connect(_pg_dsn(), row_factory=dict_row)
+    raw = psycopg.connect(_pg_dsn(), row_factory=_compat_row_factory)
     return _PgConnWrapper(raw)
 
 
