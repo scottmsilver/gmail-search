@@ -498,6 +498,27 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
                 total_extracted += extracted
                 click.echo(f"Extracted {extracted} attachments.")
 
+                # Crawl pending URL stubs written at ingest. Folded into
+                # this loop (instead of a separate --loop daemon) so new
+                # mail's URLs get fetched in the same cycle that
+                # downloaded the mail, and the embedding step below sees
+                # the crawled content on its first pass.
+                try:
+                    import asyncio as _asyncio
+
+                    from gmail_search.gmail.url_fetcher import run as _crawl_urls_run
+
+                    crawl_result = _asyncio.run(_crawl_urls_run(db_path, concurrency=3, limit=100))
+                    if crawl_result["total"]:
+                        click.echo(
+                            f"Crawled {crawl_result['done']}/{crawl_result['total']} URL stubs "
+                            f"({crawl_result['failed']} failed)."
+                        )
+                except Exception as e:
+                    # Don't let a crawl failure kill the whole update cycle —
+                    # next cycle retries.
+                    logger.warning(f"URL crawl step failed: {e}")
+
                 # Embed new messages + attachments
                 progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
                 click.echo("Embedding...")

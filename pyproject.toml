@@ -34,6 +34,14 @@ dependencies = [
     "gdown>=6.0.0",  # Drive URL parsing (gmail/drive.py)
     "beautifulsoup4>=4.12.0",
     "crawl4ai>=0.3",  # Headless URL crawler for gmail/url_fetcher.py
+    # Floors bumped after `pip-audit` surfaced patchable CVEs in the
+    # anaconda baseline (urllib3 streaming/redirect family, requests
+    # extract_zipped_paths, nltk downloader / wordnet_app). These are
+    # transitive deps; we don't import them directly, but crawl4ai
+    # does for model/NLTK-data downloads at setup time.
+    "urllib3>=2.5.0",
+    "requests>=2.33.0",
+    "nltk>=3.9.4",
 ]
 
 [project.optional-dependencies]
