@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { CorpusStatus } from "@/components/CorpusStatus";
 import { ResultRow } from "@/components/ResultRow";
 import { ThreadDrawer } from "@/components/ThreadDrawer";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/components/ThreadDrawerContext";
@@ -81,9 +82,22 @@ const InboxInner = () => {
   const [offset, setOffset] = useState(0);
   const [reachedEnd, setReachedEnd] = useState(false);
 
+  // "Time to glass": ms from mount/Load-More click → frame where the
+  // rows are painted. Same pattern as SearchView — anchor a ref before
+  // the fetch fires, then read it back in a double-RAF scheduled after
+  // the state commit. Single RAF fires *before* paint; the second
+  // fires *after*, which is the frame the user actually sees.
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const loadStartRef = useRef<number | null>(null);
+
   const loadMore = useCallback(
     async (nextOffset: number) => {
       setLoading(true);
+      // Only time the first page — subsequent "Load more" hits prepend
+      // to an already-painted list and would dilute the metric.
+      if (nextOffset === 0) {
+        loadStartRef.current = performance.now();
+      }
       try {
         const res = await fetch(`/api/inbox?limit=${PAGE_SIZE}&offset=${nextOffset}`, { cache: "no-store" });
         if (!res.ok) throw new Error(`inbox ${res.status}`);
@@ -102,8 +116,27 @@ const InboxInner = () => {
     loadMore(0);
   }, [loadMore]);
 
+  useEffect(() => {
+    if (loadStartRef.current === null) return;
+    const start = loadStartRef.current;
+    loadStartRef.current = null; // consume; re-anchored on the next fresh load
+    let raf2: number | null = null;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        setLatencyMs(performance.now() - start);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
+    };
+  }, [threads]);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b px-4 py-1.5">
+        <CorpusStatus latencyMs={latencyMs} />
+      </div>
       <header className="flex items-center justify-between border-b px-6 py-3">
         <div>
           <h1 className="text-base font-semibold">Priority inbox</h1>
