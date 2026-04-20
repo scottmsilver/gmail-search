@@ -294,15 +294,18 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # (`message.html`, `ATT00001.htm` etc — also mime='text/html')
     # don't get picked up by the crawler. Those are filled by the
     # local-extract path, not the URL crawler.
+    #
+    # LIKE pattern bound as a param because psycopg treats bare `%`
+    # in the SQL text as a placeholder marker.
     rows = conn.execute(
         """SELECT id, message_id, filename
              FROM attachments
             WHERE mime_type = 'text/html'
               AND extracted_text IS NULL
-              AND filename LIKE 'URL: %'
+              AND filename LIKE %s
             ORDER BY id ASC
             LIMIT %s""",
-        (limit,),
+        ("URL: %", limit),
     ).fetchall()
     out: list[dict] = []
     for r in rows:
