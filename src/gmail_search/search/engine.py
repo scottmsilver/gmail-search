@@ -290,8 +290,16 @@ class SearchEngine:
         try:
             blob = struct.pack(f"{len(vector)}f", *vector)
             conn = get_connection(self.db_path)
+            # Portable upsert: `INSERT OR REPLACE` is SQLite-only; the
+            # ON CONFLICT form here works on SQLite and Postgres.
+            # Conflict target is (query_text, model) — the composite PK
+            # of query_cache.
             conn.execute(
-                "INSERT OR REPLACE INTO query_cache (query_text, model, embedding, created_at) VALUES (?, ?, ?, ?)",
+                """INSERT INTO query_cache (query_text, model, embedding, created_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(query_text, model) DO UPDATE SET
+                     embedding = excluded.embedding,
+                     created_at = excluded.created_at""",
                 (cache_key, self.config["embedding"]["model"], blob, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()

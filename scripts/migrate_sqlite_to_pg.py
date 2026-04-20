@@ -361,12 +361,19 @@ def _migrate_table(
         _truncate_table(pg_conn, table)
 
     # FK drift detection: pre-load every parent-column id set so we can
-    # filter orphans in O(1). Skipped if --truncate-first because the
-    # user is explicitly saying "I want to start clean, don't worry
-    # about drift" — and the sets would be empty anyway.
+    # filter orphans in O(1).
+    #
+    # Runs unconditionally now (used to be `if not truncate_first`).
+    # Reason: SQLite doesn't enforce FKs unless `PRAGMA foreign_keys=ON`
+    # and historical orphans exist in the real DB — embeddings with
+    # attachment_id pointing at rows that were deleted years ago. PG's
+    # FK constraints are strict; a single orphan aborts the whole COPY.
+    # Pre-loading parent IDs (and skipping any row that references a
+    # missing parent) is cheap compared to the alternative of the
+    # migration failing late on a 500K-row table.
     parent_id_sets: dict[str, set[Any]] = {}
     fk_meta = _get_pg_fk_parents(pg_conn, table)
-    if fk_meta and not truncate_first:
+    if fk_meta:
         for _, parent_table, parent_col in fk_meta:
             key = f"{parent_table}.{parent_col}"
             if key not in parent_id_sets:
@@ -434,16 +441,29 @@ def _migrate_table(
     return copied
 
 
+def _sanitize_text(v):
+    """SQLite TEXT allows NUL (0x00) bytes, Postgres TEXT does not.
+    Strip NULs from any str value before COPY — silently dropping them
+    preserves the content that matters (printable text around the NUL)
+    while avoiding a DataError. Non-str values pass through untouched.
+    """
+    if isinstance(v, str) and "\x00" in v:
+        return v.replace("\x00", "")
+    return v
+
+
 def _project_row(
     row: sqlite3.Row,
     present_cols: Sequence[str],
     copy_cols: Sequence[str],
 ) -> tuple:
     """Build the output tuple in PG's column order, filling NULL for any
-    column that doesn't exist in SQLite."""
+    column that doesn't exist in SQLite. Applies `_sanitize_text` to every
+    value so NUL bytes don't crash psycopg.copy on TEXT columns.
+    """
     present_set = set(present_cols)
     # row is a sqlite3.Row — indexable by column name.
-    return tuple(row[c] if c in present_set else None for c in copy_cols)
+    return tuple(_sanitize_text(row[c]) if c in present_set else None for c in copy_cols)
 
 
 def _orphan_row(

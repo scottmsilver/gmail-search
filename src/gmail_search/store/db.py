@@ -1020,8 +1020,13 @@ def rebuild_contact_frequency(db_path: Path) -> int:
         if "<" in addr:
             addr = addr.split("<")[1].rstrip(">")
         score = math.log(r["c"] + 1) / log_max if log_max > 0 else 0.0
+        # Portable upsert: INSERT OR REPLACE is SQLite-only.
         conn.execute(
-            "INSERT OR REPLACE INTO contact_frequency (email, message_count, score) VALUES (?, ?, ?)",
+            """INSERT INTO contact_frequency (email, message_count, score)
+               VALUES (?, ?, ?)
+               ON CONFLICT(email) DO UPDATE SET
+                 message_count = excluded.message_count,
+                 score = excluded.score""",
             (addr, r["c"], score),
         )
 
@@ -1046,10 +1051,22 @@ class JobProgress:
 
         now = datetime.now(timezone.utc).isoformat()
         conn = get_connection(db_path)
+        # Portable upsert: INSERT OR REPLACE is SQLite-only. On PG,
+        # starting a new run resets `status` to 'running' and `stage`
+        # to '', exactly like the SQLite semantic of OR REPLACE.
         conn.execute(
-            "INSERT OR REPLACE INTO job_progress "
-            "(job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at) "
-            "VALUES (?, '', 'running', 0, ?, ?, '', ?, ?)",
+            """INSERT INTO job_progress
+                 (job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at)
+               VALUES (?, '', 'running', 0, ?, ?, '', ?, ?)
+               ON CONFLICT(job_id) DO UPDATE SET
+                 stage = excluded.stage,
+                 status = excluded.status,
+                 total = excluded.total,
+                 completed = excluded.completed,
+                 start_completed = excluded.start_completed,
+                 detail = excluded.detail,
+                 started_at = excluded.started_at,
+                 updated_at = excluded.updated_at""",
             (job_id, start_completed, start_completed, now, now),
         )
         conn.commit()
