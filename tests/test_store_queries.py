@@ -212,3 +212,71 @@ def test_upsert_drive_stub_and_fill(db_backend):
     assert atts[0].extracted_text == "fetched content"
     assert atts[0].size_bytes == len("fetched content")
     conn.close()
+
+
+# ─── URL stub round-trip ──────────────────────────────────────────────────
+# Mirrors the Drive stub tests above. `upsert_url_stub`,
+# `fill_url_attachment`, `pending_url_stubs`, and
+# `url_from_stub_filename` form the lifecycle of a URL-linked attachment.
+
+
+def test_upsert_url_stub_and_fill(db_backend):
+    from gmail_search.store.queries import (
+        fill_url_attachment,
+        pending_url_stubs,
+        upsert_url_stub,
+        url_from_stub_filename,
+    )
+
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    upsert_message(conn, _make_message())
+
+    # First insert creates the stub row.
+    inserted = upsert_url_stub(conn, message_id="msg1", url="https://example.com/foo")
+    assert inserted == 1
+
+    # Idempotent: second insert of the same URL is a no-op.
+    inserted_again = upsert_url_stub(conn, message_id="msg1", url="https://example.com/foo")
+    assert inserted_again == 0
+
+    atts = get_attachments_for_message(conn, "msg1")
+    assert len(atts) == 1
+    assert atts[0].filename == "URL: https://example.com/foo"
+    assert atts[0].mime_type == "text/html"
+    assert atts[0].extracted_text is None
+    stub_id = atts[0].id
+
+    # pending_url_stubs returns the round-trippable URL.
+    pending = pending_url_stubs(conn, 50)
+    assert len(pending) == 1
+    assert pending[0]["id"] == stub_id
+    assert pending[0]["message_id"] == "msg1"
+    assert pending[0]["url"] == "https://example.com/foo"
+
+    # Fill with fetched content — filename mutates to human form.
+    fill_url_attachment(
+        conn,
+        attachment_id=stub_id,
+        title="Example Domain",
+        text="# Example Domain\nbody",
+        url="https://example.com/foo",
+    )
+    conn.commit()
+
+    atts = get_attachments_for_message(conn, "msg1")
+    assert len(atts) == 1
+    assert atts[0].filename == "URL: Example Domain [https://example.com/foo]"
+    assert atts[0].extracted_text == "# Example Domain\nbody"
+    assert atts[0].size_bytes == len("# Example Domain\nbody")
+
+    # Filled row must NOT come back as pending.
+    assert pending_url_stubs(conn, 50) == []
+
+    # Round-trip works on both the unfilled and filled shapes.
+    assert url_from_stub_filename("URL: https://x.com/y") == "https://x.com/y"
+    assert url_from_stub_filename("URL: Title [https://x.com/y]") == "https://x.com/y"
+    assert url_from_stub_filename("Drive: [abc]") is None
+
+    conn.close()

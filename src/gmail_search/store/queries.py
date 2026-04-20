@@ -188,6 +188,125 @@ def fill_drive_attachment(
     )
 
 
+# ─── URL stubs ─────────────────────────────────────────────────────────────
+# Mirrors the Drive-stub pattern for arbitrary URLs linked from an email
+# body. A URL stub is an `attachments` row with `mime_type = 'text/html'`,
+# `filename = "URL: <url>"` (or `"URL: <title> [<url>]"` once filled),
+# and `extracted_text = NULL` until the fetcher populates it.
+#
+# The UNIQUE(message_id, filename) constraint is what gives us
+# idempotency — inserting the same stub twice is a no-op.
+
+# Keep stub filenames bounded so a pathological URL doesn't blow up
+# downstream code that logs or renders the filename. The DB col is TEXT
+# so there's no hard limit, but BM25 / UI rendering / regex scans all
+# prefer something sane.
+_URL_STUB_FILENAME_CAP = 500
+
+
+def _url_stub_filename(url: str) -> str:
+    """Canonical stub filename `"URL: <url>"`, capped for sanity."""
+    base = f"URL: {url}"
+    return base[:_URL_STUB_FILENAME_CAP]
+
+
+def upsert_url_stub(conn, *, message_id: str, url: str) -> int:
+    """Insert a stub row for a URL linked from the message body.
+
+    Returns the number of rows inserted (0 if the stub already
+    existed; dedup via UNIQUE(message_id, filename)). Matches the
+    shape of `upsert_drive_stub`.
+    """
+    filename = _url_stub_filename(url)
+    cursor = conn.execute(
+        """INSERT INTO attachments
+           (message_id, filename, mime_type, size_bytes)
+           VALUES (%s, %s, 'text/html', 0)
+           ON CONFLICT (message_id, filename) DO NOTHING""",
+        (message_id, filename),
+    )
+    return cursor.rowcount
+
+
+def fill_url_attachment(
+    conn,
+    *,
+    attachment_id: int,
+    title: str,
+    text: str,
+    url: str,
+) -> None:
+    """Populate a previously-stubbed URL row with fetched content.
+
+    Renames the filename to `"URL: <title> [<url>]"` so the UI shows
+    something human and downstream code can still round-trip to the
+    original URL via `url_from_stub_filename`.
+    """
+    display = (title or _host_of(url) or "link").strip()
+    new_filename = f"URL: {display} [{url}]"[:_URL_STUB_FILENAME_CAP]
+    conn.execute(
+        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s",
+        (text, new_filename, len(text), attachment_id),
+    )
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def url_from_stub_filename(filename: str) -> str | None:
+    """Extract the URL out of a `URL: <url>` (unfilled) or
+    `URL: <title> [<url>]` (filled) stub filename. Returns None if
+    the filename isn't a URL stub.
+
+    Mirrors `drive_id_from_stub_filename` but without a strict
+    charset check — URLs are validated at fetch time by the SSRF
+    guard in `url_fetcher`, which is the real authority.
+    """
+    if not filename or not filename.startswith("URL:"):
+        return None
+    # Filled shape: "URL: <title> [<url>]"
+    if filename.endswith("]") and "[" in filename:
+        candidate = filename.rsplit("[", 1)[1].rstrip("]").strip()
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            return candidate
+    # Unfilled shape: "URL: <url>"
+    rest = filename[len("URL:") :].strip()
+    if rest.startswith("http://") or rest.startswith("https://"):
+        return rest
+    return None
+
+
+def pending_url_stubs(conn, limit: int) -> list[dict]:
+    """Return URL stubs that haven't been fetched yet, oldest message
+    first. Each dict carries `{id, message_id, url}`.
+
+    The URL is parsed out of the filename via `url_from_stub_filename`
+    — same round-trip trick Drive uses. Rows where the filename is
+    malformed (shouldn't happen, but) are silently skipped.
+    """
+    rows = conn.execute(
+        """SELECT id, message_id, filename
+             FROM attachments
+            WHERE mime_type = 'text/html' AND extracted_text IS NULL
+            ORDER BY id ASC
+            LIMIT %s""",
+        (limit,),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        url = url_from_stub_filename(r["filename"])
+        if not url:
+            continue
+        out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url})
+    return out
+
+
 def insert_embedding(conn, rec: EmbeddingRecord) -> int:
     # `RETURNING id` — portable across SQLite 3.35+ and Postgres, and
     # the only reliable way to get the newly-generated BIGSERIAL from

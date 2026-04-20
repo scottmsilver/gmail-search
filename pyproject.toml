@@ -33,6 +33,7 @@ dependencies = [
     "xlrd>=2.0.0",  # legacy .xls (xlsx is openpyxl above)
     "gdown>=6.0.0",  # Drive URL parsing (gmail/drive.py)
     "beautifulsoup4>=4.12.0",
+    "crawl4ai>=0.3",  # Headless URL crawler for gmail/url_fetcher.py
 ]
 
 [project.optional-dependencies]

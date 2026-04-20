@@ -180,6 +180,25 @@ def extract(ctx):
     except Exception as e:
         logger.warning(f"drive-stub scan failed: {e}")
 
+    # ── 1b. URL stub catch-up: same pattern, but for plain URLs.
+    # The crawl-urls command fetches the page text and fills
+    # extracted_text; here we just seed the stubs so older messages
+    # downloaded before the URL path existed get caught up.
+    try:
+        from gmail_search.gmail.url_extract import extract_crawlable_urls
+        from gmail_search.store.queries import upsert_url_stub
+
+        msg_rows = conn.execute("SELECT id, body_text FROM messages WHERE length(body_text) >= 50").fetchall()
+        new_url_stubs = 0
+        for r in tqdm(msg_rows, desc="Scanning bodies for URLs"):
+            for url in extract_crawlable_urls(r["body_text"] or ""):
+                new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url)
+        conn.commit()
+        if new_url_stubs:
+            click.echo(f"  inserted {new_url_stubs} new URL stubs")
+    except Exception as e:
+        logger.warning(f"url-stub scan failed: {e}")
+
     # ── 2. Drive service is optional — if token lacks drive.readonly
     # we gracefully skip Drive fetches while local extract continues.
     drive_service = None
@@ -1028,6 +1047,48 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep)
         # Idle sleep when nothing to do; otherwise loop straight into the
         # next pass so newly-arrived mail gets picked up within one
         # batch's latency.
+        if result["total"] == 0:
+            time.sleep(loop_sleep)
+
+
+@main.command(help="Crawl URLs linked in emails and store the page text as attachments.extracted_text")
+@click.option("--concurrency", type=int, default=3, help="Parallel crawl4ai fetches (default 3)")
+@click.option("--limit", type=int, default=None, help="Max URLs per pass")
+@click.option(
+    "--loop",
+    is_flag=True,
+    default=False,
+    help="Keep running — after each pass, re-query pending and start again.",
+)
+@click.option(
+    "--loop-batch",
+    type=int,
+    default=100,
+    help="When --loop is set and --limit is not, cap each pass at this many URLs (default 100).",
+)
+@click.option(
+    "--loop-sleep",
+    type=float,
+    default=10.0,
+    help="Seconds to sleep between passes when --loop is set and the last pass found nothing.",
+)
+@common_options
+@click.pass_context
+def crawl_urls(ctx, concurrency, limit, loop, loop_batch, loop_sleep):
+    import asyncio
+    import time
+
+    from gmail_search.gmail import url_fetcher
+
+    db_path = ctx.obj["db_path"]
+    pass_limit = limit if limit is not None else (loop_batch if loop else None)
+    click.echo(f"Crawling URLs (concurrency={concurrency}, limit={pass_limit}, loop={loop})")
+
+    while True:
+        result = asyncio.run(url_fetcher.run(db_path, concurrency=concurrency, limit=pass_limit))
+        click.echo(f"Pass: {result['done']} ok / {result['failed']} failed of {result['total']} pending")
+        if not loop:
+            break
         if result["total"] == 0:
             time.sleep(loop_sleep)
 

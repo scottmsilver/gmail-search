@@ -174,6 +174,16 @@ def download_messages(
             for drive_id, kind in extract_drive_ids(msg.body_text or ""):
                 upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
 
+            # Any other URL in the body becomes a URL stub — same
+            # shape as Drive stubs. The `crawl-urls` command fetches
+            # the page text and fills extracted_text so summaries /
+            # search see the crawled content.
+            from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
+            from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
+
+            for url in _extract_urls(msg.body_text or ""):
+                _upsert_url_stub(conn, message_id=msg.id, url=url)
+
             for att_meta in att_metas:
                 if att_meta["size"] > max_attachment_size:
                     logger.warning(
@@ -285,6 +295,13 @@ def sync_new_messages(
         # Drive stubs (same rationale as download_messages above).
         for drive_id, kind in extract_drive_ids(msg.body_text or ""):
             upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
+
+        # URL stubs — plain URLs filled later by the crawl-urls command.
+        from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
+        from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
+
+        for url in _extract_urls(msg.body_text or ""):
+            _upsert_url_stub(conn, message_id=msg.id, url=url)
 
         for att_meta in att_metas:
             if att_meta["size"] > max_attachment_size:
