@@ -82,24 +82,35 @@ const InboxInner = () => {
   const [offset, setOffset] = useState(0);
   const [reachedEnd, setReachedEnd] = useState(false);
 
-  // "Time to glass": start is anchored at first render (before any
-  // effect fires), end is read when the BROWSER confirms it has
-  // painted content via `requestAnimationFrame` + PerformanceObserver
-  // on 'paint' entries. The previous version anchored inside a
-  // useEffect so it silently skipped React's mount-to-first-effect
-  // window — often tens of ms — and reported artificially low
-  // numbers (e.g. "7ms" on a hot reload).
+  // "Time to glass": URL entered → all visible rows painted.
   //
-  // Start: lazy ref init — assigned during the first render pass, so
-  // it captures the earliest clock we can reach from user code.
+  // Start: prefer the browser's Navigation Timing `startTime` when it's
+  // recent (i.e. a full page load or reload is in progress). That's
+  // the true "user hit this URL" moment. When the nav entry is stale
+  // (SPA route change from within an already-loaded tab), fall back
+  // to the earliest component-render clock we can reach — a ref
+  // assigned during the first render pass, before any effect fires.
+  //
   // End: after the threads state commits, wait two RAFs so the frame
-  // the user sees has actually hit the compositor, then stop the
-  // clock. Two RAFs (not one) because the first RAF fires *before*
-  // the next paint; the second is scheduled *after* it.
+  // the browser composites to screen has hit the compositor. First
+  // RAF fires *before* the next paint; the second fires *after*.
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const mountStartRef = useRef<number | null>(null);
   if (mountStartRef.current === null) {
-    mountStartRef.current = performance.now();
+    const nav = (typeof performance !== "undefined"
+      ? (performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined)
+      : undefined);
+    const now = performance.now();
+    // If the nav entry looks recent (its responseEnd is within 2s of
+    // now), the tab is mid-navigation — use its startTime. Otherwise
+    // the nav is from the original page load minutes ago; fall back to
+    // the render anchor so we're not showing the age of the whole
+    // session.
+    if (nav && now - nav.responseEnd < 2000) {
+      mountStartRef.current = nav.startTime; // always 0 on reload/hard-load
+    } else {
+      mountStartRef.current = now;
+    }
   }
 
   const loadMore = useCallback(
