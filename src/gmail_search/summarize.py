@@ -487,13 +487,19 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     because SQL `GROUP_CONCAT` would force a column cap we'd have to
     special-case for long extracted text.
     """
+    # Previously filtered `length(body_text) > 20` to avoid wasting LLM
+    # calls on bounces / empty forwards. Dropped 2026-04-20 — empty-body
+    # messages (delivery confirmations, calendar invites, LinkedIn "X
+    # wants to connect") still have meaningful subject + from + labels,
+    # and a 1-line summary of those is better than the UI showing "(no
+    # summary yet)" forever. The backend prompt handles short inputs
+    # gracefully.
     sql = """
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
         WHERE s.message_id IS NULL
-          AND length(m.body_text) > 20
         ORDER BY m.date DESC
     """
     params: list = [model]

@@ -16,19 +16,19 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-# Strict-enough URL regex. Stops at whitespace, quotes, brackets, and
-# common trailing punctuation so we don't capture trailing periods,
-# commas, or closing parens that sit next to the URL in prose. Doesn't
-# try to be RFC-perfect — the denylist + ipaddress check in the fetcher
-# are the real defense.
+# Strict-enough URL regex. Stops at whitespace, quotes, angle-brackets.
+# Parens + square-brackets are allowed *inside* the URL (Wikipedia and
+# others use them — e.g. `/wiki/Foo_(disambiguation)`). Trailing
+# parens/brackets are then balanced off in `_strip_trailing_punct`.
+# Doesn't try to be RFC-perfect — the denylist + ipaddress check in the
+# fetcher are the real defense.
 _URL_RE = re.compile(
-    r"https?://[^\s<>\"'\]\[()]+",
+    r"https?://[^\s<>\"']+",
     re.IGNORECASE,
 )
 
-# Characters that commonly end up glued to a URL when it appears in
-# prose but aren't part of the URL itself. Stripped from the right side.
-_TRAILING_PUNCT = ".,;:!?\"'>)]}"
+# Plain prose punctuation always stripped from the right side.
+_TRAILING_PUNCT = ".,;:!?\"'>"
 
 
 # Hosts whose sole purpose is email click tracking / list management.
@@ -46,16 +46,24 @@ _DENY_HOSTS_EXACT = {
     "fb.me",
 }
 
-# Substring host matches. Kept separate from the exact set so we can
-# describe "click tracker subdomains under click.*" as one rule.
-_DENY_HOST_CONTAINS = (
+# Prefix matches on the host. Used for click-tracker subdomain
+# patterns that don't anchor to a TLD — e.g. "click.mail.*" matches
+# click.mail.vendor.com.
+_DENY_HOST_PREFIXES = (
     "click.mail.",
     "link.email.",
     "click.e.",
     "trk.klclick",
-    ".list-manage.com",
-    ".hubspotlinks.com",
-    ".constantcontact.com",
+)
+
+# Domain suffix matches. An entry X matches a host Y if Y == X or Y
+# ends with ".X" — i.e. proper domain / subdomain match, NOT a bare
+# substring. This avoids flagging `notlinkedin.example.com` on a
+# `linkedin.com` rule.
+_DENY_DOMAIN_SUFFIXES = (
+    "list-manage.com",
+    "hubspotlinks.com",
+    "constantcontact.com",
     "email.salesforce.com",
     # Drive is handled by gmail/drive.py — don't double-stub.
     "docs.google.com",
@@ -119,9 +127,26 @@ _DENY_SUFFIXES = (
 
 
 def _strip_trailing_punct(url: str) -> str:
-    """Trim trailing prose punctuation that isn't part of the URL."""
-    while url and url[-1] in _TRAILING_PUNCT:
-        url = url[:-1]
+    """Trim trailing prose punctuation that isn't part of the URL.
+
+    Parens and square brackets are handled via balance, not a flat
+    strip — we want to keep `Foo_(disambiguation)` but lose the `)` in
+    `(see https://example.com)`. Rule: drop a trailing close-bracket
+    only when it has no matching opener anywhere earlier in the URL.
+    """
+    changed = True
+    while url and changed:
+        changed = False
+        if url[-1] in _TRAILING_PUNCT:
+            url = url[:-1]
+            changed = True
+            continue
+        # Balanced trims for ) ] }.
+        for close_ch, open_ch in ((")", "("), ("]", "["), ("}", "{")):
+            if url.endswith(close_ch) and url.count(open_ch) < url.count(close_ch):
+                url = url[:-1]
+                changed = True
+                break
     return url
 
 
@@ -129,7 +154,9 @@ def _host_is_denied(host: str) -> bool:
     host = host.lower()
     if host in _DENY_HOSTS_EXACT:
         return True
-    return any(token in host for token in _DENY_HOST_CONTAINS)
+    if any(host.startswith(p) for p in _DENY_HOST_PREFIXES):
+        return True
+    return any(host == s or host.endswith("." + s) for s in _DENY_DOMAIN_SUFFIXES)
 
 
 def _path_is_denied(path_and_query: str) -> bool:

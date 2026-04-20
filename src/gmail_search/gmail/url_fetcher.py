@@ -34,22 +34,30 @@ _MAX_CRAWL_CHARS = 8000
 # Hard cap per URL. crawl4ai's page_timeout is in ms.
 _DEFAULT_TIMEOUT_S = 30.0
 
+# Cap for the PDF-routed path. Binary download, not char count.
+_MAX_PDF_BYTES = 20 * 1024 * 1024
 
-def _resolve_first_ip(host: str) -> str | None:
-    """DNS-resolve a hostname to its first A/AAAA record. Returns None
-    on any failure — the caller treats that as "skip this URL", which
-    is the safe default.
+
+def _resolve_all_ips(host: str) -> list[str]:
+    """DNS-resolve a hostname to every A / AAAA record. We reject on
+    ANY private IP — if an attacker controls DNS they could return
+    `[public-ip, 127.0.0.1]` and win a race with Chromium's own
+    resolver, so checking just the first record isn't enough.
+
+    Returns `[]` on resolution failure; the caller treats that as
+    "skip this URL" (fail closed).
     """
     try:
         # getaddrinfo covers both A and AAAA records.
         infos = socket.getaddrinfo(host, None)
     except Exception:
-        return None
+        return []
+    out: list[str] = []
     for info in infos:
         sockaddr = info[4]
         if sockaddr:
-            return sockaddr[0]
-    return None
+            out.append(sockaddr[0])
+    return out
 
 
 def _is_private_ip(ip: str) -> bool:
@@ -96,10 +104,13 @@ def _ssrf_guard(url: str) -> bool:
         return not _is_private_ip(str(literal))
     except ValueError:
         pass
-    ip = _resolve_first_ip(host)
-    if ip is None:
+    ips = _resolve_all_ips(host)
+    if not ips:
         return False
-    return not _is_private_ip(ip)
+    # Reject if ANY resolved address is private — an attacker
+    # controlling DNS could otherwise smuggle a loopback IP into an
+    # otherwise-public-looking response set.
+    return all(not _is_private_ip(ip) for ip in ips)
 
 
 def _truncate_markdown(text: str, max_chars: int = _MAX_CRAWL_CHARS) -> str:
@@ -120,12 +131,21 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
     """
     try:
         from crawl4ai import CrawlerRunConfig
+        from crawl4ai.content_filter_strategy import PruningContentFilter
+        from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
     except Exception as e:
         logger.warning(f"crawl4ai import failed: {e}")
         return None
 
     # page_timeout is in ms inside crawl4ai; keep our top-level
     # asyncio.wait_for in seconds so the API matches our other code.
+    #
+    # The PruningContentFilter is what turns raw HTML into the
+    # "article body only" markdown we actually want. Without it
+    # `fit_markdown` is empty and we fall through to `raw_markdown`,
+    # which is the whole page (nav + footer + sidebar), burning the
+    # 8k char cap on chrome. Threshold 0.48 is crawl4ai's own
+    # recommended default.
     run_config = CrawlerRunConfig(
         page_timeout=int(timeout_s * 1000),
         verbose=False,
@@ -133,6 +153,9 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
         exclude_all_images=True,
         remove_overlay_elements=True,
         remove_forms=True,
+        markdown_generator=DefaultMarkdownGenerator(
+            content_filter=PruningContentFilter(threshold=0.48, threshold_type="fixed"),
+        ),
     )
     try:
         result_container = await asyncio.wait_for(crawler.arun(url=url, config=run_config), timeout=timeout_s + 5.0)
@@ -163,14 +186,25 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
     markdown = ""
     md_obj = getattr(result, "markdown", None)
     if md_obj is not None:
-        # crawl4ai returns a MarkdownGenerationResult object; .raw_markdown
-        # or .fit_markdown — prefer fit_markdown (post content-filter) if
-        # present, else fall back to raw_markdown, else str().
-        markdown = (
-            getattr(md_obj, "fit_markdown", None)
-            or getattr(md_obj, "raw_markdown", None)
-            or (md_obj if isinstance(md_obj, str) else str(md_obj))
-        )
+        # crawl4ai wraps markdown in a `StringCompatibleMarkdown`
+        # object whose `str()` value is the RAW markdown. That class
+        # subclasses `str`, so a naive `isinstance(md_obj, str)`
+        # check returns True and we'd silently pick the unfiltered
+        # output — losing the whole point of PruningContentFilter.
+        #
+        # Order of preference:
+        #   1. `fit_markdown` (post content-filter — the good stuff)
+        #   2. `raw_markdown` (pre-filter full-page)
+        #   3. `str(md_obj)` only if the object is actually a plain
+        #      string with neither attribute.
+        fit = getattr(md_obj, "fit_markdown", None)
+        raw = getattr(md_obj, "raw_markdown", None)
+        if fit:
+            markdown = fit
+        elif raw:
+            markdown = raw
+        elif type(md_obj) is str:  # noqa: E721 — exact type, not a subclass
+            markdown = md_obj
     if not markdown:
         return None
     title = (getattr(result, "metadata", None) or {}).get("title") or ""
@@ -213,7 +247,7 @@ def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "gmail-search/1.0"})
         with urllib.request.urlopen(req, timeout=_DEFAULT_TIMEOUT_S) as resp:
-            data = resp.read(20 * 1024 * 1024)  # cap at 20 MB
+            data = resp.read(_MAX_PDF_BYTES)
     except Exception as e:
         logger.info(f"url_fetcher: pdf download failed for {url}: {e}")
         return None
