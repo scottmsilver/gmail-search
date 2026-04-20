@@ -1,205 +1,23 @@
 import re
-import sqlite3
 from pathlib import Path
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
-    from_addr TEXT NOT NULL,
-    to_addr TEXT NOT NULL,
-    subject TEXT NOT NULL DEFAULT '',
-    body_text TEXT NOT NULL DEFAULT '',
-    body_html TEXT NOT NULL DEFAULT '',
-    date TEXT NOT NULL,
-    labels TEXT NOT NULL DEFAULT '[]',
-    history_id INTEGER NOT NULL DEFAULT 0,
-    raw_json TEXT NOT NULL DEFAULT '{}'
-);
+# The canonical schema now lives in `pg_schema.sql`. The SQLite `SCHEMA`
+# string constant — and its inline DDL branch below — was removed during
+# the 2026-04-20 Stage 2 cleanup when the SQLite backend was retired.
+_PG_SCHEMA_PATH = Path(__file__).parent / "pg_schema.sql"
 
-CREATE TABLE IF NOT EXISTS attachments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id TEXT NOT NULL REFERENCES messages(id),
-    filename TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL DEFAULT 0,
-    extracted_text TEXT,
-    image_path TEXT,
-    raw_path TEXT,
-    UNIQUE(message_id, filename)
-);
 
-CREATE TABLE IF NOT EXISTS embeddings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id TEXT NOT NULL REFERENCES messages(id),
-    attachment_id INTEGER REFERENCES attachments(id),
-    chunk_type TEXT NOT NULL,
-    chunk_text TEXT,
-    embedding BLOB NOT NULL,
-    model TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS costs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    model TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL DEFAULT 0,
-    image_count INTEGER NOT NULL DEFAULT 0,
-    estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
-    message_id TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sync_state (
-    key TEXT PRIMARY KEY,
-    value TEXT
-);
-
-CREATE TABLE IF NOT EXISTS thread_summary (
-    thread_id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL DEFAULT '',
-    participants TEXT NOT NULL DEFAULT '[]',
-    all_from_addrs TEXT NOT NULL DEFAULT '[]',
-    all_labels TEXT NOT NULL DEFAULT '[]',
-    message_count INTEGER NOT NULL DEFAULT 0,
-    date_first TEXT NOT NULL DEFAULT '',
-    date_last TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS topics (
-    topic_id TEXT PRIMARY KEY,
-    parent_id TEXT,
-    label TEXT NOT NULL DEFAULT '',
-    depth INTEGER NOT NULL DEFAULT 0,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    top_senders TEXT NOT NULL DEFAULT '[]',
-    sample_subjects TEXT NOT NULL DEFAULT '[]'
-);
-
-CREATE TABLE IF NOT EXISTS message_topics (
-    message_id TEXT NOT NULL REFERENCES messages(id),
-    topic_id TEXT NOT NULL REFERENCES topics(topic_id),
-    PRIMARY KEY (message_id, topic_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_message_topics_topic ON message_topics(topic_id);
-
-CREATE TABLE IF NOT EXISTS contact_frequency (
-    email TEXT PRIMARY KEY,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    score REAL NOT NULL DEFAULT 0.0
-);
-
-CREATE TABLE IF NOT EXISTS message_summaries (
-    message_id TEXT PRIMARY KEY REFERENCES messages(id),
-    summary TEXT NOT NULL,
-    model TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS conversation_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    parts TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(conversation_id, seq)
-);
-
-CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages(conversation_id, seq);
-
-CREATE TABLE IF NOT EXISTS model_battles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    question TEXT NOT NULL,
-    variant_a TEXT NOT NULL,
-    variant_b TEXT NOT NULL,
-    winner TEXT NOT NULL CHECK(winner IN ('a','b','tie','both_bad')),
-    request_id_a TEXT,
-    request_id_b TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_model_battles_created ON model_battles(created_at);
-
-CREATE TABLE IF NOT EXISTS query_cache (
-    query_text TEXT NOT NULL,
-    model TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (query_text, model)
-);
-
-CREATE TABLE IF NOT EXISTS job_progress (
-    job_id TEXT PRIMARY KEY,
-    stage TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'running',
-    total INTEGER NOT NULL DEFAULT 0,
-    completed INTEGER NOT NULL DEFAULT 0,
-    -- `completed` at job start — used to compute rate/ETA for backfill
-    -- where completed tracks total corpus size (starts nonzero).
-    start_completed INTEGER NOT NULL DEFAULT 0,
-    detail TEXT NOT NULL DEFAULT '',
-    started_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS term_aliases (
-    term TEXT PRIMARY KEY,
-    expansions TEXT NOT NULL DEFAULT '[]',
-    similarity REAL NOT NULL DEFAULT 0.0
-);
-
--- One-row pointer that names the currently-active on-disk ScaNN index
--- directory. Builders write a fresh timestamped sibling and flip this
--- row in a single transaction; readers join here to resolve "where is
--- the live index right now?" instead of counting on filesystem rename
--- atomicity. Works across every FS (NFS, FUSE, tmpfs) because SQLite
--- is the source of truth.
-CREATE TABLE IF NOT EXISTS scann_index_pointer (
-    id INTEGER PRIMARY KEY CHECK(id = 1),
-    current_dir TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
-CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    message_id UNINDEXED,
-    subject,
-    body_text,
-    from_addr,
-    to_addr,
-    tokenize='porter unicode61'
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS attachments_fts USING fts5(
-    message_id UNINDEXED,
-    attachment_id UNINDEXED,
-    filename,
-    extracted_text,
-    tokenize='porter unicode61'
-);
-"""
+def _read_pg_schema() -> str:
+    """Load the Postgres DDL as text for table-name introspection."""
+    return _PG_SCHEMA_PATH.read_text()
 
 
 # ─────────────────────────────────────────────────────────────────────
 # TABLE_DOCS — human-readable descriptions for every table the LLM may
 # query. Kept next to the schema so they don't drift. Surfaced to the
 # model via /api/sql_schema and inlined into the system prompt for the
-# sql_query tool. When you add or change a table above, add or update
-# its entry below.
+# sql_query tool. When you add or change a table in pg_schema.sql, add
+# or update its entry below.
 # ─────────────────────────────────────────────────────────────────────
 TABLE_DOCS: dict[str, str] = {
     "messages": (
@@ -295,13 +113,13 @@ TABLE_DOCS: dict[str, str] = {
     # - embeddings: huge BLOB column, never query directly (use search_emails).
     # - sync_state: internal kv store.
     # - query_cache: internal embedding cache.
-    # - messages_fts / attachments_fts: virtual FTS5 tables, not directly queryable.
 }
 
 
-# Tables that exist in SCHEMA but should not appear in the LLM-facing schema.
-# Either huge BLOB stores or internal kv/cache tables. Keep this in sync with
-# the "intentionally NOT documented" comment in TABLE_DOCS above.
+# Tables that exist in pg_schema.sql but should not appear in the
+# LLM-facing schema. Either huge BLOB stores or internal kv/cache tables.
+# Keep this in sync with the "intentionally NOT documented" comment in
+# TABLE_DOCS above.
 _INTERNAL_TABLES = {
     "embeddings",
     "sync_state",
@@ -309,30 +127,20 @@ _INTERNAL_TABLES = {
     # scann_index_pointer is a single-row KV tracking the active ScaNN
     # index directory. Infrastructure, not something an LLM should query.
     "scann_index_pointer",
-    "messages_fts",
-    "attachments_fts",
-    "messages_fts_data",
-    "messages_fts_idx",
-    "messages_fts_docsize",
-    "messages_fts_config",
-    "attachments_fts_data",
-    "attachments_fts_idx",
-    "attachments_fts_docsize",
-    "attachments_fts_config",
 }
 
 _SCHEMA_TABLE_RE = re.compile(
-    r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)",
+    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)",
     re.IGNORECASE,
 )
 
 
 def _schema_table_names() -> set[str]:
-    return {m.group(1) for m in _SCHEMA_TABLE_RE.finditer(SCHEMA)}
+    return {m.group(1) for m in _SCHEMA_TABLE_RE.finditer(_read_pg_schema())}
 
 
 def assert_table_docs_cover_schema() -> None:
-    """Fail fast if a developer adds a table to SCHEMA without docs.
+    """Fail fast if a developer adds a table to pg_schema.sql without docs.
 
     Called once at server startup so a missing entry in TABLE_DOCS becomes a
     visible error, not a silent omission from the LLM-facing schema.
@@ -359,26 +167,15 @@ def describe_schema_for_llm() -> str:
 
 
 def init_db(db_path: Path) -> None:
-    """Create the DB schema if it doesn't exist.
+    """Create the PG DB schema if it doesn't exist.
 
-    When `DB_BACKEND=postgres`, loads `pg_schema.sql` (the hand-translated
-    PG DDL). Otherwise the legacy SQLite path runs the inlined `SCHEMA`
-    constant. The PG DDL is idempotent via `IF NOT EXISTS`, so calling
-    `init_db` against an already-initialized PG is a no-op.
+    Loads `pg_schema.sql` — the PG DDL is idempotent via `IF NOT EXISTS`,
+    so calling `init_db` against an already-initialized PG is a no-op.
+    The `db_path` argument is ignored (kept for signature compatibility
+    with the ~60 existing call sites); the PG DSN is resolved via
+    `_pg_dsn()`.
     """
-    if _is_postgres_backend():
-        _init_db_pg()
-        return
-    conn = sqlite3.connect(db_path)
-    conn.executescript(SCHEMA)
-    # Backfill: older DBs predate the start_completed column. ALTER TABLE
-    # ADD COLUMN is free on SQLite.
-    try:
-        conn.execute("ALTER TABLE job_progress ADD COLUMN start_completed INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    conn.commit()
-    conn.close()
+    _init_db_pg()
 
 
 def _init_db_pg() -> None:
@@ -390,10 +187,9 @@ def _init_db_pg() -> None:
     """
     import psycopg
 
-    schema_path = Path(__file__).parent / "pg_schema.sql"
     with psycopg.connect(_pg_dsn()) as raw:
         with raw.cursor() as cur:
-            cur.execute(schema_path.read_text())
+            cur.execute(_PG_SCHEMA_PATH.read_text())
         raw.commit()
 
 
@@ -676,7 +472,7 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
         # Messages belong to their leaf node and all ancestors
         for idx in indices:
             conn.execute(
-                "INSERT OR IGNORE INTO message_topics (message_id, topic_id) VALUES (?, ?)",
+                "INSERT INTO message_topics (message_id, topic_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                 (data["msg_ids"][idx], topic_id),
             )
 
@@ -1020,7 +816,6 @@ def rebuild_contact_frequency(db_path: Path) -> int:
         if "<" in addr:
             addr = addr.split("<")[1].rstrip(">")
         score = math.log(r["c"] + 1) / log_max if log_max > 0 else 0.0
-        # Portable upsert: INSERT OR REPLACE is SQLite-only.
         conn.execute(
             """INSERT INTO contact_frequency (email, message_count, score)
                VALUES (?, ?, ?)
@@ -1037,7 +832,7 @@ def rebuild_contact_frequency(db_path: Path) -> int:
 
 
 class JobProgress:
-    """Track progress of a long-running job via SQLite (queryable from other processes)."""
+    """Track progress of a long-running job via the DB (queryable from other processes)."""
 
     def __init__(self, db_path: Path, job_id: str, start_completed: int = 0):
         """`start_completed` is the baseline used for rate/ETA math:
@@ -1051,9 +846,6 @@ class JobProgress:
 
         now = datetime.now(timezone.utc).isoformat()
         conn = get_connection(db_path)
-        # Portable upsert: INSERT OR REPLACE is SQLite-only. On PG,
-        # starting a new run resets `status` to 'running' and `stage`
-        # to '', exactly like the SQLite semantic of OR REPLACE.
         conn.execute(
             """INSERT INTO job_progress
                  (job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at)
@@ -1106,7 +898,7 @@ class JobProgress:
         return [dict(r) for r in rows]
 
 
-def reap_stale_jobs(conn: sqlite3.Connection, staleness_seconds: int = 600) -> int:
+def reap_stale_jobs(conn, staleness_seconds: int = 600) -> int:
     """Mark any `running` job whose updated_at is older than the
     threshold as `stopped`.
 
@@ -1140,90 +932,47 @@ def clear_query_cache(db_path: Path) -> int:
 
 
 def rebuild_fts(db_path: Path) -> int:
-    """Rebuild FTS index from current messages and attachments. Returns count indexed."""
-    conn = get_connection(db_path)
-
-    # Clear and repopulate messages FTS
-    conn.execute("DELETE FROM messages_fts")
-    conn.execute(
-        """INSERT INTO messages_fts (message_id, subject, body_text, from_addr, to_addr)
-           SELECT id, subject, body_text, from_addr, to_addr FROM messages"""
-    )
-
-    # Clear and repopulate attachments FTS
-    conn.execute("DELETE FROM attachments_fts")
-    conn.execute(
-        """INSERT INTO attachments_fts (message_id, attachment_id, filename, extracted_text)
-           SELECT message_id, id, filename, COALESCE(extracted_text, '') FROM attachments
-           WHERE extracted_text IS NOT NULL AND extracted_text != ''"""
-    )
-
-    count = conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0]
-    att_count = conn.execute("SELECT COUNT(*) FROM attachments_fts").fetchone()[0]
-
-    conn.commit()
-    conn.close()
-    return count + att_count
-
-
-def _is_postgres_backend() -> bool:
-    """Backend dispatch gate. Default is now Postgres (the SQLite path
-    is deprecated as of 2026-04-20). Set `DB_BACKEND=sqlite` to force
-    the legacy path — required only for running the old snapshot DB or
-    rolling back. Any other value (including unset) routes through
-    psycopg.
-
-    Reason: production has migrated to paradedb + pg_search BM25; the
-    SQLite shim stays in the tree for Stage 2 cleanup.
+    """Rebuild FTS indexes. On Postgres the BM25 indexes are maintained
+    incrementally by pg_search — there's nothing to rebuild, so this is
+    effectively a no-op kept for CLI/API compatibility. Returns the
+    total number of messages + attachments currently covered.
     """
-    import os as _os
-
-    backend = (_os.environ.get("DB_BACKEND") or "").lower()
-    return backend != "sqlite"
+    conn = get_connection(db_path)
+    msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    att_count = conn.execute(
+        "SELECT COUNT(*) FROM attachments WHERE extracted_text IS NOT NULL AND extracted_text <> ''"
+    ).fetchone()[0]
+    conn.close()
+    return int(msg_count) + int(att_count)
 
 
 def get_connection(db_path):
-    """Return a dict-row connection compatible with both SQLite and PG.
+    """Return a dict-row Postgres connection via the compatibility shim.
 
     The function signature stays `(db_path)` for back-compat with the
-    ~60 existing call sites. In PG mode `db_path` is ignored and we
-    dial the DSN from `DB_DSN` (or a sensible local default).
+    ~60 existing call sites. `db_path` is ignored; the PG DSN is read
+    from `DB_DSN` (or the local docker-compose default).
 
-    In either mode, callers can assume:
+    Callers can assume:
         - `conn.execute(sql, params)` — runs the statement. Parameter
-          placeholders written with `?` are accepted on both backends
-          (the PG wrapper rewrites them to `%s` so none of our query
-          strings need mass-sed).
+          placeholders written with `?` are accepted (the wrapper rewrites
+          them to `%s`).
         - `conn.commit()` / `conn.close()`.
-        - Row access via `row[\"col\"]` or `row.keys()` — on PG via
-          psycopg's `dict_row`, on SQLite via `sqlite3.Row`.
+        - Row access via `row["col"]` or `row.keys()` via psycopg's
+          `dict_row`, wrapped in `_CompatRow` so `row[0]` also works.
 
     The PG wrapper is `_PgConnWrapper` below — a thin shim that adds
-    the `?`→`%s` rewrite and a `Cursor` façade. When we finish the
-    migration (Phase 5) we rewrite every `?` to `%s`, drop the
-    wrapper, and talk to psycopg directly.
+    the `?`→`%s` rewrite and a `Cursor` façade.
     """
-    if _is_postgres_backend():
-        return _connect_pg()
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    # Wait up to 60s for a peer writer before raising 'database is locked'.
-    # The file lock in gmail_search.locks normally prevents contention,
-    # but this is the belt+suspenders for anything that bypasses it.
-    conn.execute("PRAGMA busy_timeout=60000")
-    conn.row_factory = sqlite3.Row
-    return conn
+    return _connect_pg()
 
 
-# ── Postgres path (gated by DB_BACKEND=postgres) ─────────────────────────
+# ── Postgres connection layer ──────────────────────────────────────────────
 #
 # Design constraint: the 60 existing call sites across the codebase use
 # SQLite-flavored SQL with `?` placeholders. Rather than sed everything
 # at once (risky — one missed `?` is a runtime crash), we wrap psycopg
-# in a translation shim. Cost: ~20 lines. Benefit: zero query rewrites
-# needed for Phase 1; we can bring PG online and migrate queries over
-# incrementally.
+# in a translation shim.
 
 
 def _pg_dsn() -> str:
@@ -1236,15 +985,10 @@ def _pg_dsn() -> str:
 
 
 class _CompatRow:
-    """Row type that mimics `sqlite3.Row` semantics so the same code
-    works under either backend.
-
-    SQLite's `sqlite3.Row` supports BOTH dict-style (`row["name"]`)
-    AND positional (`row[0]`) access. psycopg's `dict_row` only does
-    the former; `tuple_row` only the latter. Call sites across the
-    app mix both — e.g. `row[0]` for single-column `COUNT(*)` queries
-    vs `row["subject"]` for full-record pulls. Rewriting every one
-    was deemed riskier than a small row shim.
+    """Row type that mimics `sqlite3.Row` semantics — retained so call
+    sites can mix dict-style (`row["name"]`) and positional (`row[0]`)
+    access. psycopg's `dict_row` only does the former; this shim adds
+    positional access via the column list from `cursor.description`.
 
     Kept intentionally minimal: indexing, `keys()`, iteration over
     values, `len`, `dict(row)` conversion, and a `.get()` helper.
@@ -1300,8 +1044,7 @@ def _compat_row_factory(cursor):
 def _connect_pg():
     """Return a `_PgConnWrapper` around a fresh psycopg connection.
     We don't pool here because the existing call sites open/close
-    connections freely; pooling comes in Phase 4 when we standardize
-    on a single entry point.
+    connections freely.
     """
     import psycopg
 
@@ -1336,13 +1079,7 @@ def _sqlite_to_pg_placeholders(sql: str) -> str:
 
 class _PgCursorWrapper:
     """Cursor shim: rewrites SQL placeholders on every execute and
-    proxies everything else to the underlying psycopg cursor. Exposes
-    `.lastrowid` by parsing a trailing `RETURNING id` from the rewritten
-    SQL — SQLite's lastrowid is implicit; psycopg requires an explicit
-    RETURNING. Most of our INSERTs already use ON CONFLICT + don't need
-    lastrowid, so this is only used by `upsert_attachment` and a couple
-    others; call sites that want lastrowid will get `None` from PG
-    unless they switch to RETURNING (tracked as a Phase 2 task).
+    proxies everything else to the underlying psycopg cursor.
     """
 
     def __init__(self, raw):

@@ -68,11 +68,7 @@ def _seed(db_path: Path, n: int = 80, dims: int = 16) -> None:
 
 
 def test_set_and_get_active_index_dir(db_backend):
-    """Basic round-trip: set then read returns the same string.
-
-    Runs against both SQLite and Postgres via the `db_backend` fixture —
-    this is the cleanest proof that the pointer shim works uniformly
-    across backends."""
+    """Basic round-trip: set then read returns the same string."""
     db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
@@ -92,12 +88,12 @@ def test_set_and_get_active_index_dir(db_backend):
 # ─── builder writes to a versioned dir + flips pointer ────────────────────
 
 
-def test_build_index_sharded_writes_versioned_sibling(tmp_path):
+def test_build_index_sharded_writes_versioned_sibling(db_backend, tmp_path):
     """The builder should NOT write to the exact path passed in — it
     writes a versioned sibling and updates the pointer. The returned
     path is the one that actually got written.
     """
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     _seed(db_path, n=40, dims=16)
     index_dir = tmp_path / "scann_index"
 
@@ -116,12 +112,12 @@ def test_build_index_sharded_writes_versioned_sibling(tmp_path):
         conn.close()
 
 
-def test_reindex_gc_removes_old_versioned_dir(tmp_path):
+def test_reindex_gc_removes_old_versioned_dir(db_backend, tmp_path):
     """Two consecutive builds: the old versioned dir gets removed once
     the new one is promoted, so the disk footprint doesn't grow
     without bound on a long-running watch loop.
     """
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     _seed(db_path, n=40, dims=16)
     index_dir = tmp_path / "scann_index"
 
@@ -166,12 +162,12 @@ def test_resolve_falls_back_when_pointer_missing(db_backend, tmp_path):
     assert resolved == fallback
 
 
-def test_resolve_falls_back_when_pointer_target_missing(tmp_path):
+def test_resolve_falls_back_when_pointer_target_missing(db_backend, tmp_path):
     """If the pointer references a path that no longer exists on disk
     (hand-edited, disk wipe, etc.), fall back to the default rather
     than returning a broken path that would 500 the searcher.
     """
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
     try:
@@ -184,24 +180,10 @@ def test_resolve_falls_back_when_pointer_target_missing(tmp_path):
     assert resolved == fallback
 
 
-def test_resolve_without_pointer_table(tmp_path):
-    """A DB file that predates the pointer table (old migration) should
-    still work — the resolver introspects for the table before querying.
-    """
-    import sqlite3
-
-    db_path = tmp_path / "db.sqlite"
-    # Empty sqlite file with no schema at all.
-    conn = sqlite3.connect(db_path)
-    conn.close()
-    fallback = tmp_path / "scann_index"
-    assert resolve_active_index_dir(db_path, fallback) == fallback
-
-
 # ─── crash / partial-build protection ─────────────────────────────────────
 
 
-def test_old_build_still_serves_during_reader_lookup(tmp_path):
+def test_old_build_still_serves_during_reader_lookup(db_backend, tmp_path):
     """The defining property: after the second build's pointer flip,
     a reader that resolves through the DB lands on the NEW dir. During
     the second build (before the pointer flips), it would have been
@@ -212,7 +194,7 @@ def test_old_build_still_serves_during_reader_lookup(tmp_path):
     returns that even when a partially-written newer dir exists
     alongside.
     """
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     _seed(db_path, n=40, dims=16)
     index_dir = tmp_path / "scann_index"
 

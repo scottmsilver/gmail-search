@@ -1,14 +1,14 @@
-import sqlite3
-
 from gmail_search.store.db import get_connection, init_db
 
 
-def test_init_db_creates_tables(tmp_path):
-    db_path = tmp_path / "test.db"
+def test_init_db_creates_tables(db_backend):
+    db_path = db_backend["db_path"]
     init_db(db_path)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = [row[0] for row in cursor.fetchall()]
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT table_name FROM information_schema.tables " "WHERE table_schema = current_schema() ORDER BY table_name"
+    ).fetchall()
+    tables = [r["table_name"] for r in rows]
     conn.close()
     assert "messages" in tables
     assert "attachments" in tables
@@ -17,24 +17,27 @@ def test_init_db_creates_tables(tmp_path):
     assert "sync_state" in tables
 
 
-def test_init_db_idempotent(tmp_path):
-    db_path = tmp_path / "test.db"
+def test_init_db_idempotent(db_backend):
+    db_path = db_backend["db_path"]
     init_db(db_path)
     init_db(db_path)  # Should not raise
-    conn = sqlite3.connect(db_path)
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [row[0] for row in cursor.fetchall()]
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()"
+    ).fetchall()
+    tables = [r["table_name"] for r in rows]
     conn.close()
     assert "messages" in tables
 
 
-def test_get_connection(tmp_path):
-    db_path = tmp_path / "test.db"
+def test_get_connection(db_backend):
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
     assert conn is not None
-    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode == "wal"
+    # Prove we got a live, queryable PG connection.
+    row = conn.execute("SELECT 1 AS ok").fetchone()
+    assert row[0] == 1
     conn.close()
 
 
@@ -50,12 +53,12 @@ def _insert_job(conn, job_id: str, status: str, updated_at_iso: str) -> None:
     conn.commit()
 
 
-def test_reap_stale_jobs_marks_old_running_as_stopped(tmp_path):
+def test_reap_stale_jobs_marks_old_running_as_stopped(db_backend):
     from datetime import datetime, timedelta, timezone
 
     from gmail_search.store.db import reap_stale_jobs
 
-    db_path = tmp_path / "test.db"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 
@@ -71,12 +74,12 @@ def test_reap_stale_jobs_marks_old_running_as_stopped(tmp_path):
     conn.close()
 
 
-def test_reap_stale_jobs_leaves_recent_running_alone(tmp_path):
+def test_reap_stale_jobs_leaves_recent_running_alone(db_backend):
     from datetime import datetime, timezone
 
     from gmail_search.store.db import reap_stale_jobs
 
-    db_path = tmp_path / "test.db"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 
@@ -91,7 +94,7 @@ def test_reap_stale_jobs_leaves_recent_running_alone(tmp_path):
     conn.close()
 
 
-def test_reap_stale_jobs_leaves_non_running_alone(tmp_path):
+def test_reap_stale_jobs_leaves_non_running_alone(db_backend):
     """Rows already in done/stopped/error must never be rewritten, even
     if very old — that's history, not a zombie.
     """
@@ -99,7 +102,7 @@ def test_reap_stale_jobs_leaves_non_running_alone(tmp_path):
 
     from gmail_search.store.db import reap_stale_jobs
 
-    db_path = tmp_path / "test.db"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 

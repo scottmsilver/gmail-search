@@ -1,6 +1,4 @@
 import re
-import sqlite3
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +7,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
-from gmail_search.store.db import get_connection
+from gmail_search.store.db import _pg_dsn, get_connection
 from gmail_search.store.queries import get_attachments_for_message, get_message
 
 # ─────────────────────────────────────────────────────────────────
@@ -19,21 +17,32 @@ SQL_MAX_ROWS = 500
 SQL_MAX_QUERY_CHARS = 5000
 SQL_TIMEOUT_SEC = 10.0
 
+# Keywords that cannot appear in a `/api/sql` query. The SQLite-specific
+# entries (PRAGMA, LOAD_EXTENSION, READFILE, WRITEFILE, EDIT,
+# FTS3_TOKENIZER, SQLITE_*) are kept as-is — Postgres parses them as
+# identifiers, so blocking them remains harmless and guards against any
+# future backend-switch slip-up.
 _SQL_FORBIDDEN = re.compile(
     r"\b(ATTACH|DETACH|PRAGMA|VACUUM|ANALYZE|REINDEX|INSERT|UPDATE|"
     r"DELETE|DROP|CREATE|REPLACE|TRUNCATE|ALTER|BEGIN|COMMIT|ROLLBACK|"
-    r"SAVEPOINT|RELEASE|LOAD_EXTENSION|READFILE|WRITEFILE|EDIT|"
+    r"SAVEPOINT|RELEASE|LOAD_EXTENSION|READFILE|WRITEFILE|EDIT|COPY|"
+    r"GRANT|REVOKE|SET|RESET|SHOW|LISTEN|NOTIFY|DISCARD|LOCK|CLUSTER|"
     r"FTS3_TOKENIZER|SQLITE_COMPILEOPTION_GET|SQLITE_COMPILEOPTION_USED|"
     r"SQLITE_SOURCE_ID|SQLITE_VERSION|SQLITE_LOG)\b",
     re.IGNORECASE,
 )
 
-# Block introspection of internal SQLite tables — schema is already exposed
-# via /api/sql_schema; sqlite_* tables can leak storage internals (page
-# numbers, payload byte ranges) and the embedded `embeddings` schema is huge.
+# Block introspection of backend internals. The sqlite_* names are
+# legacy guards; on Postgres the real leaks are `pg_catalog.*` and
+# `information_schema.*`, which expose role/password metadata, role
+# membership, and (via pg_stat_activity) any other session's query
+# text. `/api/sql_schema` surfaces the documented table shape; these
+# are not needed.
 _SQL_BLOCKED_TABLES = re.compile(
     r"\b(sqlite_master|sqlite_schema|sqlite_temp_master|sqlite_temp_schema|"
-    r"sqlite_sequence|sqlite_stat1|sqlite_stat4|sqlite_dbpage|sqlite_dbstat)\b",
+    r"sqlite_sequence|sqlite_stat1|sqlite_stat4|sqlite_dbpage|sqlite_dbstat|"
+    r"pg_catalog|pg_user|pg_shadow|pg_authid|pg_roles|pg_stat_activity|"
+    r"pg_settings|pg_hba_file_rules|information_schema)\b",
     re.IGNORECASE,
 )
 
@@ -46,11 +55,22 @@ _SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
-def _open_readonly_connection(db_path: Path) -> sqlite3.Connection:
-    """Open a connection that SQLite itself enforces as read-only."""
-    uri = f"file:{db_path}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=SQL_TIMEOUT_SEC)
-    conn.row_factory = sqlite3.Row
+def _open_readonly_connection():
+    """Open a Postgres connection in a READ ONLY transaction with a
+    statement-level timeout. Two-layer defense: the gate validator
+    rejects non-SELECT queries, and the server refuses writes at the
+    transaction level.
+    """
+    import psycopg
+
+    conn = psycopg.connect(_pg_dsn(), autocommit=False)
+    with conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        # Belt-and-suspenders timeout at the server. PG's SET LOCAL
+        # doesn't support bound params — we inline an int we control
+        # ourselves, so there's no injection surface.
+        timeout_ms = int(SQL_TIMEOUT_SEC * 1000)
+        cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
     return conn
 
 
@@ -100,17 +120,17 @@ def _json_safe(value: Any) -> Any:
 def _run_sql_with_timeout(db_path: Path, query: str) -> dict:
     """Execute a SELECT and capture the first SQL_MAX_ROWS rows.
 
-    Runs the connection on a timer thread so a hostile query cannot hang
-    the request. On timeout we call conn.interrupt() which raises
-    sqlite3.OperationalError in the executing thread.
+    Enforces the timeout at the PG server via `statement_timeout`, set
+    on the transaction by `_open_readonly_connection`. The transaction
+    is also READ ONLY, so even a gate bypass cannot mutate state.
+    `db_path` is ignored; kept for call-site compatibility.
     """
-    conn = _open_readonly_connection(db_path)
-    timer = threading.Timer(SQL_TIMEOUT_SEC, conn.interrupt)
-    timer.start()
+    conn = _open_readonly_connection()
     try:
-        cursor = conn.execute(query)
-        columns = [d[0] for d in cursor.description or []]
-        rows_raw = cursor.fetchmany(SQL_MAX_ROWS + 1)
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            columns = [d[0] for d in cursor.description or []]
+            rows_raw = cursor.fetchmany(SQL_MAX_ROWS + 1)
         truncated = len(rows_raw) > SQL_MAX_ROWS
         rows = [[_json_safe(v) for v in row] for row in rows_raw[:SQL_MAX_ROWS]]
         return {
@@ -120,7 +140,6 @@ def _run_sql_with_timeout(db_path: Path, query: str) -> dict:
             "truncated": truncated,
         }
     finally:
-        timer.cancel()
         conn.close()
 
 
@@ -581,17 +600,19 @@ def create_app(
         blacklist (defense in depth). Statement must begin with SELECT or
         WITH; multiple statements are rejected.
         """
+        import psycopg
+
         query = str(payload.get("query", ""))
         err = _validate_sql(query)
         if err:
             return JSONResponse({"error": err}, status_code=400)
         try:
             return _run_sql_with_timeout(db_path, query)
-        except sqlite3.OperationalError as e:
-            msg = str(e)
-            status = 408 if "interrupted" in msg else 400
-            return JSONResponse({"error": f"SQL error: {msg}"}, status_code=status)
-        except sqlite3.DatabaseError as e:
+        except psycopg.errors.QueryCanceled as e:
+            # statement_timeout tripped — surface as 408 so the UI can
+            # tell timeout apart from a syntax error.
+            return JSONResponse({"error": f"SQL timeout: {e!s}"}, status_code=408)
+        except psycopg.Error as e:
             return JSONResponse({"error": f"SQL error: {e!s}"}, status_code=400)
 
     @app.post("/api/battle/vote")

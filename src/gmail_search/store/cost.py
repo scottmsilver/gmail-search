@@ -1,4 +1,3 @@
-import sqlite3
 from datetime import datetime, timezone
 
 TEXT_COST_PER_MILLION_TOKENS = 0.20
@@ -12,7 +11,7 @@ def estimate_cost(input_tokens: int = 0, image_count: int = 0) -> float:
 
 
 def record_cost(
-    conn: sqlite3.Connection,
+    conn,
     operation: str,
     model: str,
     input_tokens: int,
@@ -37,17 +36,17 @@ def record_cost(
     conn.commit()
 
 
-def get_total_spend(conn: sqlite3.Connection) -> float:
+def get_total_spend(conn) -> float:
     row = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM costs").fetchone()
     return row[0]
 
 
-def get_spend_breakdown(conn: sqlite3.Connection) -> dict[str, float]:
+def get_spend_breakdown(conn) -> dict[str, float]:
     rows = conn.execute("SELECT operation, SUM(estimated_cost_usd) as total FROM costs GROUP BY operation").fetchall()
     return {r["operation"]: r["total"] for r in rows}
 
 
-def check_budget(conn: sqlite3.Connection, max_budget_usd: float) -> tuple[bool, float, float]:
+def check_budget(conn, max_budget_usd: float) -> tuple[bool, float, float]:
     spent = get_total_spend(conn)
     remaining = max_budget_usd - spent
     return remaining >= 0, spent, remaining

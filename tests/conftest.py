@@ -17,23 +17,22 @@ def test_config(tmp_path, data_dir):
     return load_config(config_path=tmp_path / "nonexistent.yaml", data_dir=data_dir)
 
 
-# ─── Backend-parametrized DB fixture ──────────────────────────────────────
+# ─── Backend-parametrized DB fixture (Postgres only) ─────────────────────
 #
-# Tests that accept `db_backend` auto-run twice: once against SQLite and
-# once against Postgres. The fixture yields a dict with a `db_path` that
-# tests pass through to `init_db(...)` and `get_connection(...)` — same
-# function signature on both backends thanks to the shim in store/db.py.
+# The SQLite backend was retired on 2026-04-20 (see Stage 2 cleanup).
+# Tests that accept `db_backend` now run once against Postgres only. The
+# fixture yields `{"kind": "postgres", "db_path": Path, "schema": str}`
+# where `db_path` is an unused placeholder — call sites thread it into
+# `init_db(...)` / `get_connection(...)` unchanged, and the PG layer
+# ignores it in favour of `DB_DSN`.
 #
-# SQLite parametrization: `DB_BACKEND` is unset and we hand back a
-# per-test tmp file.
-#
-# Postgres parametrization: we create a fresh `test_<uuid8>` schema per
-# test and wire `DB_DSN` with an `options=-csearch_path=...` query param
-# so every connection opened by `get_connection()` automatically lands in
-# that schema. Teardown drops the schema with CASCADE. If the server
-# isn't reachable on 127.0.0.1:5544 we skip just the PG parametrization —
-# developers who haven't run `docker compose up pg` still get SQLite
-# coverage.
+# Each test gets a fresh `test_<uuid8>` schema; `DB_DSN` is wired with an
+# `options=-csearch_path=...` query param so every connection opened by
+# `get_connection()` automatically lands in that schema. Teardown drops
+# the schema with CASCADE. If the server isn't reachable on
+# 127.0.0.1:5544 the whole fixture skips (i.e. any test using it is
+# skipped) so `pytest` still exits cleanly on dev machines that haven't
+# brought up the paradedb container.
 
 _PG_BASE_DSN = "postgresql://gmail_search:gmail_search@127.0.0.1:5544/gmail_search"
 
@@ -79,32 +78,32 @@ def _pg_dsn_for_schema(schema_name: str) -> str:
     trick — the server applies it at connection start so every statement
     resolves unqualified names against our fresh schema, not `public`.
     """
-    # psycopg accepts libpq-style `options` via the query string; the
-    # `-c` prefix tells the server to apply a config parameter for the
-    # session. We don't URL-encode the equals sign — libpq handles it.
     return f"{_PG_BASE_DSN}?options=-csearch_path%3D{schema_name}"
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
-def db_backend(request, tmp_path, monkeypatch):
-    """Dual-backend fixture. Tests see `{"kind": str, "db_path": Path|str}`.
+@pytest.fixture(autouse=True)
+def _isolated_pg_schema(request, tmp_path, monkeypatch):
+    """Autouse PG-schema isolation for every test.
 
-    On SQLite: a fresh tmp file per test, `DB_BACKEND=sqlite` set so the
-    dispatch gate routes to the legacy path. (The gate now defaults to
-    Postgres, so we must opt in to SQLite explicitly.)
+    Stage 2 dropped the SQLite backend, which means every `init_db` /
+    `get_connection` call now routes to Postgres. Without isolation,
+    tests that use `tmp_path / "test.db"` end up writing straight into
+    the production `public` schema on the dev machine.
 
-    On Postgres: a fresh `test_<uuid8>` schema per test. `DB_BACKEND` and
-    `DB_DSN` are set for the duration; teardown drops the schema.
+    This fixture creates a fresh `test_<uuid8>` schema per test and wires
+    `DB_DSN` with an `options=-csearch_path=...` query param so every
+    connection opened by `get_connection()` lands in that schema.
+    Teardown drops the schema with CASCADE. Skips when PG isn't
+    reachable (dev machines that haven't started the paradedb container)
+    — tests that don't touch the DB still run.
+
+    Tests that need the schema name (e.g. integration smoke tests) can
+    depend on the `db_backend` fixture, which is a thin wrapper around
+    this one.
     """
-    if request.param == "sqlite":
-        monkeypatch.setenv("DB_BACKEND", "sqlite")
-        db_path = tmp_path / "test.db"
-        yield {"kind": "sqlite", "db_path": db_path}
-        return
-
-    # Postgres path.
     if not _pg_server_reachable():
-        pytest.skip("Postgres not reachable at 127.0.0.1:5544 — run `docker compose up pg` to enable")
+        yield None
+        return
 
     schema_name = f"test_{uuid.uuid4().hex[:8]}"
     _make_pg_schema(schema_name)
@@ -112,10 +111,28 @@ def db_backend(request, tmp_path, monkeypatch):
     monkeypatch.setenv("DB_BACKEND", "postgres")
     monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(schema_name))
 
-    # db_path is ignored on the PG path, but we still pass one for API
-    # compatibility with the existing (db_path) call sites.
-    db_path = tmp_path / "unused.db"
     try:
-        yield {"kind": "postgres", "db_path": db_path, "schema": schema_name}
+        yield {"kind": "postgres", "schema": schema_name}
     finally:
         _drop_pg_schema(schema_name)
+
+
+@pytest.fixture
+def db_backend(_isolated_pg_schema, tmp_path):
+    """Postgres-only DB fixture. Tests see `{"kind": "postgres",
+    "db_path": Path, "schema": str}`.
+
+    A fresh `test_<uuid8>` schema is created per test (via the autouse
+    `_isolated_pg_schema`); teardown drops it.
+    """
+    if _isolated_pg_schema is None:
+        pytest.skip("Postgres not reachable at 127.0.0.1:5544 — run `docker compose up pg` to enable")
+
+    # db_path is ignored, but we still pass one for API compatibility
+    # with the existing (db_path) call sites.
+    db_path = tmp_path / "unused.db"
+    yield {
+        "kind": "postgres",
+        "db_path": db_path,
+        "schema": _isolated_pg_schema["schema"],
+    }

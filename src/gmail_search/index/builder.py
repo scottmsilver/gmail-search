@@ -1,7 +1,6 @@
 import json
 import logging
 import math
-import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 _SCANN_PEAK_MULT = 4
 
 
-def _load_embeddings_matrix(conn: sqlite3.Connection, model: str, dimensions: int) -> tuple[list[int], np.ndarray]:
+def _load_embeddings_matrix(conn, model: str, dimensions: int) -> tuple[list[int], np.ndarray]:
     """Stream (id, embedding) rows into a preallocated float32 matrix.
 
     The previous `[list(struct.unpack(...)) for r in rows]` intermediate
@@ -97,7 +96,7 @@ def build_index(db_path: Path, index_dir: Path, model: str, dimensions: int) -> 
 
 
 def _stream_embeddings_to_memmap(
-    conn: sqlite3.Connection,
+    conn,
     model: str,
     dimensions: int,
     memmap_path: Path,
@@ -187,7 +186,7 @@ def _clean_old_shard_dirs(index_dir: Path) -> None:
             shutil.rmtree(entry)
 
 
-def _count_embeddings(conn: sqlite3.Connection, model: str) -> int:
+def _count_embeddings(conn, model: str) -> int:
     return conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = ?", (model,)).fetchone()[0]
 
 

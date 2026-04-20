@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -459,7 +458,7 @@ def summarize_one(
     return _clean_llm_output(raw)
 
 
-def _fetch_attachments_for(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[dict]]:
+def _fetch_attachments_for(conn, message_ids: list[str]) -> dict[str, list[dict]]:
     """One batched query returning `{message_id: [{filename, extracted_text}]}`
     for every attachment with non-trivial extracted text. Pulling in one
     query instead of N is the difference between a 100ms pending-list
@@ -482,7 +481,7 @@ def _fetch_attachments_for(conn: sqlite3.Connection, message_ids: list[str]) -> 
     return out
 
 
-def _messages_needing_summary(conn: sqlite3.Connection, model: str, limit: int | None) -> list[dict]:
+def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]:
     """Return messages that don't yet have a summary under `model`, each
     with its attachments pre-joined. Attachments join happens in Python
     because SQL `GROUP_CONCAT` would force a column cap we'd have to
@@ -517,7 +516,7 @@ def _messages_needing_summary(conn: sqlite3.Connection, model: str, limit: int |
     ]
 
 
-def _store_summary(conn: sqlite3.Connection, message_id: str, summary: str, model: str) -> None:
+def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
     conn.execute(
         """INSERT INTO message_summaries (message_id, summary, model)
            VALUES (?, ?, ?)
@@ -720,7 +719,7 @@ def _log_progress(processed: int, total: int, start: float) -> None:
 # most recent row per message_id, full stop.
 
 
-def get_summary(conn: sqlite3.Connection, message_id: str, model: str | None = None) -> str | None:
+def get_summary(conn, message_id: str, model: str | None = None) -> str | None:
     """Return the most recent summary for a message, regardless of
     which model/prompt produced it. Pass `model` only when you need
     a specific key (e.g. the backfill worker checking done-ness).
@@ -738,9 +737,7 @@ def get_summary(conn: sqlite3.Connection, message_id: str, model: str | None = N
     return row["summary"] if row else None
 
 
-def get_summaries_bulk(
-    conn: sqlite3.Connection, message_ids: Iterable[str], model: str | None = None
-) -> dict[str, str]:
+def get_summaries_bulk(conn, message_ids: Iterable[str], model: str | None = None) -> dict[str, str]:
     """Like `get_summary` but bulk. When `model is None`, returns the
     freshest summary per message regardless of version — the default
     for UI reads.
@@ -749,9 +746,7 @@ def get_summaries_bulk(
     return {mid: meta["summary"] for mid, meta in rows.items()}
 
 
-def get_summaries_bulk_meta(
-    conn: sqlite3.Connection, message_ids: Iterable[str], model: str | None = None
-) -> dict[str, dict]:
+def get_summaries_bulk_meta(conn, message_ids: Iterable[str], model: str | None = None) -> dict[str, dict]:
     """Same lookup as `get_summaries_bulk` but returns
     `{summary, model, created_at}` per message — useful for the
     search UI's debug panel so you can tell at a glance which prompt
