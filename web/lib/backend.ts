@@ -94,6 +94,23 @@ export const queryEmailsBackend = async (args: QueryArgs): Promise<QueryThread[]
   return data.results ?? [];
 };
 
+// Priority inbox = threads with IMPORTANT + INBOX labels, newest first.
+// Same row shape as queryEmailsBackend so the UI components are reusable.
+export const getInboxBackend = async (args: {
+  limit?: number;
+  offset?: number;
+}): Promise<QueryThread[]> => {
+  const url = new URL(`${pythonApiUrl()}/api/inbox`);
+  if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
+  if (args.offset !== undefined) url.searchParams.set("offset", String(args.offset));
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    throw new Error(`inbox backend failed: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.results ?? [];
+};
+
 export type AttachmentMeta = {
   id: number;
   filename: string;

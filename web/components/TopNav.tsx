@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 const TABS: Array<{ href: string; label: string }> = [
   { href: "/", label: "Chat" },
   { href: "/search", label: "Search" },
+  { href: "/inbox", label: "Inbox" },
 ];
 
 const isActive = (pathname: string, href: string): boolean => {

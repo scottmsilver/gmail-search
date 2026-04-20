@@ -477,6 +477,41 @@ def create_app(
         )
         return {"results": threads}
 
+    @app.get("/api/inbox")
+    async def api_inbox(
+        limit: int = Query(50, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        """Priority inbox: threads carrying both the IMPORTANT and INBOX
+        labels, newest-first, grouped by thread. Matches Gmail's own
+        "Priority Inbox" definition (Important + in the inbox).
+        """
+        conn = get_connection(db_path)
+        try:
+            # "Priority" = the thread contains at least one IMPORTANT+INBOX
+            # message. Sort by the thread's overall last activity
+            # (`date_last`) so the order the UI shows matches the date the
+            # UI displays — not the date of the most recent priority
+            # message, which can differ when a later reply lands without
+            # the IMPORTANT flag.
+            rows = conn.execute(
+                """SELECT ts.thread_id FROM thread_summary ts
+                   WHERE EXISTS (
+                     SELECT 1 FROM messages m
+                     WHERE m.thread_id = ts.thread_id
+                       AND m.labels LIKE %s
+                       AND m.labels LIKE %s
+                   )
+                   ORDER BY ts.date_last DESC
+                   LIMIT %s OFFSET %s""",
+                ('%"IMPORTANT"%', '%"INBOX"%', limit, offset),
+            ).fetchall()
+            thread_ids = [r["thread_id"] for r in rows]
+            threads = _load_thread_summaries(conn, thread_ids)
+            return {"results": threads}
+        finally:
+            conn.close()
+
     @app.get("/api/thread/{thread_id}")
     async def api_thread(thread_id: str):
         conn = get_connection(db_path)
