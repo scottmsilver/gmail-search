@@ -287,7 +287,12 @@ def _sanitize_fts_tokens(raw: str) -> list[str]:
     return tokens
 
 
-def search_fts(conn, query: str, limit: int = 200) -> dict[str, float]:
+def search_fts(
+    conn,
+    query: str,
+    limit: int = 200,
+    candidate_ids: list[str] | None = None,
+) -> dict[str, float]:
     """Search messages + attachments via pg_search BM25, return {message_id: score}.
 
     Two-pass strategy mirroring the historic SQLite FTS5 behaviour:
@@ -295,8 +300,15 @@ def search_fts(conn, query: str, limit: int = 200) -> dict[str, float]:
       2. Disjunction pass (broader recall).
     Scores are min-max normalized to [0, 1] so downstream blenders can mix
     FTS with vector similarity.
+
+    ``candidate_ids`` optionally restricts BM25 to a pre-filtered set of
+    message IDs (see SearchEngine._resolve_candidate_msg_ids). ``None``
+    means no restriction (full corpus). ``[]`` means "filters matched
+    zero rows" — short-circuit to an empty result.
     """
-    return _search_fts_postgres(conn, query, limit)
+    if candidate_ids is not None and len(candidate_ids) == 0:
+        return {}
+    return _search_fts_postgres(conn, query, limit, candidate_ids)
 
 
 def _pg_bm25_messages(
@@ -304,6 +316,7 @@ def _pg_bm25_messages(
     bm25_query: str,
     limit: int,
     logger,
+    candidate_ids: list[str] | None = None,
 ) -> dict[str, float]:
     """BM25 pass against the `messages` table via pg_search.
 
@@ -311,16 +324,30 @@ def _pg_bm25_messages(
     for a real BM25 score. The query string is interpreted by Tantivy's
     query parser, which natively handles phrase quoting (`"foo bar"`),
     boolean operators, and per-field targeting.
+
+    When ``candidate_ids`` is non-None, restricts the match set to those
+    message IDs via ``id = ANY(%s::text[])``. ``None`` means no
+    restriction. An empty list is treated as a no-op short-circuit by the
+    caller (``search_fts``).
     """
     scores: dict[str, float] = {}
     try:
-        rows = conn.execute(
-            "SELECT id AS message_id, paradedb.score(id) AS rank "
-            "FROM messages "
-            "WHERE messages @@@ %s "
-            "ORDER BY rank DESC LIMIT %s",
-            (bm25_query, limit),
-        ).fetchall()
+        if candidate_ids is None:
+            rows = conn.execute(
+                "SELECT id AS message_id, paradedb.score(id) AS rank "
+                "FROM messages "
+                "WHERE messages @@@ %s "
+                "ORDER BY rank DESC LIMIT %s",
+                (bm25_query, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id AS message_id, paradedb.score(id) AS rank "
+                "FROM messages "
+                "WHERE messages @@@ %s AND id = ANY(%s::text[]) "
+                "ORDER BY rank DESC LIMIT %s",
+                (bm25_query, list(candidate_ids), limit),
+            ).fetchall()
         for r in rows:
             mid = r["message_id"]
             raw = float(r["rank"] or 0.0)
@@ -336,22 +363,35 @@ def _pg_bm25_attachments(
     bm25_query: str,
     limit: int,
     logger,
+    candidate_ids: list[str] | None = None,
 ) -> dict[str, float]:
     """BM25 pass against `attachments`. Returns `{message_id: score}` by
     joining the attachment row's `message_id`. `paradedb.score(id)` keys
     on the attachment PK (the BM25 `key_field`), so the score is per
     attachment; multiple attachment hits on the same message collapse to
     the max score in the caller.
+
+    When ``candidate_ids`` is non-None, restricts hits to attachments
+    whose ``message_id`` is in that set.
     """
     scores: dict[str, float] = {}
     try:
-        rows = conn.execute(
-            "SELECT message_id, paradedb.score(id) AS rank "
-            "FROM attachments "
-            "WHERE attachments @@@ %s "
-            "ORDER BY rank DESC LIMIT %s",
-            (bm25_query, limit),
-        ).fetchall()
+        if candidate_ids is None:
+            rows = conn.execute(
+                "SELECT message_id, paradedb.score(id) AS rank "
+                "FROM attachments "
+                "WHERE attachments @@@ %s "
+                "ORDER BY rank DESC LIMIT %s",
+                (bm25_query, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT message_id, paradedb.score(id) AS rank "
+                "FROM attachments "
+                "WHERE attachments @@@ %s AND message_id = ANY(%s::text[]) "
+                "ORDER BY rank DESC LIMIT %s",
+                (bm25_query, list(candidate_ids), limit),
+            ).fetchall()
         for r in rows:
             mid = r["message_id"]
             raw = float(r["rank"] or 0.0)
@@ -394,7 +434,12 @@ def _build_bm25_query(tokens: list[str], fields: tuple[str, ...]) -> tuple[str, 
     return disjunction, phrase
 
 
-def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
+def _search_fts_postgres(
+    conn,
+    query: str,
+    limit: int,
+    candidate_ids: list[str] | None = None,
+) -> dict[str, float]:
     """Postgres BM25 path via pg_search (paradedb / Tantivy).
 
     Two passes:
@@ -406,6 +451,9 @@ def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
     Scores come from `paradedb.score(id)` (real BM25). We min-max
     normalize across the result set so downstream blend code sees
     values in [0, 1].
+
+    ``candidate_ids`` optionally narrows both passes to a pre-filtered
+    set of message IDs. See ``search_fts`` for semantics.
     """
     import logging
 
@@ -421,8 +469,8 @@ def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
     # Strategy 1: Phrase match (words must appear in order, adjacent).
     if msg_phrase is not None:
         for tbl_scores in (
-            _pg_bm25_messages(conn, msg_phrase, limit, logger),
-            _pg_bm25_attachments(conn, att_phrase, limit, logger),
+            _pg_bm25_messages(conn, msg_phrase, limit, logger, candidate_ids),
+            _pg_bm25_attachments(conn, att_phrase, limit, logger, candidate_ids),
         ):
             for mid, raw in tbl_scores.items():
                 boosted = raw * 1.5
@@ -431,8 +479,8 @@ def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
 
     # Strategy 2: Individual terms (any word matches — broader recall).
     for tbl_scores in (
-        _pg_bm25_messages(conn, msg_disj, limit, logger),
-        _pg_bm25_attachments(conn, att_disj, limit, logger),
+        _pg_bm25_messages(conn, msg_disj, limit, logger, candidate_ids),
+        _pg_bm25_attachments(conn, att_disj, limit, logger, candidate_ids),
     ):
         for mid, raw in tbl_scores.items():
             if mid not in scores or raw > scores[mid]:

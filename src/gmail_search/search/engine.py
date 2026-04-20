@@ -25,6 +25,21 @@ W_REPLIED = 0.08
 W_MATCH_DENSITY = 0.06
 W_THREAD_SIZE = 0.04
 
+# When structured filters (from:/to:/subject:/date/has_attachment) pre-restrict
+# the corpus, we run vector similarity directly over the restricted set if
+# it's small enough — brute-force cosine over a few thousand embeddings is
+# faster + strictly more accurate than ScaNN-with-overfetch-then-filter and
+# guarantees recall. Above this threshold we fall back to ScaNN with heavy
+# overfetch and filter the result to `candidate_ids`.
+VECTOR_BRUTEFORCE_THRESHOLD = 20_000
+
+# Cap on the number of message IDs returned by the structured-filter pre-pass.
+# Past this point we'd need a different retrieval strategy (e.g. per-shard
+# filtered ANN). Practical mail corpora don't hit this unless the filter is
+# nearly a no-op (`from:.com`), in which case we may as well search the whole
+# index — but we prefer to fail loud so the caller notices.
+CANDIDATE_ID_CAP = 100_000
+
 # Recency decay: half-life in days. Score = exp(-0.693 * days / half_life)
 RECENCY_HALF_LIFE_DAYS = 60
 
@@ -368,6 +383,178 @@ class SearchEngine:
 
         return np.array(vector, dtype=np.float32)
 
+    def _resolve_candidate_msg_ids(
+        self,
+        pq: ParsedQuery,
+        conn,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> list[str] | None:
+        """Return the set of message IDs that pass every structured filter
+        (``from:``, ``to:``, ``subject:``, ``has:attachment``, date range).
+
+        - ``None`` → no structured filter is active; caller should search the
+          full corpus.
+        - ``[]``   → filters are active but matched zero rows; caller should
+          short-circuit to an empty result.
+        - otherwise a list of message IDs (preserving DB order) ready to be
+          fed into BM25 / vector search.
+
+        ``date_from`` / ``date_to`` are the effective dates (endpoint
+        overrides merged with operator-parsed values). Passing them in lets
+        this resolver be the single source of truth for corpus restriction,
+        so the downstream date post-filter becomes redundant.
+        """
+        has_any_filter = bool(
+            pq.from_filter or pq.to_filter or pq.subject_filter or pq.has_attachment or date_from or date_to
+        )
+        if not has_any_filter:
+            return None
+
+        where: list[str] = []
+        params: list = []
+
+        if pq.from_filter:
+            where.append("m.from_addr ILIKE %s")
+            params.append(f"%{pq.from_filter}%")
+        if pq.to_filter:
+            where.append("m.to_addr ILIKE %s")
+            params.append(f"%{pq.to_filter}%")
+        if pq.subject_filter:
+            where.append("m.subject ILIKE %s")
+            params.append(f"%{pq.subject_filter}%")
+        if date_from:
+            where.append("m.date >= %s")
+            params.append(f"{date_from}T00:00:00")
+        if date_to:
+            where.append("m.date <= %s")
+            params.append(f"{date_to}T23:59:59")
+        if pq.has_attachment is True:
+            where.append("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)")
+
+        where_sql = " AND ".join(where) if where else "TRUE"
+        # Cap +1 so we can detect overflow and warn.
+        sql = f"SELECT m.id FROM messages m WHERE {where_sql} LIMIT {CANDIDATE_ID_CAP + 1}"
+        rows = conn.execute(sql, params).fetchall()
+
+        ids = [r["id"] for r in rows]
+        if len(ids) > CANDIDATE_ID_CAP:
+            logger.warning(
+                "Structured filter matched > %d messages; truncating to cap. "
+                "Recall may suffer — consider narrowing the filter.",
+                CANDIDATE_ID_CAP,
+            )
+            ids = ids[:CANDIDATE_ID_CAP]
+        return ids
+
+    def _decode_embedding_blob(self, blob: bytes) -> np.ndarray:
+        """Little-endian float32 blob → numpy vector. Mirrors the
+        zero-copy ``np.frombuffer`` path used by
+        ``index/builder.py::_load_embeddings_matrix`` so vector geometry
+        stays identical between indexed and on-the-fly lookups.
+        """
+        return np.frombuffer(blob, dtype=np.float32)
+
+    def _bruteforce_vector_search(
+        self,
+        query_vector: np.ndarray,
+        candidate_msg_ids: list[str],
+        fetch_k: int,
+    ) -> tuple[list[int], list[float]]:
+        """Cosine similarity (dot product on L2-normalized vectors) over
+        the embeddings of a restricted message set. Returns the same
+        ``(embedding_ids, scores)`` interface as ``ScannSearcher.search``
+        so the downstream merge code is backend-agnostic.
+        """
+        model = self.config["embedding"]["model"]
+        conn = get_connection(self.db_path)
+        try:
+            placeholders = ",".join(["%s"] * len(candidate_msg_ids))
+            rows = conn.execute(
+                f"""SELECT id, message_id, embedding
+                    FROM embeddings
+                    WHERE message_id IN ({placeholders}) AND model = %s""",
+                list(candidate_msg_ids) + [model],
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return [], []
+
+        dims = self.config["embedding"]["dimensions"]
+        mat = np.empty((len(rows), dims), dtype=np.float32)
+        ids: list[int] = []
+        for i, r in enumerate(rows):
+            ids.append(int(r["id"]))
+            mat[i] = self._decode_embedding_blob(r["embedding"])
+
+        # ScaNN indexes are built with "dot_product" similarity on the raw
+        # stored vectors (builder.py:62). We mirror that exactly — no
+        # additional normalization — so scores here are directly comparable
+        # to ScaNN's.
+        scores = mat @ query_vector.astype(np.float32)
+
+        k = min(fetch_k, len(ids))
+        if k <= 0:
+            return [], []
+        top_idx = np.argpartition(-scores, k - 1)[:k]
+        top_idx = top_idx[np.argsort(-scores[top_idx])]
+        return [ids[i] for i in top_idx], [float(scores[i]) for i in top_idx]
+
+    def _restricted_vector_search(
+        self,
+        query_vector: np.ndarray,
+        candidate_msg_ids: list[str],
+        fetch_k: int,
+    ) -> tuple[list[int], list[float]]:
+        """Vector search constrained to a pre-filtered candidate set.
+
+        Small set → brute-force cosine (exact recall, same scale as
+        ScaNN's dot-product). Large set → ScaNN with heavy overfetch,
+        then drop embeddings whose message is outside the candidate set.
+        """
+        n = len(candidate_msg_ids)
+        if n == 0:
+            return [], []
+
+        if n < VECTOR_BRUTEFORCE_THRESHOLD:
+            return self._bruteforce_vector_search(query_vector, candidate_msg_ids, fetch_k)
+
+        # Large restricted set — fall back to ScaNN with overfetch, then
+        # filter. We want enough candidates that the restricted subset
+        # still covers fetch_k items.
+        overfetch = max(fetch_k, 10_000)
+        overfetch = min(overfetch, len(self.searcher.embedding_ids))
+        emb_ids, scores = self.searcher.search(query_vector, top_k=overfetch)
+        if not emb_ids:
+            return [], []
+
+        # Map each returned embedding_id back to its message_id, drop the
+        # ones outside the candidate set.
+        candidate_set = set(candidate_msg_ids)
+        conn = get_connection(self.db_path)
+        try:
+            placeholders = ",".join(["%s"] * len(emb_ids))
+            rows = conn.execute(
+                f"SELECT id, message_id FROM embeddings WHERE id IN ({placeholders})",
+                emb_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        emb_to_msg = {int(r["id"]): r["message_id"] for r in rows}
+
+        kept_ids: list[int] = []
+        kept_scores: list[float] = []
+        for eid, sc in zip(emb_ids, scores):
+            mid = emb_to_msg.get(int(eid))
+            if mid is not None and mid in candidate_set:
+                kept_ids.append(int(eid))
+                kept_scores.append(float(sc))
+                if len(kept_ids) >= fetch_k:
+                    break
+        return kept_ids, kept_scores
+
     def _fetch_embedding_rows(self, embedding_ids: list[int]):
         conn = get_connection(self.db_path)
         placeholders = ",".join(["%s"] * len(embedding_ids))
@@ -479,6 +666,23 @@ class SearchEngine:
         date_from = date_from or pq.date_from
         date_to = date_to or pq.date_to
 
+        # Pre-restrict the candidate corpus using structured filters
+        # (from:/to:/subject:/date/has_attachment). This guarantees recall:
+        # if the user asks for "board notes from:david", we search *only
+        # within David's mail*, instead of hoping David's 3 messages survive
+        # a top-200 ScaNN pass over the whole index. `None` = no filter
+        # active (full corpus); `[]` = filter matched zero rows (short
+        # circuit to an empty result).
+        conn_pre = get_connection(self.db_path)
+        try:
+            candidate_ids = self._resolve_candidate_msg_ids(pq, conn_pre, date_from, date_to)
+        finally:
+            conn_pre.close()
+
+        if candidate_ids is not None and len(candidate_ids) == 0:
+            logger.info("Structured filter matched zero messages; returning []")
+            return []
+
         # When a date filter is present, ScaNN's top-K might all fall
         # outside the window, leaving us zero results even though there
         # are relevant matches further down the similarity ranking.
@@ -488,7 +692,14 @@ class SearchEngine:
         has_date_filter = bool(date_from or date_to)
         fetch_k_target = max(top_k * 10, 2000) if has_date_filter else top_k * 10
         fetch_k = min(fetch_k_target, len(self.searcher.embedding_ids))
-        embedding_ids, scores = self.searcher.search(query_vector, top_k=fetch_k)
+
+        if candidate_ids is None:
+            embedding_ids, scores = self.searcher.search(query_vector, top_k=fetch_k)
+        else:
+            # Structured filter active — vector search runs only over the
+            # pre-filtered candidate set. Small N → brute-force cosine;
+            # large N → ScaNN with overfetch + filter.
+            embedding_ids, scores = self._restricted_vector_search(query_vector, candidate_ids, fetch_k)
 
         # If ScaNN has no results, we still continue to pick up BM25-only matches below
         row_map = self._fetch_embedding_rows(embedding_ids) if embedding_ids else {}
@@ -544,37 +755,17 @@ class SearchEngine:
         # BM25 with expanded query (includes alias terms) + original query.
         # Bump the FTS limit when a date filter is present — just like
         # ScaNN, the top-200 matches across all time might all fall
-        # outside a tight window.
+        # outside a tight window. When `candidate_ids` is set, BM25 runs
+        # only within that restricted corpus (SQL-level `id = ANY(...)`),
+        # so the date-window SQL post-filter below becomes redundant.
         bm25_limit = 2000 if has_date_filter else 200
-        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=bm25_limit)
+        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=bm25_limit, candidate_ids=candidate_ids)
         if expanded_query.lower() != query.lower():
             original_pq = parse_query(query)
-            original_bm25 = search_fts(conn, original_pq.text or query, limit=bm25_limit)
+            original_bm25 = search_fts(conn, original_pq.text or query, limit=bm25_limit, candidate_ids=candidate_ids)
             for mid, score in original_bm25.items():
                 if mid not in bm25_scores or score > bm25_scores[mid]:
                     bm25_scores[mid] = score
-
-        # Pre-filter BM25 message_ids by date at SQL level so we waste
-        # no downstream work on messages outside the window.
-        if has_date_filter and bm25_scores:
-            ids = list(bm25_scores.keys())
-            placeholders = ",".join(["%s"] * len(ids))
-            date_where: list[str] = []
-            params: list = list(ids)
-            if date_from:
-                date_where.append("date >= %s")
-                params.append(f"{date_from}T00:00:00")
-            if date_to:
-                date_where.append("date <= %s")
-                params.append(f"{date_to}T23:59:59")
-            in_window = {
-                r["id"]
-                for r in conn.execute(
-                    f"SELECT id FROM messages WHERE id IN ({placeholders}) AND " + " AND ".join(date_where),
-                    params,
-                ).fetchall()
-            }
-            bm25_scores = {mid: s for mid, s in bm25_scores.items() if mid in in_window}
 
         # Merge BM25-only results: threads that BM25 found but ScaNN missed
         scann_message_ids = set()
@@ -658,18 +849,10 @@ class SearchEngine:
 
             user_replied = self._user_in_participants(from_addrs)
 
-            # Apply structured filters — skip threads that don't match.
-            # Date filters flow through the shared post-filter below,
-            # so we don't repeat that logic here.
-            if pq.from_filter:
-                if not any(pq.from_filter.lower() in a.lower() for a in from_addrs):
-                    continue
-            if pq.to_filter:
-                if pq.to_filter.lower() not in " ".join(participants).lower():
-                    continue
-            if pq.subject_filter:
-                if pq.subject_filter.lower() not in (subject or "").lower():
-                    continue
+            # Structured filters (from:/to:/subject:/date/has_attachment)
+            # are now enforced by the candidate pre-filter above, not a
+            # thread-level post-filter. Every match this thread contains
+            # is guaranteed to satisfy every structured predicate.
 
             # Compute blended score
             sim = tdata["best_sim"]
@@ -714,46 +897,10 @@ class SearchEngine:
 
         conn.close()
 
-        # Apply optional date range. We filter MESSAGE-level matches first
-        # and drop threads that have nothing left, so "construction last
-        # week" surfaces only threads that actually had last-week traffic.
-        # Relevance ranking still drives the order — this is a post-filter,
-        # not a replacement for ScaNN+BM25.
-        if date_from or date_to:
-            lo = f"{date_from}T00:00:00" if date_from else None
-            hi = f"{date_to}T23:59:59" if date_to else None
-
-            def in_window(d: str) -> bool:
-                if lo and d < lo:
-                    return False
-                if hi and d > hi:
-                    return False
-                return True
-
-            filtered: list[ThreadResult] = []
-            for t in thread_results:
-                kept = [m for m in t.matches if in_window(m.date)]
-                if kept:
-                    t.matches = kept
-                    filtered.append(t)
-            thread_results = filtered
-
-        # has:attachment — restrict to threads where at least one message
-        # carries an attachment. One SQL pass against the candidate
-        # thread_ids keeps this O(K) rather than O(K) queries.
-        if pq.has_attachment and thread_results:
-            tid_list = [t.thread_id for t in thread_results]
-            placeholders = ",".join(["%s"] * len(tid_list))
-            conn_a = get_connection(self.db_path)
-            rows = conn_a.execute(
-                f"""SELECT DISTINCT m.thread_id FROM messages m
-                    JOIN attachments a ON a.message_id = m.id
-                    WHERE m.thread_id IN ({placeholders})""",
-                tid_list,
-            ).fetchall()
-            conn_a.close()
-            with_att = {r["thread_id"] for r in rows}
-            thread_results = [t for t in thread_results if t.thread_id in with_att]
+        # Date range + has:attachment post-filters are retired: the
+        # candidate pre-filter restricts the corpus at the message level,
+        # so every surviving match is already in-window / has an attachment.
+        # Previously this was a post-filter on top of ScaNN+BM25 results.
 
         if sort == "recent":
             thread_results.sort(key=lambda t: t.date_last, reverse=True)
