@@ -244,26 +244,6 @@ def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
     return {r["thread_id"]: (r["body_text"] or "")[:500] for r in rows}
 
 
-def _latest_message_id_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
-    """Map thread_id → the ID of its latest-dated message. Used to join
-    `message_summaries` (keyed by message_id) back to the thread-level
-    row the inbox UI renders.
-    """
-    if not thread_ids:
-        return {}
-    placeholders = ",".join(["%s"] * len(thread_ids))
-    rows = conn.execute(
-        f"""SELECT m.thread_id, m.id FROM messages m
-            INNER JOIN (
-                SELECT thread_id, MAX(date) as max_date
-                FROM messages WHERE thread_id IN ({placeholders})
-                GROUP BY thread_id
-            ) latest ON m.thread_id = latest.thread_id AND m.date = latest.max_date""",
-        thread_ids,
-    ).fetchall()
-    return {r["thread_id"]: r["id"] for r in rows}
-
-
 def _run_structured_query(
     db_path: Path,
     sender: str | None,
@@ -506,48 +486,94 @@ def create_app(
         labels, newest-first, grouped by thread. Matches Gmail's own
         "Priority Inbox" definition (Important + in the inbox).
         """
+        import json as _json
+
         conn = get_connection(db_path)
         try:
-            # "Priority" = the thread contains at least one IMPORTANT+INBOX
-            # message. Sort by the thread's overall last activity
-            # (`date_last`) so the order the UI shows matches the date the
-            # UI displays — not the date of the most recent priority
-            # message, which can differ when a later reply lands without
-            # the IMPORTANT flag.
+            # One query, one round-trip. Previous version fired four
+            # (thread-id list → thread_summary bulk → latest-message-id
+            # bulk → summaries bulk). CTEs:
+            #   priority_threads — IMPORTANT+INBOX threads, paginated.
+            #                      Sort by `date_last` so the UI order
+            #                      matches the date the UI displays.
+            #   latest_msg       — DISTINCT ON (thread_id) gives the
+            #                      newest-dated message per thread, from
+            #                      which we pull id + from_addr + body.
+            # Final LEFT JOIN pulls in the latest summary (message_summaries
+            # is keyed by message_id, at most one row per message).
             rows = conn.execute(
-                """SELECT ts.thread_id FROM thread_summary ts
-                   WHERE EXISTS (
-                     SELECT 1 FROM messages m
-                     WHERE m.thread_id = ts.thread_id
-                       AND m.labels LIKE %s
-                       AND m.labels LIKE %s
-                   )
-                   ORDER BY ts.date_last DESC
-                   LIMIT %s OFFSET %s""",
+                """
+                WITH priority_threads AS (
+                    SELECT ts.thread_id,
+                           ts.subject,
+                           ts.participants,
+                           ts.message_count,
+                           ts.date_first,
+                           ts.date_last
+                    FROM thread_summary ts
+                    WHERE EXISTS (
+                        SELECT 1 FROM messages m
+                        WHERE m.thread_id = ts.thread_id
+                          AND m.labels LIKE %s
+                          AND m.labels LIKE %s
+                    )
+                    ORDER BY ts.date_last DESC
+                    LIMIT %s OFFSET %s
+                ),
+                latest_msg AS (
+                    SELECT DISTINCT ON (m.thread_id)
+                           m.thread_id,
+                           m.id AS latest_message_id,
+                           m.from_addr AS latest_from_addr,
+                           m.body_text AS latest_body
+                    FROM messages m
+                    WHERE m.thread_id IN (SELECT thread_id FROM priority_threads)
+                    ORDER BY m.thread_id, m.date DESC
+                )
+                SELECT pt.thread_id,
+                       pt.subject,
+                       pt.participants,
+                       pt.message_count,
+                       pt.date_first,
+                       pt.date_last,
+                       lm.latest_message_id,
+                       lm.latest_from_addr,
+                       lm.latest_body,
+                       ms.summary,
+                       ms.model       AS summary_model,
+                       ms.created_at  AS summary_created_at
+                FROM priority_threads pt
+                JOIN latest_msg lm USING (thread_id)
+                LEFT JOIN message_summaries ms
+                       ON ms.message_id = lm.latest_message_id
+                ORDER BY pt.date_last DESC
+                """,
                 ('%"IMPORTANT"%', '%"INBOX"%', limit, offset),
             ).fetchall()
-            thread_ids = [r["thread_id"] for r in rows]
-            threads = _load_thread_summaries(conn, thread_ids)
 
-            # Attach the latest message's summary per thread so the UI row
-            # shows the LLM-written one-liner instead of the raw body
-            # snippet. Without this, every inbox row flashed "(no summary
-            # yet)" even when a fresh summary existed in the DB.
-            latest_msg_ids = _latest_message_id_per_thread(conn, thread_ids)
-            from gmail_search.summarize import get_summaries_bulk_meta
-
-            meta = get_summaries_bulk_meta(conn, latest_msg_ids.values())
-            for t in threads:
-                mid = latest_msg_ids.get(t["thread_id"])
-                m = meta.get(mid) if mid else None
-                if m:
-                    t["summary"] = m["summary"]
-                    t["summary_model"] = m["model"]
-                    t["summary_created_at"] = m["created_at"]
-                    t["latest_message_id"] = mid
-                elif mid:
-                    t["latest_message_id"] = mid
-            return {"results": threads}
+            results = []
+            for r in rows:
+                row: dict = {
+                    "thread_id": r["thread_id"],
+                    "subject": r["subject"],
+                    "participants": _json.loads(r["participants"]),
+                    "message_count": r["message_count"],
+                    "date_first": r["date_first"],
+                    "date_last": r["date_last"],
+                    "snippet": (r["latest_body"] or "")[:500],
+                    "latest_message_id": r["latest_message_id"],
+                    "latest_from_addr": r["latest_from_addr"],
+                }
+                if r["summary"]:
+                    row["summary"] = r["summary"]
+                    row["summary_model"] = r["summary_model"]
+                    row["summary_created_at"] = (
+                        r["summary_created_at"].isoformat()
+                        if hasattr(r["summary_created_at"], "isoformat")
+                        else r["summary_created_at"]
+                    )
+                results.append(row)
+            return {"results": results}
         finally:
             conn.close()
 

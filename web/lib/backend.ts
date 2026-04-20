@@ -55,6 +55,10 @@ export type QueryThread = {
   summary_model?: string | null;
   summary_created_at?: string | null;
   latest_message_id?: string;
+  // `from_addr` of the thread's latest-dated message — avoids showing
+  // the user's own name when they were the first participant of a
+  // thread but a reply came in later.
+  latest_from_addr?: string;
 };
 
 export const searchEmailsBackend = async (args: {

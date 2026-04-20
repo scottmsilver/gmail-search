@@ -15,7 +15,9 @@ const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "http://127.0.0.1
 // zero out everything else. This keeps the visual rendering identical
 // to the search view for free.
 const toSearchThread = (t: QueryThread): SearchThread => {
-  const topFrom = t.participants[0] ?? "?";
+  // Prefer the actual sender of the latest message (backend populates
+  // this). Fall back to participants[0] only for pre-upgrade responses.
+  const topFrom = t.latest_from_addr ?? t.participants[0] ?? "?";
   return {
     thread_id: t.thread_id,
     score: 0,
