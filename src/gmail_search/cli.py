@@ -972,31 +972,64 @@ def status(ctx):
     default=1,
     help="Emails per LLM call (default 1). Batching regresses on small GPUs — leave at 1 unless benched.",
 )
-@click.option("--limit", type=int, default=None, help="Max messages to process this run")
+@click.option("--limit", type=int, default=None, help="Max messages per backfill pass (default: all pending)")
+@click.option(
+    "--loop",
+    is_flag=True,
+    default=False,
+    help="Keep running — after each pass, re-query pending and start again. "
+    "Combined with a small --limit this makes newly-arrived mail jump to "
+    "the front (pending is ORDER BY date DESC) so the summarizer tracks "
+    "the live inbox instead of grinding through a stale snapshot.",
+)
+@click.option(
+    "--loop-batch",
+    type=int,
+    default=500,
+    help="When --loop is set and --limit is not, cap each pass at this many messages (default 500).",
+)
+@click.option(
+    "--loop-sleep",
+    type=float,
+    default=5.0,
+    help="Seconds to sleep between passes when --loop is set and the last pass found nothing (default 5).",
+)
 @common_options
 @click.pass_context
-def summarize(ctx, concurrency, batch_size, limit):
+def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep):
     import logging
+    import time
 
     from gmail_search.llm import get_backend
     from gmail_search.summarize import backfill
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     backend = get_backend()
+    pass_limit = limit if limit is not None else (loop_batch if loop else None)
     click.echo(
         f"Summarizing via {type(backend).__name__} (model={backend.model_id}, "
-        f"concurrency={concurrency}, batch_size={batch_size}, limit={limit})"
+        f"concurrency={concurrency}, batch_size={batch_size}, "
+        f"limit={pass_limit}, loop={loop})"
     )
-    result = backfill(
-        ctx.obj["db_path"],
-        concurrency=concurrency,
-        batch_size=batch_size,
-        limit=limit,
-    )
-    click.echo(
-        f"Done: {result['done']}/{result['total']} summarized "
-        f"({result['failed']} failed, {result['auto_classified']} auto) in {result['seconds']}s"
-    )
+
+    while True:
+        result = backfill(
+            ctx.obj["db_path"],
+            concurrency=concurrency,
+            batch_size=batch_size,
+            limit=pass_limit,
+        )
+        click.echo(
+            f"Pass: {result['done']}/{result['total']} summarized "
+            f"({result['failed']} failed, {result['auto_classified']} auto) in {result['seconds']}s"
+        )
+        if not loop:
+            break
+        # Idle sleep when nothing to do; otherwise loop straight into the
+        # next pass so newly-arrived mail gets picked up within one
+        # batch's latency.
+        if result["total"] == 0:
+            time.sleep(loop_sleep)
 
 
 @main.command(help="Start the web UI")
