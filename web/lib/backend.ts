@@ -9,6 +9,10 @@ export type ThreadMatch = {
   match_type: string;
   attachment_filename: string | null;
   summary?: string;
+  // Debug metadata so the search UI can show where each summary
+  // came from (which prompt version, how stale).
+  summary_model?: string | null;
+  summary_created_at?: string | null;
 };
 
 export type SearchThread = {
@@ -223,6 +227,11 @@ export type CorpusStatus = {
   date_newest: string | null;
   total_cost_usd: number;
   budget_remaining_usd: number;
+  // Search-side spend. `query_embeds` = distinct query texts cached,
+  // `query_embed_cost_usd` = sum of Gemini charges for those embeds
+  // (search-as-you-type pays per debounce-boundary keystroke).
+  query_embeds?: number;
+  query_embed_cost_usd?: number;
   running_job: { stage?: string } | null;
 };
 

@@ -314,7 +314,15 @@ class SearchEngine:
                     raise
 
     def _embed_query(self, query: str) -> np.ndarray:
-        """Embed a query, checking persistent cache first to avoid repeat API calls."""
+        """Embed a query, checking persistent cache first to avoid repeat
+        API calls. Records a cost row on cache MISS so the ledger
+        reflects search-as-you-type spend — previously silent, which
+        made the cost badge look artificially low. A ~10-token query
+        at $0.20/1M tokens ≈ $0.000002, so the recorded values are
+        tiny but the sum-over-time is now visible.
+        """
+        from gmail_search.store.cost import record_cost
+
         cache_key = query.lower().strip()
 
         cached = self._get_cached_embedding(cache_key)
@@ -324,6 +332,32 @@ class SearchEngine:
 
         vector = self._call_embedding_api_with_retry(query)
         self._store_cached_embedding(cache_key, vector)
+
+        try:
+            # Token estimate: Gemini's embedding tokenizer sits around
+            # 4 chars/token for English prose — good enough for ledger
+            # accuracy. We'd only need the real count if per-call cost
+            # mattered, and at fractions of a cent each it doesn't.
+            from gmail_search.store.cost import estimate_cost
+
+            est_tokens = max(1, len(query) // 4)
+            conn = get_connection(self.db_path)
+            try:
+                record_cost(
+                    conn,
+                    operation="embed_query",
+                    model=self.config["embedding"]["model"],
+                    input_tokens=est_tokens,
+                    image_count=0,
+                    estimated_cost_usd=estimate_cost(input_tokens=est_tokens),
+                    message_id="",
+                )
+            finally:
+                conn.close()
+        except Exception:
+            # Cost-ledger failures must never block a search.
+            pass
+
         return np.array(vector, dtype=np.float32)
 
     def _fetch_embedding_rows(self, embedding_ids: list[int]):

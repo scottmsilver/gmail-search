@@ -5,7 +5,16 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# Gmail is the core read scope. `drive.readonly` is required for the
+# Drive enrichment path (fetching linked Google Docs/Sheets/Slides by
+# body-scanning for drive.google.com URLs). Adding the scope here
+# means stored tokens issued before this change will miss it: the
+# user must delete `data/token.json` and re-auth once to unlock
+# Drive features. Gmail-only flows keep working with the old token.
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
 
 def get_credentials(data_dir: Path) -> Credentials:

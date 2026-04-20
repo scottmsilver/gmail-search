@@ -19,6 +19,29 @@ const SEND_ICON = (
   </svg>
 );
 
+// Spinner + stop-square rendered together: the ring conveys "working"
+// while the filled square doubles as the click target + affordance
+// for "stop". Uses CSS animation so it keeps spinning across rerenders.
+const WORKING_ICON = (
+  <span className="relative inline-flex h-5 w-5 items-center justify-center">
+    <svg
+      className="absolute h-5 w-5 animate-spin text-neutral-400"
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+      <path
+        d="M4 12a8 8 0 018-8"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
+    <span className="h-2 w-2 rounded-sm bg-neutral-900" aria-hidden="true" />
+  </span>
+);
+
 const TextPart = ({ text }: { text: string }) => <MarkdownText text={text} />;
 
 const UserMessage = () => (
@@ -74,12 +97,26 @@ const Composer = () => (
         rows={1}
         autoFocus
       />
-      <ComposerPrimitive.Send
-        aria-label="Send"
-        className="self-end w-7 h-7 flex items-center justify-center text-neutral-500 hover:text-neutral-900 disabled:opacity-30 disabled:hover:text-neutral-500 transition-colors"
-      >
-        {SEND_ICON}
-      </ComposerPrimitive.Send>
+      {/* assistant-ui's ComposerPrimitive.Cancel renders in every state,
+          so to swap icons we gate each branch on ThreadPrimitive.If —
+          `running` for the stop + spinner, its inverse for send. */}
+      <ThreadPrimitive.If running={false}>
+        <ComposerPrimitive.Send
+          aria-label="Send"
+          className="self-end w-7 h-7 flex items-center justify-center text-neutral-500 hover:text-neutral-900 disabled:opacity-30 disabled:hover:text-neutral-500 transition-colors"
+        >
+          {SEND_ICON}
+        </ComposerPrimitive.Send>
+      </ThreadPrimitive.If>
+      <ThreadPrimitive.If running>
+        <ComposerPrimitive.Cancel
+          aria-label="Stop"
+          title="Stop generating"
+          className="self-end w-7 h-7 flex items-center justify-center text-neutral-700 hover:text-neutral-900 transition-colors"
+        >
+          {WORKING_ICON}
+        </ComposerPrimitive.Cancel>
+      </ThreadPrimitive.If>
     </div>
   </ComposerPrimitive.Root>
 );

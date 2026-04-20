@@ -26,7 +26,7 @@ def test_reindex_full_runs_every_step(tmp_path):
     db_path.touch()
 
     targets = [
-        "gmail_search.pipeline.build_index",
+        "gmail_search.pipeline.build_index_sharded",
         "gmail_search.pipeline.rebuild_fts",
         "gmail_search.pipeline.rebuild_thread_summary",
         "gmail_search.pipeline.rebuild_contact_frequency",
@@ -37,7 +37,7 @@ def test_reindex_full_runs_every_step(tmp_path):
     ]
     with patch.multiple(
         "gmail_search.pipeline",
-        build_index=DEFAULT,
+        build_index_sharded=DEFAULT,
         rebuild_fts=DEFAULT,
         rebuild_thread_summary=DEFAULT,
         rebuild_contact_frequency=DEFAULT,
@@ -68,7 +68,7 @@ def test_reindex_light_skips_heavy_rebuilds(tmp_path):
 
     with patch.multiple(
         "gmail_search.pipeline",
-        build_index=DEFAULT,
+        build_index_sharded=DEFAULT,
         rebuild_fts=DEFAULT,
         rebuild_thread_summary=DEFAULT,
         rebuild_contact_frequency=DEFAULT,
@@ -81,7 +81,7 @@ def test_reindex_light_skips_heavy_rebuilds(tmp_path):
 
     # These three must run on every cycle — they're how the searcher
     # sees new messages.
-    assert m["build_index"].called
+    assert m["build_index_sharded"].called
     assert m["rebuild_fts"].called
     assert m["rebuild_thread_summary"].called
 

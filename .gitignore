@@ -26,3 +26,7 @@ build/
 .env.*
 .gstack/
 .claude/
+
+# Bench run output — reproducible from scripts/bench_w4.py +
+# scripts/bench_sample*.json. 1.6 MB of JSON shouldn't bloat the repo.
+scripts/bench_out/

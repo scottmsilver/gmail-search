@@ -301,19 +301,21 @@ def test_sharded_builder_writes_manifest_and_partitions_ids(tmp_path):
     _seed_db_with_random_embeddings(db_path, n=250, dims=dims)
     index_dir = tmp_path / "scann_sharded"
 
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
+    # build_index_sharded with a pointer-enabled DB writes to a
+    # versioned sibling and returns the actual path.
+    actual_dir = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
 
-    manifest = json.loads((index_dir / "manifest.json").read_text())
+    manifest = json.loads((actual_dir / "manifest.json").read_text())
     assert manifest["num_shards"] == 3
     assert manifest["dimensions"] == dims
     assert manifest["shard_size"] == 100
 
-    all_ids = load_index_metadata(index_dir)
+    all_ids = load_index_metadata(actual_dir)
     assert len(all_ids) == 250
 
     shard_id_sets: list[list[int]] = []
     for i in range(3):
-        shard_dir = index_dir / f"shard_{i}"
+        shard_dir = actual_dir / f"shard_{i}"
         assert shard_dir.is_dir()
         shard_ids = json.loads((shard_dir / "ids.json").read_text())
         shard_id_sets.append(shard_ids)
@@ -323,7 +325,7 @@ def test_sharded_builder_writes_manifest_and_partitions_ids(tmp_path):
     assert len(set(flat)) == len(flat)
 
     for i in range(3):
-        tmp_files = [p.name for p in (index_dir / f"shard_{i}").iterdir() if ".tmp" in p.name]
+        tmp_files = [p.name for p in (actual_dir / f"shard_{i}").iterdir() if ".tmp" in p.name]
         assert tmp_files == []
 
 
@@ -342,10 +344,10 @@ def test_sharded_brute_force_equals_unsharded_brute_force_exactly(tmp_path):
     build_index(db_path, ram_dir, model="test-model", dimensions=dims)
 
     sharded_dir = tmp_path / "scann_sharded"
-    build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=30)
+    actual_sharded = build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=30)
 
     ram = ScannSearcher(ram_dir, dimensions=dims)
-    sharded = ScannSearcher(sharded_dir, dimensions=dims)
+    sharded = ScannSearcher(actual_sharded, dimensions=dims)
 
     rng = random.Random(1)
     for _ in range(20):
@@ -370,13 +372,13 @@ def test_sharded_single_shard_degenerate_case_equals_unsharded(tmp_path):
     build_index(db_path, ram_dir, model="test-model", dimensions=dims)
 
     sharded_dir = tmp_path / "scann_sharded"
-    build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=n)
+    actual_sharded = build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=n)
 
-    manifest = json.loads((sharded_dir / "manifest.json").read_text())
+    manifest = json.loads((actual_sharded / "manifest.json").read_text())
     assert manifest["num_shards"] == 1
 
     ram = ScannSearcher(ram_dir, dimensions=dims)
-    sharded = ScannSearcher(sharded_dir, dimensions=dims)
+    sharded = ScannSearcher(actual_sharded, dimensions=dims)
 
     rng = random.Random(7)
     for _ in range(10):
@@ -395,22 +397,24 @@ def test_sharded_builder_rebuild_cleans_old_shards(tmp_path):
     _seed_db_with_random_embeddings(db_path, n=250, dims=dims)
     index_dir = tmp_path / "scann_sharded"
 
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
-    assert (index_dir / "shard_2").is_dir()
+    first = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
+    assert (first / "shard_2").is_dir()
 
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=300)
-    manifest = json.loads((index_dir / "manifest.json").read_text())
+    second = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=300)
+    manifest = json.loads((second / "manifest.json").read_text())
     assert manifest["num_shards"] == 1
-    assert not (index_dir / "shard_1").exists()
-    assert not (index_dir / "shard_2").exists()
+    assert not (second / "shard_1").exists()
+    assert not (second / "shard_2").exists()
+    # Old build directory should have been GC'd once the pointer flipped.
+    assert not first.exists(), "old versioned build should have been removed after promotion"
 
 
 def test_sharded_builder_empty_db(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)
     index_dir = tmp_path / "scann_sharded"
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=16, shard_size=100)
-    assert load_index_metadata(index_dir) == []
+    actual = build_index_sharded(db_path, index_dir, model="test-model", dimensions=16, shard_size=100)
+    assert load_index_metadata(actual) == []
 
 
 def test_scann_searcher_loads_legacy_single_index_unchanged(tmp_path):
@@ -455,21 +459,23 @@ def test_sharded_builder_writes_manifest_and_partitions_ids(tmp_path):
     _seed_db_with_random_embeddings(db_path, n=250, dims=dims)
     index_dir = tmp_path / "scann_sharded"
 
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
+    # Builder returns the real on-disk path (versioned sibling when
+    # the pointer table exists in the db).
+    actual_dir = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
 
-    manifest = json.loads((index_dir / "manifest.json").read_text())
+    manifest = json.loads((actual_dir / "manifest.json").read_text())
     assert manifest["num_shards"] == 3  # ceil(250/100)
     assert manifest["dimensions"] == dims
     assert manifest["shard_size"] == 100
 
-    all_ids = load_index_metadata(index_dir)
+    all_ids = load_index_metadata(actual_dir)
     assert len(all_ids) == 250
 
     # Each shard directory exists, has its own ids.json, and the union
     # equals the top-level ids with no duplicates.
     shard_id_sets: list[list[int]] = []
     for i in range(3):
-        shard_dir = index_dir / f"shard_{i}"
+        shard_dir = actual_dir / f"shard_{i}"
         assert shard_dir.is_dir()
         shard_ids = json.loads((shard_dir / "ids.json").read_text())
         shard_id_sets.append(shard_ids)
@@ -480,7 +486,7 @@ def test_sharded_builder_writes_manifest_and_partitions_ids(tmp_path):
 
     # No leftover temp files.
     for i in range(3):
-        tmp_files = [p.name for p in (index_dir / f"shard_{i}").iterdir() if ".tmp" in p.name]
+        tmp_files = [p.name for p in (actual_dir / f"shard_{i}").iterdir() if ".tmp" in p.name]
         assert tmp_files == []
 
 
@@ -499,10 +505,10 @@ def test_sharded_builder_search_matches_unsharded(tmp_path):
     build_index(db_path, ram_dir, model="test-model", dimensions=dims)
 
     sharded_dir = tmp_path / "scann_sharded"
-    build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=150)
+    actual_sharded = build_index_sharded(db_path, sharded_dir, model="test-model", dimensions=dims, shard_size=150)
 
     ram_searcher = ScannSearcher(ram_dir, dimensions=dims)
-    sharded_searcher = ScannSearcher(sharded_dir, dimensions=dims)
+    sharded_searcher = ScannSearcher(actual_sharded, dimensions=dims)
 
     rng = random.Random(42)
     total_overlap = 0
@@ -532,23 +538,26 @@ def test_sharded_builder_rebuild_cleans_old_shards(tmp_path):
     index_dir = tmp_path / "scann_sharded"
 
     # First build: 3 shards.
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
-    assert (index_dir / "shard_2").is_dir()
+    first = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
+    assert (first / "shard_2").is_dir()
 
-    # Now rebuild with a larger shard_size → fewer shards.
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=300)
-    manifest = json.loads((index_dir / "manifest.json").read_text())
+    # Now rebuild with a larger shard_size → fewer shards. Under the
+    # DB-pointer flow the second build writes to a NEW versioned dir
+    # and GC's the old one; the manifest lives at that new path.
+    second = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=300)
+    manifest = json.loads((second / "manifest.json").read_text())
     assert manifest["num_shards"] == 1
-    assert not (index_dir / "shard_1").exists()
-    assert not (index_dir / "shard_2").exists()
+    assert not (second / "shard_1").exists()
+    assert not (second / "shard_2").exists()
+    assert not first.exists(), "old versioned build should have been GC'd after promotion"
 
 
 def test_sharded_builder_empty_db(tmp_path):
     db_path = tmp_path / "test.db"
     init_db(db_path)
     index_dir = tmp_path / "scann_sharded"
-    build_index_sharded(db_path, index_dir, model="test-model", dimensions=16, shard_size=100)
-    assert load_index_metadata(index_dir) == []
+    actual = build_index_sharded(db_path, index_dir, model="test-model", dimensions=16, shard_size=100)
+    assert load_index_metadata(actual) == []
 
 
 def test_scann_searcher_loads_legacy_single_index(tmp_path):

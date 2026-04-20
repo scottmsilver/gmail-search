@@ -9,6 +9,38 @@ import scann
 logger = logging.getLogger(__name__)
 
 
+def resolve_active_index_dir(db_path: Path, fallback: Path) -> Path:
+    """Return the active on-disk ScaNN index directory, consulting the
+    `scann_index_pointer` row in SQLite first and falling back to
+    `fallback` (typically `data/scann_index`) when the pointer is
+    absent or points at a missing path.
+
+    Every search-path caller (server, CLI query, battle mode) should
+    route through this instead of hard-coding `data_dir / "scann_index"`
+    so a reindex swap is picked up without a process restart.
+    """
+    from gmail_search.store.db import get_connection
+
+    try:
+        conn = get_connection(db_path)
+    except Exception:
+        return fallback
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='scann_index_pointer'"
+        ).fetchone()
+        if row is None:
+            return fallback
+        row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+    if row and row["current_dir"]:
+        active = Path(row["current_dir"])
+        if active.exists():
+            return active
+    return fallback
+
+
 class ScannSearcher:
     """Loads a ScaNN index produced by either build_index (single) or
     build_index_sharded (multi-shard). Sharded indexes query each shard
@@ -37,15 +69,35 @@ class ScannSearcher:
             self._load_legacy_single()
 
     def _load_sharded(self, manifest: dict) -> None:
+        # Tolerate missing/partial shards: the sharded builder writes
+        # manifest.json LAST, but we still defend against a torn read
+        # during a concurrent reindex (old manifest, new half-written
+        # shard dirs). Missing shards drop out of the search, which is
+        # strictly better than a 500 on the whole query path.
         for i in range(manifest["num_shards"]):
             shard_dir = self.index_dir / f"shard_{i}"
-            shard_ids = json.loads((shard_dir / "ids.json").read_text())
+            ids_file = shard_dir / "ids.json"
+            if not ids_file.exists():
+                logger.warning("shard_%d missing ids.json; skipping — reindex may be in progress", i)
+                continue
+            try:
+                shard_ids = json.loads(ids_file.read_text())
+            except Exception as e:
+                logger.warning("shard_%d ids.json unreadable (%s); skipping", i, e)
+                continue
             if not shard_ids:
                 continue
-            searcher = scann.scann_ops_pybind.load_searcher(str(shard_dir))
+            try:
+                searcher = scann.scann_ops_pybind.load_searcher(str(shard_dir))
+            except Exception as e:
+                logger.warning("shard_%d load_searcher failed (%s); skipping", i, e)
+                continue
             self._shards.append((searcher, shard_ids))
         logger.info(
-            f"Loaded sharded ScaNN index: {len(self._shards)} shards, " f"{len(self.embedding_ids)} total vectors"
+            "Loaded sharded ScaNN index: %d/%d shards, %d total vectors",
+            len(self._shards),
+            manifest["num_shards"],
+            len(self.embedding_ids),
         )
 
     def _load_legacy_single(self) -> None:

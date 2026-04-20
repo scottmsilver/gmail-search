@@ -3,12 +3,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from googleapiclient.discovery import Resource
+from tqdm import tqdm
+
+from gmail_search.gmail.drive import drive_mime_for_kind, extract_drive_ids
 from gmail_search.gmail.parser import parse_message
 from gmail_search.store.db import get_connection
 from gmail_search.store.models import Attachment
-from gmail_search.store.queries import get_sync_state, set_sync_state, upsert_attachment, upsert_message
-from googleapiclient.discovery import Resource
-from tqdm import tqdm
+from gmail_search.store.queries import (
+    get_sync_state,
+    set_sync_state,
+    upsert_attachment,
+    upsert_drive_stub,
+    upsert_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +164,16 @@ def download_messages(
             if msg.history_id > max_history_id:
                 max_history_id = msg.history_id
 
+            # Any Drive URL in the body becomes a stub attachment row.
+            # The `extract` step fetches the real content via the
+            # Drive API and fills in extracted_text, so the content
+            # flows through embed → search → summarize just like any
+            # local attachment. No separate enrichment job needed.
+            # Layering: regex lives in gmail/drive (API client code),
+            # the INSERT lives in store/queries (schema owner).
+            for drive_id, kind in extract_drive_ids(msg.body_text or ""):
+                upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
+
             for att_meta in att_metas:
                 if att_meta["size"] > max_attachment_size:
                     logger.warning(
@@ -263,6 +281,10 @@ def sync_new_messages(
 
         if msg.history_id > max_history_id:
             max_history_id = msg.history_id
+
+        # Drive stubs (same rationale as download_messages above).
+        for drive_id, kind in extract_drive_ids(msg.body_text or ""):
+            upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
 
         for att_meta in att_metas:
             if att_meta["size"] > max_attachment_size:

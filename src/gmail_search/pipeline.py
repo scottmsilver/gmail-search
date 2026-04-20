@@ -20,7 +20,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from gmail_search.index.builder import build_index
+from gmail_search.index.builder import build_index_sharded, shard_size_from_budget
 from gmail_search.store.db import (
     clear_query_cache,
     rebuild_contact_frequency,
@@ -33,6 +33,14 @@ from gmail_search.store.db import (
 
 logger = logging.getLogger(__name__)
 
+# Default cap on the per-shard ScaNN build peak. Matches the default
+# in config.yaml; can be overridden via cfg['indexing']['scann_peak_budget_mb'].
+# ScaNN's full-corpus build peaks at ~4× raw float32 size — at 400K ×
+# 3072 dims that's ~18 GiB peak and has OOM'd this box before. The
+# sharded builder keeps each shard's peak under this cap; the searcher
+# merges shards at query time with no change to the API.
+_DEFAULT_SCANN_BUDGET_MB = 2048
+
 
 def reindex(db_path: Path, data_dir: Path, cfg: dict[str, Any], *, light: bool = False) -> None:
     """Rebuild the on-disk surfaces that back /api/search.
@@ -43,13 +51,28 @@ def reindex(db_path: Path, data_dir: Path, cfg: dict[str, Any], *, light: bool =
                   aliases) and wipes the query embedding cache.
                   What the `reindex` CLI + post-backfill path run.
     """
+    # `index_dir` is the canonical PREFIX. `build_index_sharded` writes
+    # a timestamped sibling and flips the DB pointer row; readers
+    # resolve through `resolve_active_index_dir` so a mid-reindex
+    # query always lands on a fully-written build.
     index_dir = Path(data_dir) / "scann_index"
-    build_index(
+    dimensions = int(cfg["embedding"]["dimensions"])
+    budget_mb = int(cfg.get("indexing", {}).get("scann_peak_budget_mb", _DEFAULT_SCANN_BUDGET_MB))
+    shard_size = shard_size_from_budget(budget_mb, dimensions)
+    logger.info(
+        "reindex: sharded build with shard_size=%d (budget=%d MiB, dims=%d)",
+        shard_size,
+        budget_mb,
+        dimensions,
+    )
+    written_to = build_index_sharded(
         db_path=db_path,
         index_dir=index_dir,
         model=cfg["embedding"]["model"],
-        dimensions=cfg["embedding"]["dimensions"],
+        dimensions=dimensions,
+        shard_size=shard_size,
     )
+    logger.info("reindex: active ScaNN index now at %s", written_to)
     rebuild_fts(db_path)
     rebuild_thread_summary(db_path)
 

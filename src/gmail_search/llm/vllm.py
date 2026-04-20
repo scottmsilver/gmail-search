@@ -31,15 +31,20 @@ TEARDOWN_WAIT_SEC = 15.0
 
 
 def _launch_args(bin_path: str) -> list[str]:
-    """Flags chosen for our 12 GB 3080 Ti:
+    """Flags chosen for our 12 GB 3080 Ti, tuned by the bench run
+    2026-04-19 (scripts/bench_out/*.json):
 
-    - `gptq_marlin`: the log at first-boot recommended switching from
-      the buggy `gptq_gemm` kernel to marlin for GPTQ. Faster too.
-    - `enforce-eager`: skips CUDA-graph capture. Capture needed more
-      VRAM than the quantized weights leave free on our 12 GB card.
-    - `max-num-seqs 8`: caps concurrent sequences to fit the KV cache.
-    - `max-model-len 2048`: our prompts are ~1.7K tokens including
-      output; half the default 4096 doubles KV cache headroom.
+    - `gptq_marlin`: recommended by vLLM at first boot; faster and
+      more stable than the legacy `gptq_gemm` kernel.
+    - `enforce-eager`: skips CUDA-graph capture. Capture needs more
+      VRAM than quantized weights leave free on our 12 GB card.
+    - `max-model-len 8192`: the bench showed this fits with seqs=8,
+      and lets us feed full email bodies to the model. At 2048 we
+      were truncating at ~3500 chars, which cost specificity on
+      long threads and newsletters.
+    - `max-num-seqs 8`: tuned so ctx=8192 × 8 seqs still fits the
+      KV cache at 0.92 utilization. Throughput measured at 2.82/s
+      on the bench sample — matches the old (lower-quality) setup.
     """
     return [
         bin_path,
@@ -48,7 +53,7 @@ def _launch_args(bin_path: str) -> list[str]:
         "--quantization",
         "gptq_marlin",
         "--max-model-len",
-        "2048",
+        "8192",
         "--gpu-memory-utilization",
         "0.92",
         "--enforce-eager",

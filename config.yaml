@@ -5,6 +5,8 @@ embedding:
   dimensions: 3072
   task_type_document: RETRIEVAL_DOCUMENT
   task_type_query: RETRIEVAL_QUERY
+indexing:
+  scann_peak_budget_mb: 2048
 attachments:
   max_file_size_mb: 10
   max_pdf_pages: 20

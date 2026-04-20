@@ -224,60 +224,142 @@ def build_index_sharded(
     model: str,
     dimensions: int,
     shard_size: int,
-) -> None:
-    """Build N ScaNN indexes, each over at most shard_size vectors, so
-    peak RSS during the build is bounded by shard_size regardless of
-    total corpus size.
+) -> Path:
+    """Build N ScaNN indexes into a fresh timestamped sibling of
+    `index_dir` and record it in a DB pointer row so readers always
+    resolve to a fully-written build.
 
-    On-disk layout:
-        index_dir/manifest.json    {num_shards, dimensions, shard_size}
-        index_dir/ids.json         concatenated ids (same contract as
-                                   the single-index builder)
-        index_dir/shard_0/         ScaNN files + shard's ids.json
-        index_dir/shard_1/         ...
+    Why a DB pointer instead of filesystem rename: filesystem rename
+    atomicity varies (FUSE, cross-filesystem, WSL1) and the writer
+    still leaves torn state if a reader opens mid-build. A pointer
+    row in the same SQLite DB the reader already talks to flips in
+    one UPDATE — all readers see either the old path or the new one.
 
-    ScannSearcher detects manifest.json and queries shards in parallel
-    logic, merging by score.
+    Sequence:
+        1. Write all shards + manifest + ids.json into
+           `{index_dir.parent}/{index_dir.name}__<utc>_<rand>/`.
+        2. `set_active_index_dir(conn, new_path)` in one transaction.
+        3. Remove any sibling `{index_dir.name}__*` directories that
+           aren't the one we just set.
+
+    Returns the path that the builder actually wrote to. Callers that
+    want to open the newly-built index can either use the return
+    value directly or call `resolve_active_index_dir(db_path, index_dir)`
+    to get it via the pointer.
+
+    Back-compat: the pointer row is optional. If the pointer table
+    isn't present in the DB (test fixtures, old installs), the build
+    falls back to writing in-place at `index_dir` so existing callers
+    keep working unchanged.
     """
     if shard_size < 1:
         raise ValueError(f"shard_size must be >= 1, got {shard_size}")
 
-    index_dir.mkdir(parents=True, exist_ok=True)
-    _clean_old_shard_dirs(index_dir)
+    use_pointer = _pointer_table_exists(db_path)
+    target_dir = _pick_versioned_dir(index_dir) if use_pointer else index_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    if not use_pointer:
+        # Legacy in-place path for tests / un-migrated installs.
+        # The manifest-first unlink + tolerant searcher combo we
+        # already have prevents the torn-read 500 in this mode.
+        (target_dir / "manifest.json").unlink(missing_ok=True)
+        _clean_old_shard_dirs(target_dir)
 
     conn = get_connection(db_path)
     try:
         total = _count_embeddings(conn, model)
         if total == 0:
-            _write_empty_index(index_dir)
-            # Wipe any stale manifest from a prior non-empty build.
-            (index_dir / "manifest.json").unlink(missing_ok=True)
+            _write_empty_index(target_dir)
+            if use_pointer:
+                _promote_and_gc(conn, index_dir, target_dir)
             conn.close()
-            return
+            return target_dir
 
         cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ? ORDER BY id", (model,))
-
         all_ids: list[int] = []
         shard_idx = 0
         buffer: list[tuple[int, bytes]] = []
         for row in cursor:
             buffer.append((row["id"], row["embedding"]))
             if len(buffer) >= shard_size:
-                all_ids.extend(_build_one_shard(buffer, dimensions, index_dir / f"shard_{shard_idx}"))
+                all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}"))
                 buffer = []
                 shard_idx += 1
         if buffer:
-            all_ids.extend(_build_one_shard(buffer, dimensions, index_dir / f"shard_{shard_idx}"))
+            all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}"))
             shard_idx += 1
+
+        num_shards = shard_idx
+        (target_dir / "manifest.json").write_text(
+            json.dumps({"num_shards": num_shards, "dimensions": dimensions, "shard_size": shard_size})
+        )
+        (target_dir / "ids.json").write_text(json.dumps(all_ids))
+
+        if use_pointer:
+            _promote_and_gc(conn, index_dir, target_dir)
     finally:
         conn.close()
 
-    num_shards = shard_idx
-    (index_dir / "manifest.json").write_text(
-        json.dumps({"num_shards": num_shards, "dimensions": dimensions, "shard_size": shard_size})
-    )
-    (index_dir / "ids.json").write_text(json.dumps(all_ids))
-    logger.info(f"Sharded index built: {num_shards} shards, {len(all_ids)} total vectors at {index_dir}")
+    logger.info(f"Sharded index built at {target_dir} ({shard_idx} shards)")
+    return target_dir
+
+
+def _pick_versioned_dir(index_dir: Path) -> Path:
+    """Build a unique sibling path: `{index_dir}__<utc>_<short-hash>`.
+    The short hash avoids collisions when two builds land in the same
+    second (extract + reindex overlap, etc.).
+    """
+    import secrets
+    import time
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    short = secrets.token_hex(3)
+    return index_dir.parent / f"{index_dir.name}__{stamp}_{short}"
+
+
+def _pointer_table_exists(db_path: Path) -> bool:
+    """Check for the scann_index_pointer table without importing the
+    queries module (which would create a cycle through store/db.py).
+    Cheap introspection query; we don't need to cache it.
+    """
+    try:
+        conn = get_connection(db_path)
+    except Exception:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='scann_index_pointer'"
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def _promote_and_gc(conn, live_name: Path, new_dir: Path) -> None:
+    """Update the DB pointer to the new dir and remove every sibling
+    `{live_name.name}__*` directory other than the one we just wrote.
+    `live_name` itself (if it exists as a legacy path) is left alone
+    so a reader that still opens it directly keeps working until it
+    learns about the pointer.
+    """
+    import shutil
+
+    from gmail_search.store.queries import set_active_index_dir
+
+    set_active_index_dir(conn, str(new_dir))
+    conn.commit()
+
+    prefix = f"{live_name.name}__"
+    for sibling in live_name.parent.iterdir():
+        if not sibling.is_dir() or not sibling.name.startswith(prefix):
+            continue
+        if sibling == new_dir:
+            continue
+        try:
+            shutil.rmtree(sibling)
+        except OSError as e:
+            logger.warning("failed to gc old index dir %s: %s", sibling, e)
 
 
 def load_index_metadata(index_dir: Path) -> list[int]:

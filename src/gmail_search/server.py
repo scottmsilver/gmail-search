@@ -268,7 +268,12 @@ def create_app(
     app = FastAPI(title="Gmail Search")
 
     templates_dir = Path(__file__).parent.parent.parent / "templates"
-    index_dir = data_dir / "scann_index"
+    # Resolve the active index through the DB pointer so a mid-reindex
+    # swap is picked up on the next /api/search without restarting the
+    # server. Fallback is the legacy fixed path.
+    from gmail_search.index.searcher import resolve_active_index_dir
+
+    index_dir = resolve_active_index_dir(db_path, data_dir / "scann_index")
 
     def _format_thread_result(r):
         return {
@@ -382,7 +387,7 @@ def create_app(
         date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
         date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
     ):
-        from gmail_search.summarize import get_summaries_bulk
+        from gmail_search.summarize import get_summaries_bulk_meta
 
         engine = get_engine()
         results = engine.search_threads(
@@ -400,8 +405,11 @@ def create_app(
 
         # Pre-computed per-message summaries — lets the agent answer many
         # questions without fetching full thread bodies via get_thread.
+        # We pull the freshest row regardless of model/prompt version
+        # AND surface the key + created_at so the UI debug panel can
+        # show where each summary came from.
         conn_s = get_connection(db_path)
-        summaries = get_summaries_bulk(conn_s, all_msg_ids)
+        summary_meta = get_summaries_bulk_meta(conn_s, all_msg_ids)
         conn_s.close()
 
         facets = _compute_topic_facets(results, msg_topics)
@@ -415,7 +423,10 @@ def create_app(
                 topics.update(msg_topics.get(m.message_id, []))
             fr["topic_ids"] = list(topics)
             for match in fr["matches"]:
-                match["summary"] = summaries.get(match["message_id"], "")
+                meta = summary_meta.get(match["message_id"])
+                match["summary"] = (meta or {}).get("summary", "") or ""
+                match["summary_model"] = (meta or {}).get("model")
+                match["summary_created_at"] = (meta or {}).get("created_at")
             formatted.append(fr)
 
         return {
@@ -843,6 +854,15 @@ def create_app(
         dates = conn.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
         total_cost = get_total_spend(conn)
         ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"])
+        # Search-side cost: query_cache tells us how many distinct
+        # search embeds we've paid for; the costs table (operation=
+        # 'embed_query') tells us how much they totalled. Both are
+        # tiny at our volume but worth surfacing so users can see
+        # search-as-you-type isn't silently expensive.
+        query_count_row = conn.execute("SELECT COUNT(*) FROM query_cache").fetchone()
+        query_cost_row = conn.execute(
+            "SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM costs WHERE operation = 'embed_query'"
+        ).fetchone()
         conn.close()
         jobs = JobProgress.get(db_path) or []
         running = [j for j in jobs if j["status"] == "running"]
@@ -853,6 +873,8 @@ def create_app(
             "date_newest": dates["newest"],
             "total_cost_usd": round(total_cost, 4),
             "budget_remaining_usd": round(remaining, 4),
+            "query_embeds": int(query_count_row[0] or 0),
+            "query_embed_cost_usd": round(float(query_cost_row[0] or 0.0), 6),
             "running_job": running[0] if running else None,
         }
 
@@ -1004,6 +1026,60 @@ def create_app(
             "summarize": _pid_file_status(data_dir / "summarize.pid"),
         }
 
+    # ── OAuth status + re-auth ──────────────────────────────────────────
+    # Settings UI reads /api/auth/status to show which scopes the current
+    # token grants, and POSTs /api/auth/reauth to force a consent-screen
+    # re-prompt (needed after we expand SCOPES in gmail/auth.py). Re-auth
+    # spawns `gmail-search auth --force` detached so the browser flow
+    # runs outside the server process; the token file lands under data/
+    # and the status endpoint reflects it on next poll.
+
+    _SCOPE_LABELS = {
+        "https://www.googleapis.com/auth/gmail.readonly": "gmail",
+        "https://www.googleapis.com/auth/drive.readonly": "drive",
+    }
+
+    @app.get("/api/auth/status")
+    async def api_auth_status():
+        """Return which scopes the stored token actually grants, plus
+        a friendly `missing` list against the SCOPES our code expects.
+        """
+        import json
+
+        from gmail_search.gmail.auth import SCOPES
+
+        token_path = data_dir / "token.json"
+        granted: list[str] = []
+        if token_path.exists():
+            try:
+                tok = json.loads(token_path.read_text())
+                granted = list(tok.get("scopes") or [])
+            except Exception:
+                granted = []
+        expected = set(SCOPES)
+        missing = sorted(expected - set(granted))
+        granted_sorted = sorted(granted)
+        return {
+            "token_present": token_path.exists(),
+            "granted": granted_sorted,
+            "granted_labels": [_SCOPE_LABELS.get(s, s) for s in granted_sorted],
+            "missing": missing,
+            "missing_labels": [_SCOPE_LABELS.get(s, s) for s in missing],
+            "drive_enabled": "https://www.googleapis.com/auth/drive.readonly" in granted,
+        }
+
+    @app.post("/api/auth/reauth")
+    async def api_auth_reauth():
+        """Kick a detached `gmail-search auth --force` so the OAuth
+        flow opens in the user's default browser. Same pid-file pattern
+        as the other jobs — lets the UI show running/done state.
+        """
+        return _start_detached_job(
+            pid_filename="auth.pid",
+            log_filename="auth.log",
+            extra_args=["auth", "--force"],
+        )
+
     @app.post("/api/jobs/frontfill")
     async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
         """Start the continuous watch daemon: sync new messages every
@@ -1023,13 +1099,14 @@ def create_app(
 
     @app.post("/api/jobs/backfill")
     async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
-        """Pull older messages through the full pipeline. Stops between
-        batches once free disk drops below min_free_gb.
+        """Pull older messages through the full pipeline. Runs forever
+        via `--loop`: once caught up (or if a cycle crashes), sleeps 5
+        min and resumes. Pauses batches when free disk < min_free_gb.
         """
         return _start_detached_job(
             pid_filename="backfill.pid",
             log_filename="backfill.log",
-            extra_args=["update", "--min-free-gb", str(min_free_gb)],
+            extra_args=["update", "--min-free-gb", str(min_free_gb), "--loop"],
         )
 
     @app.post("/api/jobs/backfill/stop")

@@ -99,6 +99,128 @@ const JobControlCard = ({
   </Card>
 );
 
+// ─── OAuth status card ─────────────────────────────────────────────────────
+// Shows which Google scopes the stored token.json currently grants and lets
+// the user kick off a re-consent flow when a new scope has been added to
+// gmail/auth.py SCOPES (e.g. drive.readonly). Backend spawns
+// `gmail-search auth --force` detached so the OAuth browser flow runs out
+// of the FastAPI process and the UI just polls for the new token state.
+
+type AuthStatus = {
+  token_present: boolean;
+  granted: string[];
+  granted_labels: string[];
+  missing: string[];
+  missing_labels: string[];
+  drive_enabled: boolean;
+};
+
+const AuthStatusCard = () => {
+  const [status, setStatus] = useState<AuthStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/status", { cache: "no-store" });
+      if (!res.ok) return;
+      setStatus((await res.json()) as AuthStatus);
+    } catch {
+      // Server down or endpoint missing — leave status null so the
+      // card renders a neutral message instead of a loud error.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    // Poll every 5s while the re-auth browser flow is likely in-flight,
+    // and keep a slower heartbeat otherwise so the UI catches a token
+    // change without a hard page refresh.
+    const id = setInterval(refresh, 5_000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const reauth = useCallback(async () => {
+    setBusy(true);
+    setToast(null);
+    try {
+      const res = await fetch("/api/auth/reauth", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; pid?: number };
+      if (data.ok) {
+        setToast("Check your browser — Google's consent screen just opened.");
+      } else {
+        setToast(data.error ?? "Could not start re-auth");
+      }
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  }, [refresh]);
+
+  const needsReauth = !!status && status.missing.length > 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Google account access</CardTitle>
+        <CardDescription>
+          Which scopes the stored OAuth token grants. Re-authorize when you see a
+          "needs re-auth" badge after we expand the required scopes.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {!status ? (
+          <div className="text-muted-foreground">loading…</div>
+        ) : !status.token_present ? (
+          <div className="text-muted-foreground">
+            No token on disk yet. Click Re-authorize to run the OAuth flow.
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {status.granted_labels.map((label) => (
+              <div key={label} className="flex items-center justify-between">
+                <span className="capitalize text-muted-foreground">{label}</span>
+                <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-600">
+                  granted
+                </span>
+              </div>
+            ))}
+            {status.missing_labels.map((label) => (
+              <div key={label} className="flex items-center justify-between">
+                <span className="capitalize text-muted-foreground">{label}</span>
+                <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-600">
+                  needs re-auth
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <span className="text-xs text-muted-foreground">
+            {!status
+              ? ""
+              : needsReauth
+                ? "One or more scopes aren't granted — click to re-consent."
+                : "All requested scopes are granted."}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant={needsReauth ? "default" : "outline"}
+            disabled={busy || !status}
+            onClick={reauth}
+          >
+            {busy ? "Starting…" : "Re-authorize"}
+          </Button>
+        </div>
+        {toast && <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">{toast}</div>}
+      </CardContent>
+    </Card>
+  );
+};
+
 export const SettingsView = () => {
   const [data, setData] = useState<JobsRunningResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,6 +306,8 @@ export const SettingsView = () => {
           {error}
         </div>
       )}
+
+      <AuthStatusCard />
 
       <Card>
         <CardHeader>

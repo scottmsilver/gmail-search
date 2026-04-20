@@ -34,34 +34,73 @@ from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
 
-# The `model_id` recorded in message_summaries.model is provided by
-# whichever backend get_backend() returns, so switching backends (or
-# models within a backend) naturally triggers a re-summarize pass —
-# old rows with a different model_id aren't counted as "done".
-DEFAULT_MODEL = get_backend().model_id
+# The storage key recorded in `message_summaries.model` combines the
+# backend's model_id with a prompt version. Bumping PROMPT_VERSION (or
+# swapping the backend) naturally triggers a re-summarize pass because
+# old rows live under the old key — _messages_needing_summary only
+# sees as "done" those rows matching the current composite key.
+#
+# We reuse the `model` column on purpose: adding a new column would
+# need a migration, and the column is only consumed by two places
+# (backfill dedup + search-time lookup), both of which route through
+# this constant.
+PROMPT_VERSION = "v5"
+DEFAULT_MODEL = f"{get_backend().model_id}+{PROMPT_VERSION}"
 
-MAX_BODY_CHARS = 6000  # head cap before head+tail truncation
-TAIL_CHARS = 1500  # for long bodies, keep this many from the end
+# Budget math against vLLM's 8192-token context window (see
+# gmail_search/llm/vllm.py). Measured ratio varies by content:
+#   - "clean" prose: 0.30-0.35 tokens/char
+#   - quoted-reply threads, HTML with URLs, base64-ish content:
+#     up to 0.40-0.45 tokens/char (denser)
+#
+# Original cap was 20000 chars, which assumed 0.35 tok/char. Worked
+# on the first run's recent messages, but the backfill's older
+# mail (longer threads, more quoted history) hit 0.40+ and
+# overflowed. Dropping to 15000 head + 4000 tail = 15000 chars max
+# prompt body. Worst-case token math:
+#   15000 chars × 0.45 tok/char = 6750 tokens body
+#   + system prompt (~1600 chars = ~640 tokens)
+#   + metadata (~110 chars = ~45 tokens)
+#   + 500 output tokens
+#   + 100 tokens safety
+#   = ~8035 tokens — fits under 8192 with margin.
+#
+# Bench (scripts/bench_out/, 40 messages) validated the v5 prompt at
+# this ballpark with 40/40 success and 3× specificity vs v1.
+MAX_BODY_CHARS = 15000  # head cap before head+tail truncation
+TAIL_CHARS = 4000  # for long bodies, keep this many from the end
+SUMMARY_MAX_TOKENS = 500
 HTTP_TIMEOUT = 120.0
 
-_SYSTEM_PROMPT = """You summarize emails for a retrieval index.
+# v5 from the bench: "name the sender first" drove most of the win
+# — retrieval hits jump when the summary actually contains the
+# person or org's name.
+_SYSTEM_PROMPT = """You summarize emails for a retrieval index. Your output is used by
+a search engine — specificity beats prose.
 
-Output 1-2 sentences, under 300 characters total.
+Output up to 4 sentences, under 600 characters total.
 
-Capture: who sent it, specific facts (amounts, dates, names, decisions),
-and any explicit ask. If the sender does NOT ask for anything, just stop —
-do not add filler like "no action required" or "no next step mentioned".
+Always start with the sender's name or organization (e.g. "Stratechery
+by Ben Thompson reports..." or "Rebecca Miller asks..."). Then capture
+ALL specific facts: amounts, dates, names, places, decisions,
+percentages, order/confirmation numbers, product/project names. Close
+with any explicit ask (named: "X asks Y to do Z") or stop — no filler
+like "no action required".
+
+For long threads or newsletters, summarize the main content, not just
+the opening paragraph. Every concrete number or proper noun in the
+email should make it into the summary if it would help someone find
+this email later by keyword.
 
 Do NOT begin with "This email...", "The email...", "It looks like...",
-"Based on...", "The message...", "This appears...", or similar preamble.
-Jump straight into the content.
+"Based on...", "The message...", or similar preamble.
 
-Do NOT wrap the output in quotes or prefix it with "Summary:", "TLDR:", etc.
+Do NOT wrap the output in quotes or prefix it with "Summary:", "TLDR:".
 
-Examples of the style you should match:
-- "Rebecca asks Rick to confirm whether the wood wall can move 12 inches right for the kitchen design."
-- "OpenAI charged $5.78 to card ending 9535 for API credit."
-- "Salvador confirms the crane arrives Thursday 11/7 with an $8,400 overage; needs go/no-go on the schedule shift."
+Examples:
+- "Rebecca Miller asks Rick Chen to confirm whether the kitchen's wood wall can move 12 inches right, noting the change shifts cabinet placement. She needs an answer by Friday so the contractor can finalize the order."
+- "OpenAI billing charged $5.78 to card ending 9535 for API credit (order #ch_3N8X, April 18). No action required."
+- "Stratechery (Ben Thompson) reports ESPN, Fox, and Warner Bros. Discovery are forming a joint sports-streaming service, each with one-third ownership, encompassing ~55% of U.S. sports rights and launching in the fall. Asks no action."
 """
 
 
@@ -99,8 +138,13 @@ def _auto_mail_summary(labels_json: str, from_addr: str) -> str | None:
         return f"Promotional email from {sender}."
     if "CATEGORY_SOCIAL" in labels:
         return f"Social-network update from {sender}."
-    if "CATEGORY_FORUMS" in labels:
-        return f"Mailing-list post from {sender}."
+    # Note: we used to short-circuit CATEGORY_FORUMS too, but Gmail
+    # applies FORUMS to *anything* sent to a group — including real
+    # human-authored board updates, school bulletins, and investor
+    # letters. Replacing those with a canned "Mailing-list post from
+    # X" destroys retrievability. Now forums mail goes to the LLM
+    # like any other; the GPU budget is cheap enough. See the
+    # incident with msg 192cf297003c77e8 (2026-04-19).
 
     # Gmail didn't categorise but the sender screams "automated". We
     # only short-circuit here for senders that also sent zero signal
@@ -146,9 +190,81 @@ def _truncate_body(body: str) -> str:
     return body[:head_chars] + "\n\n[...]\n\n" + body[-TAIL_CHARS:]
 
 
-def _build_user_prompt(from_addr: str, subject: str, body_text: str) -> str:
+# Belt-and-suspenders budget check. If our char-based truncation
+# under-estimated tokens/char (dense content), hard-cap the final
+# prompt chars so we never send an over-budget request. Worst-case
+# ratio we've measured is ~0.45 tok/char on quoted-reply threads.
+#
+#   budget tokens = 8192 - 500 output - 100 safety = 7592
+#   budget chars  = 7592 / 0.45 ≈ 16870
+#
+# This is the TOTAL chars across (system + metadata + body) seen by
+# the model. System prompt is ~1600 chars, so effective body+meta
+# budget is ~15270 — matches the MAX_BODY_CHARS + TAIL_CHARS = 15000
+# above with margin for metadata and trivia.
+_PROMPT_HARD_CAP_CHARS = 16800
+
+
+def _format_attachments(attachments: list[dict], budget_chars: int) -> str:
+    """Render attachments into a prompt tail, packing as much extracted
+    text as fits in `budget_chars`. Attachments with extracted text are
+    included in descending order of text length (biggest first); each
+    gets its fair share but never more than it actually has.
+
+    Input shape: [{"filename": str, "extracted_text": str}, ...]
+    """
+    usable = [a for a in attachments if (a.get("extracted_text") or "").strip()]
+    if not usable or budget_chars <= 200:
+        return ""
+    # Header costs ~30 chars per attachment. Reserve that out of budget.
+    per_header = 30
+    remaining = budget_chars - per_header * len(usable)
+    if remaining <= 200:
+        return ""
+    # Split budget proportionally by available text length so small
+    # attachments aren't truncated to nothing while a huge one hogs.
+    usable.sort(key=lambda a: len(a["extracted_text"] or ""), reverse=True)
+    parts: list[str] = []
+    remaining_atts = len(usable)
+    for a in usable:
+        text = a.get("extracted_text") or ""
+        share = remaining // max(remaining_atts, 1)
+        # An attachment shouldn't take more than it has.
+        take = min(share, len(text))
+        if take < 80:  # too little to be useful — skip
+            remaining_atts -= 1
+            continue
+        remaining -= take
+        remaining_atts -= 1
+        filename = a.get("filename") or "attachment"
+        parts.append(f"\n\n[Attachment: {filename}]\n{text[:take]}")
+    return "".join(parts)
+
+
+def _build_user_prompt(
+    from_addr: str,
+    subject: str,
+    body_text: str,
+    attachments: list[dict] | None = None,
+) -> str:
     body = _truncate_body(_clean_body(body_text or ""))
-    return f"From: {from_addr}\nSubject: {subject}\n\n{body}"
+    prompt = f"From: {from_addr}\nSubject: {subject}\n\n{body}"
+
+    # Pack as much attachment text as fits under the hard cap. Bodies
+    # that hog the budget leave no room; short bodies (typical for
+    # "See attached..." mail) leave 10K+ chars for the attachment.
+    if attachments:
+        remaining = _PROMPT_HARD_CAP_CHARS - len(prompt)
+        att_text = _format_attachments(attachments, remaining)
+        prompt += att_text
+
+    # Last-line safety: if body + attachments are dense enough that
+    # char-truncation still overshoots, chop more off while keeping
+    # metadata. Prefers keeping the head (where the main content is).
+    if len(prompt) > _PROMPT_HARD_CAP_CHARS:
+        excess = len(prompt) - _PROMPT_HARD_CAP_CHARS
+        prompt = prompt[: -excess - 3] + "..."
+    return prompt
 
 
 # ─── LLM call ─────────────────────────────────────────────────────────────
@@ -156,9 +272,53 @@ def _build_user_prompt(from_addr: str, subject: str, body_text: str) -> str:
 
 _STRIP_PREFIXES = ("Summary:", "SUMMARY:", "Subject:", "TLDR:", "TL;DR:")
 
+# Gemma sometimes emits its chain-of-thought as the response content
+# ("thought Thinking Process: 1. **Analyze the Request:**..."). This
+# happens most on near-empty bodies (body==[link] after URL stripping)
+# where the model has nothing to summarize. Drop the reasoning block
+# and keep anything after it. If only reasoning was emitted, return
+# empty so the caller can fail-fast.
+# Opener matches either the bare "thought\n" token Gemma emits OR
+# a line that begins with "Thinking Process:".
+_THINK_OPENER = re.compile(r"^(thought\b|thinking process[:\s])", re.IGNORECASE)
+
+# Gemma terminates reasoning in a few ways; we accept any of them as
+# the handoff to the real answer. Each pattern is a non-greedy match
+# that ends exactly where the real answer begins — do NOT use `[^\n]*`
+# or you'll eat the answer along with the marker.
+_THINK_END_PATTERNS = [
+    # "(This is the response provided to the user.)" — Gemma's most
+    # common closer. Matches "(this is the response...)" variants.
+    re.compile(r"\(this is the[^)]*\)", re.IGNORECASE),
+    # "**Final Output Generation.**" / "**Final Output.**" / "**Final Response:**"
+    re.compile(r"\*\*final (?:output|response)(?: generation)?\.?\*\*", re.IGNORECASE),
+    # Section-style handoff: a line that's just "Final answer:" or similar.
+    re.compile(r"(?:^|\n)\s*(?:final answer|final output|summary|output|response)\s*[:\n]", re.IGNORECASE),
+]
+
+
+def _strip_thinking(s: str) -> str:
+    """If the LLM emitted reasoning, try to return only the final answer
+    that follows its end-of-thinking marker. If the response is pure
+    reasoning with no usable answer, return empty so the caller can
+    retry or mark failure — better than storing a chain-of-thought as
+    a search summary.
+    """
+    if not _THINK_OPENER.match(s.strip()):
+        return s
+    last_end = -1
+    for pat in _THINK_END_PATTERNS:
+        for m in pat.finditer(s):
+            if m.end() > last_end:
+                last_end = m.end()
+    if last_end >= 0:
+        return s[last_end:].strip()
+    return ""
+
 
 def _clean_llm_output(raw: str) -> str:
     raw = raw.strip()
+    raw = _strip_thinking(raw)
     if raw.startswith('"') and raw.endswith('"'):
         raw = raw[1:-1].strip()
     for prefix in _STRIP_PREFIXES:
@@ -258,6 +418,7 @@ def summarize_batch(
                 body_text=m["body_text"],
                 labels_json=m.get("labels_json", "[]"),
                 backend=backend,
+                attachments=m.get("attachments"),
             )
             if s:
                 out[m["id"]] = s
@@ -275,8 +436,14 @@ def summarize_one(
     body_text: str,
     labels_json: str = "[]",
     backend: Backend,
+    attachments: list[dict] | None = None,
 ) -> str:
-    """Summarize one message. Auto-classify short-circuit first, LLM fallback."""
+    """Summarize one message. Auto-classify short-circuit first, LLM fallback.
+
+    `attachments` is an optional list of {filename, extracted_text} dicts
+    whose text is packed into the prompt tail. Essential for "See
+    attached..." emails where the real content lives in a PDF/DOCX.
+    """
     auto = _auto_mail_summary(labels_json, from_addr)
     if auto is not None:
         return auto
@@ -285,14 +452,42 @@ def summarize_one(
         client,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(from_addr, subject, body_text)},
+            {"role": "user", "content": _build_user_prompt(from_addr, subject, body_text, attachments)},
         ],
-        max_tokens=160,
+        max_tokens=SUMMARY_MAX_TOKENS,
     )
     return _clean_llm_output(raw)
 
 
+def _fetch_attachments_for(conn: sqlite3.Connection, message_ids: list[str]) -> dict[str, list[dict]]:
+    """One batched query returning `{message_id: [{filename, extracted_text}]}`
+    for every attachment with non-trivial extracted text. Pulling in one
+    query instead of N is the difference between a 100ms pending-list
+    build and a 10s one at 20K messages.
+    """
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" * len(message_ids))
+    rows = conn.execute(
+        f"""SELECT message_id, filename, extracted_text
+            FROM attachments
+            WHERE message_id IN ({placeholders})
+              AND extracted_text IS NOT NULL
+              AND length(extracted_text) > 80""",
+        message_ids,
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["message_id"], []).append({"filename": r["filename"], "extracted_text": r["extracted_text"]})
+    return out
+
+
 def _messages_needing_summary(conn: sqlite3.Connection, model: str, limit: int | None) -> list[dict]:
+    """Return messages that don't yet have a summary under `model`, each
+    with its attachments pre-joined. Attachments join happens in Python
+    because SQL `GROUP_CONCAT` would force a column cap we'd have to
+    special-case for long extracted text.
+    """
     sql = """
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.labels
         FROM messages m
@@ -307,6 +502,8 @@ def _messages_needing_summary(conn: sqlite3.Connection, model: str, limit: int |
         sql += " LIMIT ?"
         params.append(limit)
     rows = conn.execute(sql, params).fetchall()
+    msg_ids = [r["id"] for r in rows]
+    attachments_by_msg = _fetch_attachments_for(conn, msg_ids)
     return [
         {
             "id": r["id"],
@@ -314,6 +511,7 @@ def _messages_needing_summary(conn: sqlite3.Connection, model: str, limit: int |
             "subject": r["subject"],
             "body_text": r["body_text"],
             "labels": r["labels"],
+            "attachments": attachments_by_msg.get(r["id"], []),
         }
         for r in rows
     ]
@@ -358,10 +556,10 @@ def backfill(
     # Backend (Ollama / vLLM) chosen by env var. The `with backend:`
     # block owns lifecycle — e.g. vLLM spawns its own subprocess on
     # enter and tears it down on exit so the GPU isn't pinned between
-    # jobs. model_id is the key under which summaries are stored; a
-    # backend/model change naturally re-queues everything.
+    # jobs. The storage key combines backend model_id + PROMPT_VERSION
+    # so a prompt change re-queues every message automatically.
     backend = get_backend()
-    model = backend.model_id
+    model = f"{backend.model_id}+{PROMPT_VERSION}"
 
     conn = get_connection(db_path)
     pending = _messages_needing_summary(conn, model, limit)
@@ -447,6 +645,7 @@ def _run_per_email(client, pending, concurrency, backend, persist, progress, sta
                 body_text=m["body_text"],
                 labels_json=m["labels"],
                 backend=backend,
+                attachments=m.get("attachments"),
             ): m
             for m in pending
         }
@@ -511,23 +710,81 @@ def _log_progress(processed: int, total: int, start: float) -> None:
     logger.info(f"summarize: {processed}/{total} ({rate:.2f}/s, eta {eta / 60:.1f}min)")
 
 
-def get_summary(conn: sqlite3.Connection, message_id: str, model: str = DEFAULT_MODEL) -> str | None:
-    row = conn.execute(
-        "SELECT summary FROM message_summaries WHERE message_id = ? AND model = ?",
-        (message_id, model),
-    ).fetchone()
+# Read-path philosophy: writes are versioned by (model+prompt_version)
+# so bumping PROMPT_VERSION correctly re-queues everything for
+# re-summarization — but the UI just wants the *freshest* summary
+# we have for a given message, regardless of which version produced
+# it. If we keyed reads to the current DEFAULT_MODEL, the running
+# server would silently return nothing after any version bump (until
+# restart AND until re-summarization caught up). So reads pick the
+# most recent row per message_id, full stop.
+
+
+def get_summary(conn: sqlite3.Connection, message_id: str, model: str | None = None) -> str | None:
+    """Return the most recent summary for a message, regardless of
+    which model/prompt produced it. Pass `model` only when you need
+    a specific key (e.g. the backfill worker checking done-ness).
+    """
+    if model is not None:
+        row = conn.execute(
+            "SELECT summary FROM message_summaries WHERE message_id = ? AND model = ?",
+            (message_id, model),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT summary FROM message_summaries WHERE message_id = ? ORDER BY created_at DESC LIMIT 1",
+            (message_id,),
+        ).fetchone()
     return row["summary"] if row else None
 
 
 def get_summaries_bulk(
-    conn: sqlite3.Connection, message_ids: Iterable[str], model: str = DEFAULT_MODEL
+    conn: sqlite3.Connection, message_ids: Iterable[str], model: str | None = None
 ) -> dict[str, str]:
+    """Like `get_summary` but bulk. When `model is None`, returns the
+    freshest summary per message regardless of version — the default
+    for UI reads.
+    """
+    rows = get_summaries_bulk_meta(conn, message_ids, model=model)
+    return {mid: meta["summary"] for mid, meta in rows.items()}
+
+
+def get_summaries_bulk_meta(
+    conn: sqlite3.Connection, message_ids: Iterable[str], model: str | None = None
+) -> dict[str, dict]:
+    """Same lookup as `get_summaries_bulk` but returns
+    `{summary, model, created_at}` per message — useful for the
+    search UI's debug panel so you can tell at a glance which prompt
+    version produced a given row, or whether an old qwen-era summary
+    is still being surfaced pre-re-summarize.
+    """
     ids = list(message_ids)
     if not ids:
         return {}
     placeholders = ",".join("?" * len(ids))
-    rows = conn.execute(
-        f"SELECT message_id, summary FROM message_summaries WHERE message_id IN ({placeholders}) AND model = ?",
-        [*ids, model],
-    ).fetchall()
-    return {r["message_id"]: r["summary"] for r in rows}
+    if model is not None:
+        rows = conn.execute(
+            f"""SELECT message_id, summary, model, created_at
+                FROM message_summaries
+                WHERE message_id IN ({placeholders}) AND model = ?""",
+            [*ids, model],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT message_id, summary, model, created_at
+                FROM message_summaries ms
+                WHERE message_id IN ({placeholders})
+                  AND created_at = (
+                      SELECT MAX(created_at) FROM message_summaries
+                      WHERE message_id = ms.message_id
+                  )""",
+            ids,
+        ).fetchall()
+    return {
+        r["message_id"]: {
+            "summary": r["summary"],
+            "model": r["model"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    }

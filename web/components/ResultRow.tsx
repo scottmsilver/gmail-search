@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import type { SearchThread } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
 
@@ -64,49 +66,165 @@ const ReplyIcon = () => (
   </svg>
 );
 
+// Copy-to-clipboard control. Rendered as <span role="button"> because
+// the row's outer element is already a <button>, and HTML forbids
+// nested buttons (React 19 now throws a hydration error for this).
+// ARIA attributes + keyboard handling keep it accessible.
+const CopyButton = ({ text, label }: { text: string; label: string }) => {
+  const [copied, setCopied] = useState(false);
+  const doCopy = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  };
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-label={`Copy ${label}`}
+      onClick={doCopy}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") doCopy(e);
+      }}
+      title={`Copy ${label}`}
+      className="ml-1 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground"
+    >
+      {copied ? (
+        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={3}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2}>
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15V5a2 2 0 012-2h10" />
+        </svg>
+      )}
+    </span>
+  );
+};
+
 type Props = {
   thread: SearchThread;
   onOpen: (threadId: string) => void;
 };
 
+// Short form of the stored model key for the debug line. The full
+// string is "ciocan/gemma-4-E4B-it-W4A16+v5"; we only need the
+// distinguishing tail. Examples:
+//   ciocan/gemma-4-E4B-it-W4A16+v5 → "gemma+v5"
+//   qwen2.5:7b                     → "qwen2.5"
+//   gemma4:latest                  → "gemma4"
+const shortModel = (model?: string | null): string => {
+  if (!model) return "-";
+  const m = model.match(/([^/]+)$/);
+  let base = m ? m[1] : model;
+  base = base.replace(/^gemma-4-E4B-it-W4A16/, "gemma").replace(/:latest$/, "");
+  return base;
+};
+
+// "2 min ago" / "3 hr ago" / "4 days ago" — no library, just a
+// compact age for the debug footer.
+//
+// SQLite's CURRENT_TIMESTAMP produces "YYYY-MM-DD HH:MM:SS" with no
+// timezone, which JS `Date.parse` interprets as LOCAL time. The
+// stored values are actually UTC (SQLite default), so we append "Z"
+// before parsing to force UTC. Without this, we end up with negative
+// ages when the machine's timezone is west of UTC.
+const ageString = (iso?: string | null): string => {
+  if (!iso) return "-";
+  const normalised = /Z|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso.replace(" ", "T") + "Z";
+  const t = Date.parse(normalised);
+  if (Number.isNaN(t)) return "-";
+  const sec = Math.max(0, (Date.now() - t) / 1000);
+  if (sec < 60) return `${Math.round(sec)}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+  return `${Math.round(sec / 86400)}d ago`;
+};
+
 export const ResultRow = ({ thread, onOpen }: Props) => {
   const top = thread.matches[0];
-  // Prefer the LLM-generated summary (populated by `gmail-search
-  // summarize`) over the raw matched snippet — snippets often repeat
-  // the subject/sender/date that we already render as structured
-  // fields above. Falls back to the snippet when no summary exists.
-  const preview = (top?.summary && top.summary.trim()) || cleanSnippet(top?.snippet ?? "").slice(0, 180);
+  const hasSummary = !!(top?.summary && top.summary.trim());
+  // Prefer the LLM-generated summary over the raw matched snippet;
+  // fall back to the cleaned snippet when no summary exists.
+  const preview = hasSummary ? top!.summary!.trim() : cleanSnippet(top?.snippet ?? "").slice(0, 180);
+  const previewSource: "summary" | "snippet" | "empty" = hasSummary
+    ? "summary"
+    : preview
+      ? "snippet"
+      : "empty";
   const hasAttachment = thread.matches.some((m) => m.attachment_filename);
   const senderForAvatar = top?.from_addr ?? thread.participants[0] ?? "?";
 
+  // Columnar layout with 4 tracks:
+  //   avatar · names · (subject + summary stacked) · date
+  //
+  // Subject renders bold on the first line; the v5 summary wraps
+  // beneath it in muted text. Row uses items-start so the date
+  // aligns with the top of the subject, not the bottom of a long
+  // wrapping summary.
   return (
     <button
       type="button"
       onClick={() => onOpen(thread.thread_id)}
-      className="group flex w-full items-start gap-3 border-b px-4 py-3 text-left transition-colors hover:bg-accent/50"
+      className="group grid w-full grid-cols-[auto_200px_1fr_auto] items-start gap-3 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
     >
       <Avatar from={senderForAvatar} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline justify-between gap-3">
-          <div className="min-w-0 flex-1 truncate text-sm">
-            {thread.user_replied && <ReplyIcon />}
-            <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
-            {thread.message_count > 1 && (
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
-            )}
-            {preview && (
-              <>
-                <span className="mx-1.5 text-muted-foreground">—</span>
-                <span className="text-muted-foreground">{preview}</span>
-              </>
-            )}
-          </div>
-          <div className="shrink-0 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
-        </div>
-        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+
+      {/* Names */}
+      <div className="min-w-0 truncate pt-0.5">
+        {thread.user_replied && <ReplyIcon />}
+        <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
+        {thread.message_count > 1 && (
+          <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
+        )}
+      </div>
+
+      {/* Subject + summary, stacked, with debug footer */}
+      <div className="min-w-0">
+        <div className="flex items-center gap-1 truncate font-medium text-foreground">
           {hasAttachment && <PaperclipIcon />}
-          {thread.subject}
+          <span className="truncate">{thread.subject}</span>
+          {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
+          <CopyButton
+            text={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`}
+            label="Gmail link"
+          />
         </div>
+        {preview && (
+          <div className="mt-0.5 whitespace-normal break-words text-muted-foreground">{preview}</div>
+        )}
+        {/* Debug footer — tells you where each row's data comes from
+            so problematic summaries can be traced back to a specific
+            prompt version / message / match type. */}
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight text-muted-foreground/70">
+          <span
+            title={top?.summary_model ?? ""}
+            className={previewSource === "summary" ? "text-emerald-600/80" : "text-amber-600/80"}
+          >
+            {previewSource === "summary"
+              ? `summary:${shortModel(top?.summary_model)} · ${ageString(top?.summary_created_at)}`
+              : previewSource === "snippet"
+                ? "snippet (no summary yet)"
+                : "no preview"}
+          </span>
+          {top?.match_type && <span>match:{top.match_type}</span>}
+          {top?.score !== undefined && <span>score:{top.score.toFixed(3)}</span>}
+          {top?.message_id && (
+            <span className="inline-flex items-center" title={top.message_id}>
+              id:{top.message_id.slice(-8)}
+              <CopyButton text={top.message_id} label="message id" />
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Date */}
+      <div className="shrink-0 text-xs text-muted-foreground pt-1">
+        {formatSmartDate(thread.date_last)}
       </div>
     </button>
   );

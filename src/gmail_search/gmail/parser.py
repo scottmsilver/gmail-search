@@ -58,23 +58,97 @@ def _extract_parts(payload: dict) -> tuple[str, str, list[dict]]:
     return "\n".join(text_parts), "\n".join(html_parts), attachments
 
 
+def _parse_rfc2822_to_utc(s: str):
+    """Parse an RFC 2822 date string to a UTC-aware datetime, or
+    return None if unparseable.
+    """
+    from datetime import timezone
+
+    try:
+        d = parsedate_to_datetime(s)
+    except (ValueError, TypeError):
+        return None
+    if d.tzinfo:
+        return d.astimezone(timezone.utc)
+    return d.replace(tzinfo=timezone.utc)
+
+
+def _date_from_received_headers(headers: list[dict]):
+    """Extract a UTC datetime from the first parseable `Received:`
+    header. Gmail (and every conformant MTA) stamps a receipt time
+    after the last semicolon:
+
+        Received: by <host> with SMTP id <id>; Sat, 4 Apr 2026 16:31:03 -0700
+
+    Headers appear in prepend order (newest first), so iterating in
+    order gives us Gmail's own stamp first. Skip hops that have no
+    semicolon (some intermediate MTAs skip the date).
+    """
+    for h in headers:
+        if h.get("name", "").lower() != "received":
+            continue
+        val = h.get("value", "")
+        if ";" not in val:
+            continue
+        # Everything after the LAST semicolon is the RFC2822 date.
+        date_part = val.rsplit(";", 1)[1].strip()
+        parsed = _parse_rfc2822_to_utc(date_part)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_message_date(raw: dict[str, Any], headers: list[dict]) -> datetime:
+    """Determine the message timestamp. Gmail gives us three sources,
+    each authoritative in a different failure mode:
+
+    1. **`internalDate`** — Gmail's received-time in ms. Usually
+       bulletproof, but we've seen it come back as `"0"` on spoofed
+       phishing mail (Gmail API oddity; the actual receipt time is
+       still known, just not exposed through that field).
+    2. **`Received:` headers** — every MTA, Gmail included, prepends
+       a `Received:` header with a semicolon-separated RFC 2822 date.
+       The first one in the list is Gmail's own stamp.
+    3. **`Date:` header** — sender-supplied; can be malformed or
+       spoofed (e.g. "04-03-2026" — not RFC 2822).
+
+    Preference: internalDate → Received → Date. Epoch fallback only
+    if all three fail.
+    """
+    from datetime import timezone
+
+    # 1. Gmail's own received-time field.
+    internal = raw.get("internalDate")
+    if internal is not None:
+        try:
+            ms = int(internal)
+            if ms > 0:
+                return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Gmail's (or any MTA's) own `Received:` stamp — authoritative
+    #    even when `internalDate` is 0.
+    recvd = _date_from_received_headers(headers)
+    if recvd is not None:
+        return recvd
+
+    # 3. Sender-supplied Date.
+    date_str = _get_header(headers, "Date")
+    if date_str:
+        parsed = _parse_rfc2822_to_utc(date_str)
+        if parsed is not None:
+            return parsed
+
+    # 4. All three broken. Epoch so the UI can render distinctly.
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 def parse_message(raw: dict[str, Any]) -> tuple[Message, list[dict]]:
     payload = raw["payload"]
     headers = payload.get("headers", [])
 
-    date_str = _get_header(headers, "Date")
-    try:
-        from datetime import timezone
-
-        date = parsedate_to_datetime(date_str)
-        if date.tzinfo:
-            date = date.astimezone(timezone.utc)
-        else:
-            date = date.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        from datetime import timezone
-
-        date = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    date = _parse_message_date(raw, headers)
 
     body_text, body_html, att_metas = _extract_parts(payload)
 

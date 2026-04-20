@@ -110,6 +110,80 @@ def get_attachments_for_message(conn: sqlite3.Connection, message_id: str) -> li
     ]
 
 
+# ─── Drive stubs ───────────────────────────────────────────────────────────
+# Drive-linked docs don't come from Gmail attachments; they're referenced
+# by URL from the message body. We represent them as attachment rows with
+# `mime_type = application/vnd.google-apps.*`, no `raw_path` (content is
+# remote), and a `filename` that encodes the drive_id so the fetch step
+# can round-trip to it: "Drive: [<drive_id>]" as a stub, then
+# "Drive: <title> [<drive_id>]" once fetched.
+#
+# Reason the SQL lives here (not in gmail/drive.py): everything that
+# touches the attachments table routes through this module so the
+# schema is editable in one place. gmail/drive.py stays a pure API
+# client (no sqlite3 import).
+
+
+def upsert_drive_stub(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    drive_id: str,
+    mime_type: str,
+) -> int:
+    """Insert a stub row for a Drive-linked doc. Returns the number
+    of new rows inserted (0 if the stub already existed; the
+    `(message_id, filename)` dedup index enforces idempotency).
+    """
+    filename = f"Drive: [{drive_id}]"
+    cursor = conn.execute(
+        """INSERT OR IGNORE INTO attachments
+           (message_id, filename, mime_type, size_bytes)
+           VALUES (?, ?, ?, 0)""",
+        (message_id, filename, mime_type),
+    )
+    return cursor.rowcount
+
+
+def set_active_index_dir(conn: sqlite3.Connection, path: str) -> None:
+    """Flip the one-row `scann_index_pointer` to a new on-disk path.
+    Readers resolve the active index through this row so a reindex
+    swap is atomic at the DB layer — no reliance on filesystem rename
+    semantics. See `build_index_sharded` for the writer side.
+    """
+    conn.execute(
+        """INSERT INTO scann_index_pointer (id, current_dir, updated_at)
+           VALUES (1, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(id) DO UPDATE SET
+             current_dir = excluded.current_dir,
+             updated_at = CURRENT_TIMESTAMP""",
+        (path,),
+    )
+
+
+def get_active_index_dir(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
+    return row["current_dir"] if row else None
+
+
+def fill_drive_attachment(
+    conn: sqlite3.Connection,
+    *,
+    attachment_id: int,
+    title: str,
+    text: str,
+    drive_id: str,
+) -> None:
+    """Populate a previously-stubbed Drive row with fetched content.
+    Renames the filename to include the title so the UI shows it.
+    """
+    new_filename = f"Drive: {title} [{drive_id}]"
+    conn.execute(
+        "UPDATE attachments SET extracted_text = ?, filename = ?, size_bytes = ? WHERE id = ?",
+        (text, new_filename, len(text), attachment_id),
+    )
+
+
 def insert_embedding(conn: sqlite3.Connection, rec: EmbeddingRecord) -> int:
     cursor = conn.execute(
         """INSERT INTO embeddings (message_id, attachment_id, chunk_type,

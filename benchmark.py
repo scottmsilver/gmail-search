@@ -7,7 +7,7 @@ import time
 
 import requests
 
-BASE = os.environ.get("BENCHMARK_URL", "http://127.0.0.1:8080")
+BASE = os.environ.get("BENCHMARK_URL", "http://127.0.0.1:8090")
 DB_PATH = os.environ.get("BENCHMARK_DB", "data/gmail_search.db")
 
 QUERIES = [
@@ -27,6 +27,8 @@ QUERIES = [
     "meeting tomorrow",
     "follow up",
     "thank you",
+    # Regression probes
+    "keyboard notes",
 ]
 
 

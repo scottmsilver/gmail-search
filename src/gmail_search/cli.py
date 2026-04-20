@@ -59,13 +59,25 @@ def main(ctx, data_dir, config_path, verbose):
     _setup_context(ctx, data_dir, config_path, verbose)
 
 
-@main.command(help="Run OAuth flow to authenticate with Gmail")
+@main.command(help="Run OAuth flow to authenticate with Gmail / Drive")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Delete existing token.json and re-prompt the browser consent screen. "
+    "Required after adding a new scope (e.g. drive.readonly).",
+)
 @common_options
 @click.pass_context
-def auth(ctx):
+def auth(ctx, force):
     from gmail_search.gmail.auth import get_credentials
 
     data_dir = ctx.obj["data_dir"]
+    if force:
+        token_path = data_dir / "token.json"
+        if token_path.exists():
+            token_path.unlink()
+            click.echo(f"Removed {token_path} — next step will re-prompt consent.")
     get_credentials(data_dir)
     click.echo("Authentication successful. Token saved.")
 
@@ -110,27 +122,112 @@ def sync(ctx):
     click.echo(f"Synced {count} new messages.")
 
 
-@main.command(help="Extract text and images from downloaded attachments")
+@main.command(help="Extract text and images from downloaded attachments (and Drive docs linked from bodies)")
 @common_options
 @click.pass_context
 def extract(ctx):
+    """Unified extract step:
+
+    1. Scans every message body for Drive URLs and upserts stub
+       attachment rows (idempotent; cheap regex). Download-time
+       already does this for new messages — this call catches up
+       older messages that were downloaded before the Drive path
+       existed.
+    2. Iterates every attachment without `extracted_text`/`image_path`.
+       - Rows with a raw_path: local dispatch via `extract.dispatch`.
+       - Rows with mime `application/vnd.google-apps.*` (no raw_path):
+         fetched via Drive API.
+
+    Drive content lands in the attachments table, which means the
+    embedding pipeline indexes it and the summarizer sees it — no
+    separate enrichment job, no drift between "knows about" and
+    "has fetched".
+    """
     from tqdm import tqdm
 
     from gmail_search.extract import dispatch
-    from gmail_search.store.queries import get_attachments_for_message
+    from gmail_search.gmail.drive import (
+        build_drive_service,
+        drive_id_from_stub_filename,
+        drive_mime_for_kind,
+        extract_drive_ids,
+        fetch_doc_text,
+    )
+    from gmail_search.store.queries import get_attachments_for_message, upsert_drive_stub
 
     cfg = ctx.obj["config"]
     att_config = cfg.get("attachments", {})
     conn = get_connection(ctx.obj["db_path"])
+
+    # ── 1. Catch-up: seed Drive stubs for any message whose body
+    # we have but hasn't been scanned yet. Cheap regex per body.
+    # Layering: regex + mime mapping live in gmail/drive (pure API
+    # vocabulary), the INSERT lives in store/queries (schema owner).
+    try:
+        msg_rows = conn.execute("SELECT id, body_text FROM messages WHERE length(body_text) >= 50").fetchall()
+        new_stubs = 0
+        for r in tqdm(msg_rows, desc="Scanning bodies for Drive links"):
+            for drive_id, kind in extract_drive_ids(r["body_text"] or ""):
+                new_stubs += upsert_drive_stub(
+                    conn,
+                    message_id=r["id"],
+                    drive_id=drive_id,
+                    mime_type=drive_mime_for_kind(kind),
+                )
+        conn.commit()
+        if new_stubs:
+            click.echo(f"  inserted {new_stubs} new Drive stubs")
+    except Exception as e:
+        logger.warning(f"drive-stub scan failed: {e}")
+
+    # ── 2. Drive service is optional — if token lacks drive.readonly
+    # we gracefully skip Drive fetches while local extract continues.
+    drive_service = None
+    try:
+        drive_service = build_drive_service(ctx.obj["data_dir"])
+    except Exception as e:
+        click.echo(
+            f"Drive service unavailable ({e}); skipping Drive fetches. "
+            "Delete data/token.json and re-run any command to re-auth with drive.readonly."
+        )
+
+    # ── 3. Dispatch loop.
     try:
         rows = conn.execute("SELECT id FROM messages").fetchall()
         updated = 0
+        drive_fetched = 0
+        drive_failed = 0
 
         for row in tqdm(rows, desc="Extracting attachments"):
             attachments = get_attachments_for_message(conn, row["id"])
             for att in attachments:
                 if att.extracted_text or att.image_path:
                     continue
+
+                # Drive stub path: no raw_path, vnd.google-apps.* mime.
+                # All SQL goes through fill_drive_attachment — the cli
+                # layer orchestrates, it doesn't write SQL directly.
+                if not att.raw_path and att.mime_type.startswith("application/vnd.google-apps."):
+                    if drive_service is None:
+                        continue
+                    drive_id = drive_id_from_stub_filename(att.filename)
+                    if not drive_id:
+                        continue
+                    result = fetch_doc_text(drive_service, drive_id)
+                    if result is None:
+                        drive_failed += 1
+                        continue
+                    title, text = result
+                    try:
+                        fill_drive_attachment(conn, attachment_id=att.id, title=title, text=text, drive_id=drive_id)
+                        conn.commit()
+                        drive_fetched += 1
+                    except Exception as e:
+                        logger.warning(f"drive row update failed for {drive_id}: {e}")
+                        drive_failed += 1
+                    continue
+
+                # Local file path.
                 if not att.raw_path or not Path(att.raw_path).exists():
                     continue
 
@@ -158,7 +255,7 @@ def extract(ctx):
                     updated += 1
     finally:
         conn.close()
-    click.echo(f"Extracted content from {updated} attachments.")
+    click.echo(f"Local: {updated} attachments extracted. Drive: {drive_fetched} fetched, {drive_failed} failed.")
 
 
 @main.command(help="Embed all unembedded messages and attachments")
@@ -231,13 +328,29 @@ def reindex(ctx):
     default=None,
     help="Stop between batches if free disk drops below this many GiB",
 )
+@click.option(
+    "--loop",
+    is_flag=True,
+    default=False,
+    help="Never exit: after catching up (or crashing), sleep and retry forever. "
+    "Use this for the long-running backfill — same pattern as `watch`.",
+)
+@click.option(
+    "--loop-sleep",
+    type=int,
+    default=300,
+    help="Seconds to sleep between loop iterations when caught up. Default 5 min.",
+)
 @common_options
 @click.pass_context
-def update(ctx, max_messages, budget, batch_size, min_free_gb):
+def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep):
+    import time as _time
+
     from gmail_search.embed.pipeline import run_embedding_pipeline
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
+    from gmail_search.locks import write_lock
     from gmail_search.pipeline import reindex as _reindex
     from gmail_search.store.db import JobProgress
     from gmail_search.store.queries import get_attachments_for_message
@@ -252,159 +365,197 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb):
 
     service = build_gmail_service(data_dir)
     max_msg = max_messages or cfg["download"].get("max_messages")
-    index_dir = data_dir / "scann_index"
+    index_dir = data_dir / "scann_index"  # noqa: F841
 
-    # Starting message count is the baseline for rate/ETA math — the
-    # `completed` field represents total corpus size after this run, so
-    # rate = (completed - start_completed) / elapsed.
-    conn = get_connection(db_path)
-    start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    conn.close()
+    def _one_cycle() -> None:
+        """Run the full download→extract→embed→reindex loop once, then
+        return. When --loop is set, the outer driver calls this in a
+        crash-tolerant while-True around a sleep, so the job never dies
+        permanently — matches the `watch` daemon's behaviour.
+        """
+        # Re-read the message count each cycle. Progress math is
+        # relative to this cycle's start, not the first one, so the
+        # UI rate/ETA reflects what's happening right now.
+        conn = get_connection(db_path)
+        start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        conn.close()
+        progress = JobProgress(db_path, "update", start_completed=start_count)
 
-    progress = JobProgress(db_path, "update", start_completed=start_count)
+        total_downloaded = 0
+        total_extracted = 0
+        total_embedded = 0
+        batch_num = 0
 
-    total_downloaded = 0
-    total_extracted = 0
-    total_embedded = 0
-    batch_num = 0
+        # Real denominator for the progress bar: the user's actual Gmail
+        # message count (from users.getProfile). Falls back to 0 if the
+        # call fails; the UI shows `—` rather than a misleading fraction.
+        account_total = 0
+        try:
+            profile = service.users().getProfile(userId="me").execute()
+            account_total = int(profile.get("messagesTotal", 0))
+        except Exception as e:
+            logger.warning(f"couldn't fetch account message total: {e}")
+        progress_total = max_msg or account_total or 0
 
-    # Real denominator for the progress bar: the user's actual Gmail
-    # message count (from users.getProfile). Falls back to 0 if the call
-    # fails; the UI shows `—` rather than a misleading fraction.
-    account_total = 0
-    try:
-        profile = service.users().getProfile(userId="me").execute()
-        account_total = int(profile.get("messagesTotal", 0))
-    except Exception as e:
-        logger.warning(f"couldn't fetch account message total: {e}")
-    # Explicit --max-messages wins; otherwise aim at the whole account.
-    progress_total = max_msg or account_total or 0
+        while True:
+            if min_free_gb is not None:
+                import shutil as _shutil
 
-    from gmail_search.locks import write_lock
+                free_gb = _shutil.disk_usage(str(data_dir)).free / (1024**3)
+                if free_gb < min_free_gb:
+                    click.echo(f"Free disk {free_gb:.2f} GiB < min {min_free_gb} GiB — pausing.")
+                    break
 
+            # Serialise with the watch daemon (SQLite is single-writer).
+            # Held for one batch; watch preempts between batches.
+            with write_lock(data_dir):
+                batch_num += 1
+                current_limit = start_count + total_downloaded + batch_size
+                if max_msg:
+                    current_limit = min(current_limit, max_msg)
+
+                click.echo(f"\n{'=' * 50}")
+                click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
+                click.echo(f"{'=' * 50}")
+
+                progress.update("download", start_count + total_downloaded, progress_total, f"batch {batch_num}")
+
+                dl_count = download_messages(
+                    service=service,
+                    db_path=db_path,
+                    data_dir=data_dir,
+                    batch_size=cfg["download"]["batch_size"],
+                    max_messages=current_limit,
+                    max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+                )
+                total_downloaded += dl_count
+
+                if dl_count == 0:
+                    click.echo("No new messages to download this cycle.")
+                    break
+
+                click.echo(f"Downloaded {dl_count} messages.")
+
+                # Extract new attachments
+                progress.update("extract", start_count + total_downloaded, progress_total, f"+{dl_count} downloaded")
+                click.echo("Extracting attachments...")
+                conn = get_connection(db_path)
+                rows = conn.execute(
+                    "SELECT DISTINCT m.id FROM messages m "
+                    "JOIN attachments a ON a.message_id = m.id "
+                    "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
+                ).fetchall()
+                extracted = 0
+                for row in rows:
+                    attachments = get_attachments_for_message(conn, row["id"])
+                    for att in attachments:
+                        if att.extracted_text or att.image_path:
+                            continue
+                        if not att.raw_path or not Path(att.raw_path).exists():
+                            continue
+                        try:
+                            result = dispatch(att.mime_type, Path(att.raw_path), att_config)
+                        except Exception as e:
+                            logger.warning(f"Failed to extract {att.filename}: {e}")
+                            continue
+                        if result is None:
+                            continue
+                        updates = {}
+                        if result.text:
+                            updates["extracted_text"] = result.text
+                        if result.images:
+                            updates["image_path"] = str(
+                                result.images[0].parent if len(result.images) > 1 else result.images[0]
+                            )
+                        if updates:
+                            set_clause = ", ".join(f"{k} = ?" for k in updates)
+                            conn.execute(
+                                f"UPDATE attachments SET {set_clause} WHERE id = ?",
+                                (*updates.values(), att.id),
+                            )
+                            conn.commit()
+                            extracted += 1
+                conn.close()
+                total_extracted += extracted
+                click.echo(f"Extracted {extracted} attachments.")
+
+                # Embed new messages + attachments
+                progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
+                click.echo("Embedding...")
+                conn = get_connection(db_path)
+                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+                conn.close()
+                if not ok:
+                    click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
+                    break
+                emb_count = run_embedding_pipeline(db_path, cfg)
+                total_embedded += emb_count
+                click.echo(f"Embedded {emb_count} chunks.")
+
+                # Reindex so search is live. light=True because heavy
+                # rebuilds (aliases, query cache wipe) run once at the
+                # end of the full update, not per-batch.
+                progress.update("reindex", start_count + total_downloaded, progress_total, f"+{emb_count} embedded")
+                click.echo("Reindexing...")
+                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
+
+                conn = get_connection(db_path)
+                msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+                cost = get_total_spend(conn)
+                conn.close()
+                click.echo(f"Status: {msg_count:,} messages | {emb_total:,} embeddings | ${cost:.2f} spent")
+
+                if max_msg and msg_count >= max_msg:
+                    click.echo("Reached max message limit.")
+                    break
+
+        progress.finish(
+            "done",
+            f"+{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded",
+        )
+
+        click.echo(f"\n{'=' * 50}")
+        click.echo(
+            f"Cycle done! +{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded"
+        )
+        conn = get_connection(db_path)
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        total_cost = get_total_spend(conn)
+        conn.close()
+        click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
+
+    # ── outer driver ──────────────────────────────────────────────────
+    if not loop:
+        _one_cycle()
+        return
+
+    cycle = 0
     while True:
-        if min_free_gb is not None:
-            import shutil as _shutil
+        cycle += 1
+        click.echo(f"\n{'#' * 50}\n# backfill loop cycle {cycle}\n{'#' * 50}")
+        try:
+            _one_cycle()
+        except KeyboardInterrupt:
+            click.echo("interrupted — exiting loop.")
+            raise
+        except Exception as e:
+            # Don't let one bad cycle kill the daemon. Log + surface to
+            # job_progress so the Settings UI shows the failure reason,
+            # then sleep and try again. Matches how `watch` survives
+            # transient Gmail / network hiccups.
+            logger.exception("update cycle crashed: %s", e)
+            try:
+                from gmail_search.store.db import JobProgress as _JP
 
-            free_gb = _shutil.disk_usage(str(data_dir)).free / (1024**3)
-            if free_gb < min_free_gb:
-                click.echo(f"Free disk {free_gb:.2f} GiB < min {min_free_gb} GiB — stopping backfill.")
-                break
-
-        # Serialise with the watch daemon (SQLite is single-writer).
-        # Held for one batch; watch preempts between batches.
-        with write_lock(data_dir):
-            batch_num += 1
-            # How many to download this round — cap at batch_size new messages
-            current_limit = start_count + total_downloaded + batch_size
-            if max_msg:
-                current_limit = min(current_limit, max_msg)
-
-            click.echo(f"\n{'='*50}")
-            click.echo(f"Batch {batch_num}: downloading up to {current_limit} total messages")
-            click.echo(f"{'='*50}")
-
-            progress.update("download", start_count + total_downloaded, progress_total, f"batch {batch_num}")
-
-            # Download one batch
-            dl_count = download_messages(
-                service=service,
-                db_path=db_path,
-                data_dir=data_dir,
-                batch_size=cfg["download"]["batch_size"],
-                max_messages=current_limit,
-                max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
-            )
-            total_downloaded += dl_count
-
-            if dl_count == 0:
-                click.echo("No new messages to download.")
-                break
-
-            click.echo(f"Downloaded {dl_count} messages.")
-
-            # Extract new attachments
-            progress.update("extract", start_count + total_downloaded, progress_total, f"+{dl_count} downloaded")
-            click.echo("Extracting attachments...")
-            conn = get_connection(db_path)
-            rows = conn.execute(
-                "SELECT DISTINCT m.id FROM messages m "
-                "JOIN attachments a ON a.message_id = m.id "
-                "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
-            ).fetchall()
-            extracted = 0
-            for row in rows:
-                attachments = get_attachments_for_message(conn, row["id"])
-                for att in attachments:
-                    if att.extracted_text or att.image_path:
-                        continue
-                    if not att.raw_path or not Path(att.raw_path).exists():
-                        continue
-                    try:
-                        result = dispatch(att.mime_type, Path(att.raw_path), att_config)
-                    except Exception as e:
-                        logger.warning(f"Failed to extract {att.filename}: {e}")
-                        continue
-                    if result is None:
-                        continue
-                    updates = {}
-                    if result.text:
-                        updates["extracted_text"] = result.text
-                    if result.images:
-                        updates["image_path"] = str(
-                            result.images[0].parent if len(result.images) > 1 else result.images[0]
-                        )
-                    if updates:
-                        set_clause = ", ".join(f"{k} = ?" for k in updates)
-                        conn.execute(f"UPDATE attachments SET {set_clause} WHERE id = ?", (*updates.values(), att.id))
-                        conn.commit()
-                        extracted += 1
-            conn.close()
-            total_extracted += extracted
-            click.echo(f"Extracted {extracted} attachments.")
-
-            # Embed new messages + attachments
-            progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
-            click.echo("Embedding...")
-            conn = get_connection(db_path)
-            ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
-            conn.close()
-            if not ok:
-                click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
-                break
-            emb_count = run_embedding_pipeline(db_path, cfg)
-            total_embedded += emb_count
-            click.echo(f"Embedded {emb_count} chunks.")
-
-            # Reindex so search is live. light=True because the heavy
-            # rebuilds (aliases, query cache wipe) are done once at the
-            # end of the full update, not per-batch.
-            progress.update("reindex", start_count + total_downloaded, progress_total, f"+{emb_count} embedded")
-            click.echo("Reindexing...")
-            _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
-
-            conn = get_connection(db_path)
-            msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-            cost = get_total_spend(conn)
-            conn.close()
-            click.echo(f"Status: {msg_count:,} messages | {emb_total:,} embeddings | ${cost:.2f} spent")
-
-            # Check if we've hit the limit
-            if max_msg and msg_count >= max_msg:
-                click.echo("Reached max message limit.")
-                break
-
-    progress.finish("done", f"+{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded")
-
-    click.echo(f"\n{'='*50}")
-    click.echo(f"Done! +{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded")
-    conn = get_connection(db_path)
-    msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-    emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    total_cost = get_total_spend(conn)
-    conn.close()
-    click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
+                _JP(db_path, "update", start_completed=0).update(
+                    "error", 0, 0, f"crash: {type(e).__name__}: {str(e)[:120]}"
+                )
+            except Exception:
+                pass
+        click.echo(f"\n[backfill] sleeping {loop_sleep}s before next cycle...")
+        _time.sleep(loop_sleep)
 
 
 def _pid_file(data_dir: Path) -> Path:

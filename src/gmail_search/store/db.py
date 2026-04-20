@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS term_aliases (
     similarity REAL NOT NULL DEFAULT 0.0
 );
 
+-- One-row pointer that names the currently-active on-disk ScaNN index
+-- directory. Builders write a fresh timestamped sibling and flip this
+-- row in a single transaction; readers join here to resolve "where is
+-- the live index right now?" instead of counting on filesystem rename
+-- atomicity. Works across every FS (NFS, FUSE, tmpfs) because SQLite
+-- is the source of truth.
+CREATE TABLE IF NOT EXISTS scann_index_pointer (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    current_dir TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings(message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup ON embeddings(message_id, attachment_id, chunk_type, model);
@@ -294,6 +306,9 @@ _INTERNAL_TABLES = {
     "embeddings",
     "sync_state",
     "query_cache",
+    # scann_index_pointer is a single-row KV tracking the active ScaNN
+    # index directory. Infrastructure, not something an LLM should query.
+    "scann_index_pointer",
     "messages_fts",
     "attachments_fts",
     "messages_fts_data",
