@@ -405,44 +405,28 @@ def _search_fts_sqlite(conn: sqlite3.Connection, query: str, limit: int) -> dict
     return scores
 
 
-# Weights passed to `ts_rank_cd`: {D, C, B, A}. Mirrors the `setweight`
-# assignments in pg_schema.sql — subject is A (1.0), from/to are B (0.6),
-# body is C (0.3), and the D slot (0.1) is unused by our documents but
-# required by the function signature.
-_PG_TS_RANK_WEIGHTS = "{0.1, 0.3, 0.6, 1.0}"
-# Normalization bits for `ts_rank_cd`: 32 divides the rank by
-# (1 + log(unique-words-in-doc)), which keeps scores in (0, 1) regardless
-# of document length. We still min-max below for blend compatibility with
-# the SQLite path.
-_PG_TS_RANK_NORM = 32
-
-
-def _pg_rank_table(
+def _pg_bm25_messages(
     conn,
-    table: str,
-    pg_tsquery_fn: str,
-    query: str,
+    bm25_query: str,
     limit: int,
     logger,
 ) -> dict[str, float]:
-    """Run one FTS pass against a single PG table.
+    """BM25 pass against the `messages` table via pg_search.
 
-    `pg_tsquery_fn` is either `phraseto_tsquery` (phrase pass) or
-    `websearch_to_tsquery` (disjunction pass). Both accept the raw
-    sanitized query string; we never build tsquery fragments by hand,
-    so there's no SQL-injection surface beyond what psycopg's parameter
-    binding already handles.
+    Uses the `@@@` operator (Tantivy BM25 match) and `paradedb.score(id)`
+    for a real BM25 score comparable to the SQLite FTS5 `bm25()` path.
+    The query string is interpreted by Tantivy's query parser, which
+    natively handles phrase quoting (`"foo bar"`), boolean operators,
+    and per-field targeting. We pass the sanitized tokens through as-is.
     """
     scores: dict[str, float] = {}
     try:
         rows = conn.execute(
-            f"SELECT id AS message_id, "
-            f"ts_rank_cd('{_PG_TS_RANK_WEIGHTS}'::float4[], fts, "
-            f"{pg_tsquery_fn}('english', ?), {_PG_TS_RANK_NORM}) AS rank "
-            f"FROM {table} "
-            f"WHERE fts @@ {pg_tsquery_fn}('english', ?) "
-            f"ORDER BY rank DESC LIMIT ?",
-            (query, query, limit),
+            "SELECT id AS message_id, paradedb.score(id) AS rank "
+            "FROM messages "
+            "WHERE messages @@@ ? "
+            "ORDER BY rank DESC LIMIT ?",
+            (bm25_query, limit),
         ).fetchall()
         for r in rows:
             mid = r["message_id"]
@@ -450,32 +434,30 @@ def _pg_rank_table(
             if mid not in scores or raw > scores[mid]:
                 scores[mid] = raw
     except Exception as e:  # paranoid catch — FTS must never fail the request
-        # `websearch_to_tsquery` raises on pathological input in rare cases;
-        # a malformed query must not crash the whole search pipeline.
-        logger.exception(f"PG FTS error on {table} via {pg_tsquery_fn}: {e!s} | query={query!r}")
+        logger.exception(f"PG BM25 error on messages: {e!s} | query={bm25_query!r}")
     return scores
 
 
-def _pg_rank_table_attachments(
+def _pg_bm25_attachments(
     conn,
-    pg_tsquery_fn: str,
-    query: str,
+    bm25_query: str,
     limit: int,
     logger,
 ) -> dict[str, float]:
-    """Attachments variant: the rank row pulls `message_id` (not `id`)
-    so the caller can blend scores by message like the SQLite path does.
+    """BM25 pass against `attachments`. Returns `{message_id: score}` by
+    joining the attachment row's `message_id`. `paradedb.score(id)` keys
+    on the attachment PK (the BM25 `key_field`), so the score is per
+    attachment; multiple attachment hits on the same message collapse to
+    the max score in the caller.
     """
     scores: dict[str, float] = {}
     try:
         rows = conn.execute(
-            f"SELECT message_id, "
-            f"ts_rank_cd('{_PG_TS_RANK_WEIGHTS}'::float4[], fts, "
-            f"{pg_tsquery_fn}('english', ?), {_PG_TS_RANK_NORM}) AS rank "
-            f"FROM attachments "
-            f"WHERE fts @@ {pg_tsquery_fn}('english', ?) "
-            f"ORDER BY rank DESC LIMIT ?",
-            (query, query, limit),
+            "SELECT message_id, paradedb.score(id) AS rank "
+            "FROM attachments "
+            "WHERE attachments @@@ ? "
+            "ORDER BY rank DESC LIMIT ?",
+            (bm25_query, limit),
         ).fetchall()
         for r in rows:
             mid = r["message_id"]
@@ -483,25 +465,56 @@ def _pg_rank_table_attachments(
             if mid not in scores or raw > scores[mid]:
                 scores[mid] = raw
     except Exception as e:
-        logger.exception(f"PG FTS error on attachments via {pg_tsquery_fn}: {e!s} | query={query!r}")
+        logger.exception(f"PG BM25 error on attachments: {e!s} | query={bm25_query!r}")
     return scores
 
 
-def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
-    """Postgres `tsvector @@ tsquery` path.
+# Field lists for the BM25 multi-field query builder. pg_search's Tantivy
+# parser requires explicit `field:term` syntax — an unqualified `invoice`
+# searches nothing. We mirror the SQLite FTS column set: the `messages`
+# FTS5 virtual table indexed {subject, from, to, body}; `attachments`
+# indexed {filename, extracted_text}. Keep these in sync with the
+# `USING bm25 (...)` column list in pg_schema.sql.
+_BM25_MESSAGE_FIELDS = ("subject", "from_addr", "to_addr", "body_text")
+_BM25_ATTACHMENT_FIELDS = ("filename", "extracted_text")
 
-    Two passes mirror the SQLite strategy:
-      1. Phrase pass via `phraseto_tsquery` — words must appear in order,
+
+def _build_bm25_query(tokens: list[str], fields: tuple[str, ...]) -> tuple[str, str | None]:
+    """Build Tantivy query strings targeting every FTS field.
+
+    Returns `(disjunction_query, phrase_query_or_none)`:
+      * Disjunction pass: `(f1:t1 f1:t2 ... f2:t1 f2:t2 ...)` — any
+        token in any field matches. Tantivy's default combinator is OR.
+      * Phrase pass: `(f1:"t1 t2 ..." f2:"t1 t2 ..." ...)` when there
+        are ≥2 tokens — ordered-adjacent match, mirrors the SQLite
+        FTS5 phrase pass.
+
+    Tokens come from `_sanitize_fts_tokens()` so they are safe to
+    interpolate (no quotes, backslashes, or Tantivy operators).
+    """
+    disjunction_terms = [f"{f}:{t}" for f in fields for t in tokens]
+    disjunction = " ".join(disjunction_terms)
+
+    phrase: str | None = None
+    if len(tokens) > 1:
+        phrase_body = " ".join(tokens)
+        phrase = " ".join(f'{f}:"{phrase_body}"' for f in fields)
+    return disjunction, phrase
+
+
+def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
+    """Postgres BM25 path via pg_search (paradedb / Tantivy).
+
+    Two passes mirror the SQLite FTS5 strategy:
+      1. Phrase pass — `"t1 t2 t3"` — tokens must appear in order,
          adjacent. Results get the same ×1.5 boost the SQLite path gives
          FTS5 phrase matches.
-      2. Disjunction pass via `websearch_to_tsquery` — any sanitized term
-         can match. `websearch_to_tsquery` natively accepts quotes, `-`,
-         and `OR`, but we still sanitize because pathological input can
-         make the query parser slow enough to matter.
+      2. Disjunction pass — `t1 t2 t3` (Tantivy default = OR) — any
+         sanitized term can match.
 
-    Scores from `ts_rank_cd(..., 32)` are already in (0, 1); we still
-    min-max across the result set so downstream blend code sees the same
-    shape as the SQLite path.
+    Scores come from `paradedb.score(id)` (real BM25, not
+    `ts_rank_cd`). We still min-max across the result set so downstream
+    blend code sees the same (0, 1) shape as the SQLite path.
     """
     import logging
 
@@ -510,16 +523,15 @@ def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
     if not tokens:
         return {}
 
-    # Hand the sanitized tokens to PG as plain whitespace-joined text —
-    # `phraseto_tsquery` / `websearch_to_tsquery` do their own parsing.
-    sanitized_query = " ".join(tokens)
+    msg_disj, msg_phrase = _build_bm25_query(tokens, _BM25_MESSAGE_FIELDS)
+    att_disj, att_phrase = _build_bm25_query(tokens, _BM25_ATTACHMENT_FIELDS)
     scores: dict[str, float] = {}
 
     # Strategy 1: Phrase match (words must appear in order, adjacent).
-    if len(tokens) > 1:
+    if msg_phrase is not None:
         for tbl_scores in (
-            _pg_rank_table(conn, "messages", "phraseto_tsquery", sanitized_query, limit, logger),
-            _pg_rank_table_attachments(conn, "phraseto_tsquery", sanitized_query, limit, logger),
+            _pg_bm25_messages(conn, msg_phrase, limit, logger),
+            _pg_bm25_attachments(conn, att_phrase, limit, logger),
         ):
             for mid, raw in tbl_scores.items():
                 # Boost phrase matches by 1.5x (mirrors SQLite path).
@@ -529,8 +541,8 @@ def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
 
     # Strategy 2: Individual terms (any word matches — broader recall).
     for tbl_scores in (
-        _pg_rank_table(conn, "messages", "websearch_to_tsquery", sanitized_query, limit, logger),
-        _pg_rank_table_attachments(conn, "websearch_to_tsquery", sanitized_query, limit, logger),
+        _pg_bm25_messages(conn, msg_disj, limit, logger),
+        _pg_bm25_attachments(conn, att_disj, limit, logger),
     ):
         for mid, raw in tbl_scores.items():
             if mid not in scores or raw > scores[mid]:

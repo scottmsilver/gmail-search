@@ -1,8 +1,9 @@
 services:
   pg:
-    image: postgres:16-alpine
+    image: paradedb/paradedb:latest-pg16
     container_name: gmail-search-pg
     restart: unless-stopped
+    shm_size: 1gb
     environment:
       POSTGRES_USER: gmail_search
       POSTGRES_PASSWORD: gmail_search

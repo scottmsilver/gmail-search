@@ -10,9 +10,16 @@
 --   * DEFAULT CURRENT_TIMESTAMP           -> DEFAULT NOW()
 --   * JSON-in-TEXT columns (labels, ...)  -> kept as TEXT (migration to JSONB is a follow-up)
 --   * REFERENCES ...                      -> kept (PG enforces FKs natively, which is what we want)
---   * FTS5 virtual tables                 -> replaced with generated tsvector columns + GIN indexes
+--   * FTS5 virtual tables                 -> replaced with pg_search (paradedb) BM25 indexes
 --
 -- Every CREATE TABLE uses IF NOT EXISTS so this file is idempotent.
+
+-- pg_search (paradedb) gives us real BM25 ranking via Tantivy — the closest
+-- thing to SQLite FTS5's bm25() function. Default PG `ts_rank_cd` doesn't
+-- match BM25 semantics and the A/B harness caught unacceptable ranking drift
+-- (top-10 overlap 0.55, below the 0.8 bar). pg_search preserves that
+-- invariant.
+CREATE EXTENSION IF NOT EXISTS pg_search;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Core tables
@@ -29,16 +36,7 @@ CREATE TABLE IF NOT EXISTS messages (
     date TEXT NOT NULL,
     labels TEXT NOT NULL DEFAULT '[]',
     history_id BIGINT NOT NULL DEFAULT 0,
-    raw_json TEXT NOT NULL DEFAULT '{}',
-    -- FTS replacement for messages_fts (FTS5 virtual table in SQLite).
-    -- Weights mirror the SQLite FTS column order: subject is primary (A),
-    -- from/to are secondary (B), body is the bulk content (C).
-    fts tsvector GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(from_addr, '')), 'B') ||
-        setweight(to_tsvector('english', coalesce(to_addr, '')), 'B') ||
-        setweight(to_tsvector('english', coalesce(body_text, '')), 'C')
-    ) STORED
+    raw_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -50,12 +48,7 @@ CREATE TABLE IF NOT EXISTS attachments (
     extracted_text TEXT,
     image_path TEXT,
     raw_path TEXT,
-    UNIQUE (message_id, filename),
-    -- FTS replacement for attachments_fts.
-    fts tsvector GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(filename, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(extracted_text, '')), 'C')
-    ) STORED
+    UNIQUE (message_id, filename)
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -214,20 +207,29 @@ CREATE TABLE IF NOT EXISTS scann_index_pointer (
 );
 
 -- ─────────────────────────────────────────────────────────────────────
--- FTS (Postgres equivalent of FTS5 virtual tables)
+-- FTS (pg_search / paradedb BM25 indexes)
 --
 -- SQLite had:
 --   CREATE VIRTUAL TABLE messages_fts    USING fts5(...)
 --   CREATE VIRTUAL TABLE attachments_fts USING fts5(...)
--- In Postgres we put generated tsvector columns directly on the base
--- tables (see `fts` columns above) and index them with GIN. Query sites
--- that used `messages_fts MATCH 'foo'` become
--- `messages.fts @@ plainto_tsquery('english', 'foo')` (or
--- `websearch_to_tsquery`) and rank with ts_rank_cd instead of bm25.
+-- In Postgres we build Tantivy-backed BM25 indexes via pg_search. Query
+-- sites use `table @@@ 'query'` (BM25 match) and rank by
+-- `paradedb.score(id)`, which is a real BM25 score comparable to the
+-- `bm25()` function the SQLite FTS5 path uses.
+--
+-- The `key_field` is the row PK so `paradedb.score(key_field)` can be
+-- joined back to the base row.
 -- ─────────────────────────────────────────────────────────────────────
 
-CREATE INDEX IF NOT EXISTS idx_messages_fts ON messages USING GIN (fts);
-CREATE INDEX IF NOT EXISTS idx_attachments_fts ON attachments USING GIN (fts);
+CREATE INDEX IF NOT EXISTS messages_bm25_idx
+    ON messages
+    USING bm25 (id, subject, body_text, from_addr, to_addr)
+    WITH (key_field = 'id');
+
+CREATE INDEX IF NOT EXISTS attachments_bm25_idx
+    ON attachments
+    USING bm25 (id, filename, extracted_text)
+    WITH (key_field = 'id');
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Secondary indexes (translated verbatim from SQLite)
@@ -247,8 +249,9 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
 -- ─────────────────────────────────────────────────────────────────────
 -- Tables intentionally DROPPED relative to SQLite:
 --   * messages_fts, attachments_fts (and all their FTS5 shadow tables:
---     *_data, *_idx, *_docsize, *_config). Replaced by `messages.fts`
---     and `attachments.fts` generated tsvector columns + GIN indexes.
+--     *_data, *_idx, *_docsize, *_config). Replaced by pg_search BM25
+--     indexes (messages_bm25_idx, attachments_bm25_idx) on the base
+--     tables.
 --
 -- Tables intentionally KEPT identical (even though a future pass may
 -- migrate them) to keep this translation mechanical:
@@ -260,7 +263,8 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
 --     variant_a, variant_b, raw_json). JSONB migration is a follow-up.
 --
 -- Behavior change we accept:
---   * FTS ranking differs: Postgres uses ts_rank_cd, SQLite FTS5 uses
---     bm25. Scores aren't comparable and top-N ordering can shift.
---     The model-battle / A/B harness has an overlap gate that catches
---     unacceptable drift — rely on it when flipping the backend.
+--   * FTS ranking is BM25 on both sides, but via different implementations:
+--     SQLite FTS5 uses its built-in bm25() on shadow tables; Postgres uses
+--     pg_search's Tantivy-backed BM25 on in-table indexes. Scores are in
+--     the same family but not bit-identical — top-N overlap in the A/B
+--     harness is the gate (target ≥ 0.8).
