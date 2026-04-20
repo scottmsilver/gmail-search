@@ -82,22 +82,29 @@ const InboxInner = () => {
   const [offset, setOffset] = useState(0);
   const [reachedEnd, setReachedEnd] = useState(false);
 
-  // "Time to glass": ms from mount/Load-More click → frame where the
-  // rows are painted. Same pattern as SearchView — anchor a ref before
-  // the fetch fires, then read it back in a double-RAF scheduled after
-  // the state commit. Single RAF fires *before* paint; the second
-  // fires *after*, which is the frame the user actually sees.
+  // "Time to glass": start is anchored at first render (before any
+  // effect fires), end is read when the BROWSER confirms it has
+  // painted content via `requestAnimationFrame` + PerformanceObserver
+  // on 'paint' entries. The previous version anchored inside a
+  // useEffect so it silently skipped React's mount-to-first-effect
+  // window — often tens of ms — and reported artificially low
+  // numbers (e.g. "7ms" on a hot reload).
+  //
+  // Start: lazy ref init — assigned during the first render pass, so
+  // it captures the earliest clock we can reach from user code.
+  // End: after the threads state commits, wait two RAFs so the frame
+  // the user sees has actually hit the compositor, then stop the
+  // clock. Two RAFs (not one) because the first RAF fires *before*
+  // the next paint; the second is scheduled *after* it.
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
-  const loadStartRef = useRef<number | null>(null);
+  const mountStartRef = useRef<number | null>(null);
+  if (mountStartRef.current === null) {
+    mountStartRef.current = performance.now();
+  }
 
   const loadMore = useCallback(
     async (nextOffset: number) => {
       setLoading(true);
-      // Only time the first page — subsequent "Load more" hits prepend
-      // to an already-painted list and would dilute the metric.
-      if (nextOffset === 0) {
-        loadStartRef.current = performance.now();
-      }
       try {
         const res = await fetch(`/api/inbox?limit=${PAGE_SIZE}&offset=${nextOffset}`, { cache: "no-store" });
         if (!res.ok) throw new Error(`inbox ${res.status}`);
@@ -116,10 +123,14 @@ const InboxInner = () => {
     loadMore(0);
   }, [loadMore]);
 
+  // Stop the clock the first time the threads state commits with real
+  // rows. Guard with a ref so Load More / subsequent re-renders don't
+  // overwrite the first-paint number.
   useEffect(() => {
-    if (loadStartRef.current === null) return;
-    const start = loadStartRef.current;
-    loadStartRef.current = null; // consume; re-anchored on the next fresh load
+    if (mountStartRef.current === null) return;
+    if (threads.length === 0) return;
+    const start = mountStartRef.current;
+    mountStartRef.current = null; // consume — this metric is per mount
     let raf2: number | null = null;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
