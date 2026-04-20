@@ -26,12 +26,17 @@ def resolve_active_index_dir(db_path: Path, fallback: Path) -> Path:
     except Exception:
         return fallback
     try:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='scann_index_pointer'"
-        ).fetchone()
-        if row is None:
+        # SELECT against the pointer table directly, catching the
+        # "no such table" failure for the case where a caller hands us
+        # a DB that predates the pointer schema. This is backend-agnostic:
+        # SQLite raises `OperationalError("no such table")`, Postgres
+        # raises `UndefinedTable`. Either way we fall through to the
+        # default path. Replaces the old `sqlite_master` probe which
+        # didn't exist on Postgres.
+        try:
+            row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
+        except Exception:
             return fallback
-        row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
     finally:
         conn.close()
     if row and row["current_dir"]:

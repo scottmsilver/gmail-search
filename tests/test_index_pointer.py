@@ -67,9 +67,13 @@ def _seed(db_path: Path, n: int = 80, dims: int = 16) -> None:
 # ─── pointer round-trip ───────────────────────────────────────────────────
 
 
-def test_set_and_get_active_index_dir(tmp_path):
-    """Basic round-trip: set then read returns the same string."""
-    db_path = tmp_path / "db.sqlite"
+def test_set_and_get_active_index_dir(db_backend):
+    """Basic round-trip: set then read returns the same string.
+
+    Runs against both SQLite and Postgres via the `db_backend` fixture —
+    this is the cleanest proof that the pointer shim works uniformly
+    across backends."""
+    db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
     try:
@@ -133,11 +137,11 @@ def test_reindex_gc_removes_old_versioned_dir(tmp_path):
 # ─── resolve_active_index_dir ─────────────────────────────────────────────
 
 
-def test_resolve_uses_pointer_when_present(tmp_path):
+def test_resolve_uses_pointer_when_present(db_backend, tmp_path):
     """The resolver returns the pointer target when set, not the
     passed-in fallback — that's the whole point of the pointer.
     """
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     active = tmp_path / "scann_index__20260420_abc"
     active.mkdir()
@@ -152,10 +156,10 @@ def test_resolve_uses_pointer_when_present(tmp_path):
     assert resolved == active
 
 
-def test_resolve_falls_back_when_pointer_missing(tmp_path):
+def test_resolve_falls_back_when_pointer_missing(db_backend, tmp_path):
     """Fresh DB with no pointer row → resolver returns the fallback.
     Keeps legacy callers / tests working."""
-    db_path = tmp_path / "db.sqlite"
+    db_path = db_backend["db_path"]
     init_db(db_path)
     fallback = tmp_path / "scann_index"
     resolved = resolve_active_index_dir(db_path, fallback)

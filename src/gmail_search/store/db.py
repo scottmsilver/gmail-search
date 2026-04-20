@@ -401,9 +401,7 @@ def rebuild_thread_summary(db_path: Path) -> int:
     """Precompute thread metadata for fast search ranking. Returns thread count."""
     import json
 
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
 
     conn.execute("DELETE FROM thread_summary")
 
@@ -642,8 +640,7 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
 
     logger = logging.getLogger(__name__)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
 
     data = _load_message_embeddings(conn)
     n_msgs = len(data["msg_ids"])
@@ -778,8 +775,7 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
 
     logger = logging.getLogger(__name__)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
 
     # Load embeddings
     emb_rows = conn.execute("SELECT message_id, embedding FROM embeddings WHERE chunk_type = 'message'").fetchall()
@@ -963,8 +959,7 @@ def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
     import re
     from collections import Counter
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
 
     word_counts: Counter = Counter()
 
@@ -1002,9 +997,7 @@ def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
 
 def rebuild_contact_frequency(db_path: Path) -> int:
     """Precompute contact frequency scores. Returns contact count."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
+    conn = get_connection(db_path)
 
     conn.execute("DELETE FROM contact_frequency")
 
@@ -1052,7 +1045,7 @@ class JobProgress:
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc).isoformat()
-        conn = sqlite3.connect(db_path)
+        conn = get_connection(db_path)
         conn.execute(
             "INSERT OR REPLACE INTO job_progress "
             "(job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at) "
@@ -1065,7 +1058,7 @@ class JobProgress:
     def update(self, stage: str, completed: int, total: int, detail: str = ""):
         from datetime import datetime, timezone
 
-        conn = sqlite3.connect(self.db_path)
+        conn = get_connection(self.db_path)
         conn.execute(
             "UPDATE job_progress SET stage=?, completed=?, total=?, detail=?, updated_at=? WHERE job_id=?",
             (stage, completed, total, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
@@ -1076,7 +1069,7 @@ class JobProgress:
     def finish(self, status: str = "done", detail: str = ""):
         from datetime import datetime, timezone
 
-        conn = sqlite3.connect(self.db_path)
+        conn = get_connection(self.db_path)
         conn.execute(
             "UPDATE job_progress SET status=?, detail=?, updated_at=? WHERE job_id=?",
             (status, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
@@ -1086,8 +1079,7 @@ class JobProgress:
 
     @staticmethod
     def get(db_path: Path, job_id: str = None) -> dict | list | None:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_connection(db_path)
         if job_id:
             row = conn.execute("SELECT * FROM job_progress WHERE job_id=?", (job_id,)).fetchone()
             conn.close()
@@ -1123,7 +1115,7 @@ def reap_stale_jobs(conn: sqlite3.Connection, staleness_seconds: int = 600) -> i
 
 def clear_query_cache(db_path: Path) -> int:
     """Clear the query embedding cache. Call after re-embedding or reindexing."""
-    conn = sqlite3.connect(db_path)
+    conn = get_connection(db_path)
     count = conn.execute("DELETE FROM query_cache").rowcount
     conn.commit()
     conn.close()
@@ -1132,8 +1124,7 @@ def clear_query_cache(db_path: Path) -> int:
 
 def rebuild_fts(db_path: Path) -> int:
     """Rebuild FTS index from current messages and attachments. Returns count indexed."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = get_connection(db_path)
 
     # Clear and repopulate messages FTS
     conn.execute("DELETE FROM messages_fts")

@@ -80,17 +80,29 @@ def get_messages_without_embeddings(conn: sqlite3.Connection, model: str) -> lis
 
 
 def upsert_attachment(conn: sqlite3.Connection, att: Attachment) -> int:
+    # `RETURNING id` works on both SQLite >= 3.35 and Postgres; it's the
+    # portable replacement for the old `cursor.lastrowid` (which returned
+    # None on psycopg under our dict_row factory). We fetch the scalar
+    # right after execute so callers get the same int back unchanged.
     cursor = conn.execute(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
            extracted_text, image_path, raw_path)
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(message_id, filename) DO UPDATE SET
              mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
-             raw_path=excluded.raw_path""",
+             raw_path=excluded.raw_path
+           RETURNING id""",
         (att.message_id, att.filename, att.mime_type, att.size_bytes, att.extracted_text, att.image_path, att.raw_path),
     )
+    row = cursor.fetchone()
     conn.commit()
-    return cursor.lastrowid
+    # row can be a sqlite3.Row (tuple-like, row[0]) or a dict (psycopg dict_row, row["id"]).
+    if row is None:
+        return 0
+    try:
+        return int(row["id"])
+    except (KeyError, TypeError):
+        return int(row[0])
 
 
 def get_attachments_for_message(conn: sqlite3.Connection, message_id: str) -> list[Attachment]:
@@ -185,14 +197,24 @@ def fill_drive_attachment(
 
 
 def insert_embedding(conn: sqlite3.Connection, rec: EmbeddingRecord) -> int:
+    # `RETURNING id` — portable across SQLite 3.35+ and Postgres, and
+    # the only reliable way to get the newly-generated BIGSERIAL from
+    # psycopg.
     cursor = conn.execute(
         """INSERT INTO embeddings (message_id, attachment_id, chunk_type,
            chunk_text, embedding, model)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?)
+           RETURNING id""",
         (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model),
     )
+    row = cursor.fetchone()
     conn.commit()
-    return cursor.lastrowid
+    if row is None:
+        return 0
+    try:
+        return int(row["id"])
+    except (KeyError, TypeError):
+        return int(row[0])
 
 
 def embedding_exists(
@@ -315,12 +337,28 @@ def _fts_search_table(
     return scores
 
 
-def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[str, float]:
-    """Search messages + attachments via FTS5, return {message_id: bm25_score}.
+def search_fts(conn, query: str, limit: int = 200) -> dict[str, float]:
+    """Search messages + attachments via full-text search, return {message_id: score}.
 
-    Searches with both phrase match (higher weight) and individual terms (broader recall).
-    Returns normalized scores in 0-1 range.
+    Backend-aware entry point:
+      - SQLite path routes to `_search_fts_sqlite` (FTS5 MATCH + bm25).
+      - Postgres path routes to `_search_fts_postgres`
+        (`tsvector @@ websearch_to_tsquery` + `ts_rank_cd`).
+
+    Both backends search with a phrase-match pass (higher weight) and a
+    disjunction pass (broader recall), then return normalized scores in
+    [0, 1] so downstream blenders can mix FTS with vector similarity.
     """
+    # Late import to avoid a top-of-module cycle with db.py.
+    from gmail_search.store.db import _is_postgres_backend
+
+    if _is_postgres_backend():
+        return _search_fts_postgres(conn, query, limit)
+    return _search_fts_sqlite(conn, query, limit)
+
+
+def _search_fts_sqlite(conn: sqlite3.Connection, query: str, limit: int) -> dict[str, float]:
+    """SQLite FTS5 path. Unchanged from the original `search_fts` body."""
     import logging
 
     logger = logging.getLogger(__name__)
@@ -350,6 +388,151 @@ def search_fts(conn: sqlite3.Connection, query: str, limit: int = 200) -> dict[s
                 scores[mid] = raw
 
     # Normalize to 0-1 (single result gets 1.0)
+    if scores:
+        max_score = max(scores.values())
+        min_score = min(scores.values())
+        if max_score == min_score:
+            scores = {mid: 1.0 for mid in scores}
+        else:
+            score_range = max_score - min_score
+            scores = {mid: (s - min_score) / score_range for mid, s in scores.items()}
+
+    return scores
+
+
+# Weights passed to `ts_rank_cd`: {D, C, B, A}. Mirrors the `setweight`
+# assignments in pg_schema.sql — subject is A (1.0), from/to are B (0.6),
+# body is C (0.3), and the D slot (0.1) is unused by our documents but
+# required by the function signature.
+_PG_TS_RANK_WEIGHTS = "{0.1, 0.3, 0.6, 1.0}"
+# Normalization bits for `ts_rank_cd`: 32 divides the rank by
+# (1 + log(unique-words-in-doc)), which keeps scores in (0, 1) regardless
+# of document length. We still min-max below for blend compatibility with
+# the SQLite path.
+_PG_TS_RANK_NORM = 32
+
+
+def _pg_rank_table(
+    conn,
+    table: str,
+    pg_tsquery_fn: str,
+    query: str,
+    limit: int,
+    logger,
+) -> dict[str, float]:
+    """Run one FTS pass against a single PG table.
+
+    `pg_tsquery_fn` is either `phraseto_tsquery` (phrase pass) or
+    `websearch_to_tsquery` (disjunction pass). Both accept the raw
+    sanitized query string; we never build tsquery fragments by hand,
+    so there's no SQL-injection surface beyond what psycopg's parameter
+    binding already handles.
+    """
+    scores: dict[str, float] = {}
+    try:
+        rows = conn.execute(
+            f"SELECT id AS message_id, "
+            f"ts_rank_cd('{_PG_TS_RANK_WEIGHTS}'::float4[], fts, "
+            f"{pg_tsquery_fn}('english', ?), {_PG_TS_RANK_NORM}) AS rank "
+            f"FROM {table} "
+            f"WHERE fts @@ {pg_tsquery_fn}('english', ?) "
+            f"ORDER BY rank DESC LIMIT ?",
+            (query, query, limit),
+        ).fetchall()
+        for r in rows:
+            mid = r["message_id"]
+            raw = float(r["rank"] or 0.0)
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
+    except Exception as e:  # paranoid catch — FTS must never fail the request
+        # `websearch_to_tsquery` raises on pathological input in rare cases;
+        # a malformed query must not crash the whole search pipeline.
+        logger.exception(f"PG FTS error on {table} via {pg_tsquery_fn}: {e!s} | query={query!r}")
+    return scores
+
+
+def _pg_rank_table_attachments(
+    conn,
+    pg_tsquery_fn: str,
+    query: str,
+    limit: int,
+    logger,
+) -> dict[str, float]:
+    """Attachments variant: the rank row pulls `message_id` (not `id`)
+    so the caller can blend scores by message like the SQLite path does.
+    """
+    scores: dict[str, float] = {}
+    try:
+        rows = conn.execute(
+            f"SELECT message_id, "
+            f"ts_rank_cd('{_PG_TS_RANK_WEIGHTS}'::float4[], fts, "
+            f"{pg_tsquery_fn}('english', ?), {_PG_TS_RANK_NORM}) AS rank "
+            f"FROM attachments "
+            f"WHERE fts @@ {pg_tsquery_fn}('english', ?) "
+            f"ORDER BY rank DESC LIMIT ?",
+            (query, query, limit),
+        ).fetchall()
+        for r in rows:
+            mid = r["message_id"]
+            raw = float(r["rank"] or 0.0)
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
+    except Exception as e:
+        logger.exception(f"PG FTS error on attachments via {pg_tsquery_fn}: {e!s} | query={query!r}")
+    return scores
+
+
+def _search_fts_postgres(conn, query: str, limit: int) -> dict[str, float]:
+    """Postgres `tsvector @@ tsquery` path.
+
+    Two passes mirror the SQLite strategy:
+      1. Phrase pass via `phraseto_tsquery` — words must appear in order,
+         adjacent. Results get the same ×1.5 boost the SQLite path gives
+         FTS5 phrase matches.
+      2. Disjunction pass via `websearch_to_tsquery` — any sanitized term
+         can match. `websearch_to_tsquery` natively accepts quotes, `-`,
+         and `OR`, but we still sanitize because pathological input can
+         make the query parser slow enough to matter.
+
+    Scores from `ts_rank_cd(..., 32)` are already in (0, 1); we still
+    min-max across the result set so downstream blend code sees the same
+    shape as the SQLite path.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    tokens = _sanitize_fts_tokens(query)
+    if not tokens:
+        return {}
+
+    # Hand the sanitized tokens to PG as plain whitespace-joined text —
+    # `phraseto_tsquery` / `websearch_to_tsquery` do their own parsing.
+    sanitized_query = " ".join(tokens)
+    scores: dict[str, float] = {}
+
+    # Strategy 1: Phrase match (words must appear in order, adjacent).
+    if len(tokens) > 1:
+        for tbl_scores in (
+            _pg_rank_table(conn, "messages", "phraseto_tsquery", sanitized_query, limit, logger),
+            _pg_rank_table_attachments(conn, "phraseto_tsquery", sanitized_query, limit, logger),
+        ):
+            for mid, raw in tbl_scores.items():
+                # Boost phrase matches by 1.5x (mirrors SQLite path).
+                boosted = raw * 1.5
+                if mid not in scores or boosted > scores[mid]:
+                    scores[mid] = boosted
+
+    # Strategy 2: Individual terms (any word matches — broader recall).
+    for tbl_scores in (
+        _pg_rank_table(conn, "messages", "websearch_to_tsquery", sanitized_query, limit, logger),
+        _pg_rank_table_attachments(conn, "websearch_to_tsquery", sanitized_query, limit, logger),
+    ):
+        for mid, raw in tbl_scores.items():
+            if mid not in scores or raw > scores[mid]:
+                scores[mid] = raw
+
+    # Normalize to 0-1 (single result gets 1.0) — same as SQLite path so
+    # downstream blend math is backend-agnostic.
     if scores:
         max_score = max(scores.values())
         min_score = min(scores.values())

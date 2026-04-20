@@ -321,17 +321,24 @@ def _pick_versioned_dir(index_dir: Path) -> Path:
 def _pointer_table_exists(db_path: Path) -> bool:
     """Check for the scann_index_pointer table without importing the
     queries module (which would create a cycle through store/db.py).
-    Cheap introspection query; we don't need to cache it.
+
+    Backend-agnostic: instead of querying `sqlite_master` (SQLite-only)
+    or `information_schema.tables` (differs by backend), we just
+    attempt the lookup and catch the "no such table" failure. SQLite
+    raises `OperationalError`, psycopg raises `UndefinedTable` — both
+    derive from `Exception`. False means "legacy DB, use in-place
+    write"; True means "pointer table present, use versioned writes".
     """
     try:
         conn = get_connection(db_path)
     except Exception:
         return False
     try:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='scann_index_pointer'"
-        ).fetchone()
-        return row is not None
+        try:
+            conn.execute("SELECT 1 FROM scann_index_pointer LIMIT 1").fetchone()
+            return True
+        except Exception:
+            return False
     finally:
         conn.close()
 

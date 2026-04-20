@@ -613,10 +613,14 @@ def create_app(
         if not isinstance(va, dict) or not isinstance(vb, dict):
             return JSONResponse({"error": "variant_a and variant_b must be objects"}, status_code=400)
         conn = get_connection(db_path)
+        # RETURNING id works on SQLite 3.35+ and Postgres; replaces the
+        # old cursor.lastrowid which returned None under psycopg's
+        # dict_row factory.
         cur = conn.execute(
             """INSERT INTO model_battles
                  (question, variant_a, variant_b, winner, request_id_a, request_id_b)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?)
+               RETURNING id""",
             (
                 question[:1000],
                 _json.dumps(va),
@@ -626,8 +630,15 @@ def create_app(
                 payload.get("request_id_b"),
             ),
         )
+        row = cur.fetchone()
         conn.commit()
-        row_id = cur.lastrowid
+        if row is None:
+            row_id = 0
+        else:
+            try:
+                row_id = int(row["id"])
+            except (KeyError, TypeError):
+                row_id = int(row[0])
         conn.close()
         return {"ok": True, "id": row_id}
 
