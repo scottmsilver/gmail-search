@@ -182,8 +182,7 @@ def _init_db_pg() -> None:
     """Load the hand-translated PG schema shipped at
     `gmail_search/store/pg_schema.sql`. Uses a fresh psycopg
     connection (no wrapper) because the schema script contains
-    `$$`-quoted function bodies and other raw-SQL idioms that the
-    `?`-rewrite shim must not touch.
+    `$$`-quoted function bodies and other raw-SQL idioms.
     """
     import psycopg
 
@@ -228,7 +227,7 @@ def rebuild_thread_summary(db_path: Path) -> int:
             """INSERT INTO thread_summary
                (thread_id, subject, participants, all_from_addrs, all_labels,
                 message_count, date_first, date_last)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 tid,
                 t["subject"],
@@ -257,7 +256,7 @@ def _load_message_embeddings(conn, limit=50000):
         """SELECT e.message_id, e.embedding, m.subject, m.from_addr
            FROM embeddings e JOIN messages m ON e.message_id = m.id
            WHERE e.chunk_type = 'message'
-           ORDER BY m.date DESC LIMIT ?""",
+           ORDER BY m.date DESC LIMIT %s""",
         (limit,),
     ).fetchall()
 
@@ -414,7 +413,7 @@ def _auto_label_topics(conn):
         label_map = json.loads(text)
 
         for tid, label in label_map.items():
-            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, tid))
+            conn.execute("UPDATE topics SET label = %s WHERE topic_id = %s", (label, tid))
         conn.commit()
         logger.info(f"Auto-labeled {len(label_map)} topic nodes")
 
@@ -423,7 +422,7 @@ def _auto_label_topics(conn):
         for t in topic_rows:
             sndrs = json.loads(t["top_senders"])
             label = sndrs[0] if sndrs else f"Topic {t['topic_id']}"
-            conn.execute("UPDATE topics SET label = ? WHERE topic_id = ?", (label, t["topic_id"]))
+            conn.execute("UPDATE topics SET label = %s WHERE topic_id = %s", (label, t["topic_id"]))
         conn.commit()
 
 
@@ -466,13 +465,13 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
     for topic_id, parent_id, depth, indices in nodes:
         top_senders, sample_subjects = _summarize_cluster(indices, data["subjects"], data["senders"])
         conn.execute(
-            "INSERT INTO topics (topic_id, parent_id, label, depth, message_count, top_senders, sample_subjects) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO topics (topic_id, parent_id, label, depth, message_count, top_senders, sample_subjects) VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (topic_id, parent_id, "", depth, len(indices), json.dumps(top_senders), json.dumps(sample_subjects)),
         )
         # Messages belong to their leaf node and all ancestors
         for idx in indices:
             conn.execute(
-                "INSERT INTO message_topics (message_id, topic_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                "INSERT INTO message_topics (message_id, topic_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (data["msg_ids"][idx], topic_id),
             )
 
@@ -654,7 +653,7 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
         expansions = candidates[:3]
         if expansions:
             conn.execute(
-                "INSERT INTO term_aliases (term, expansions, similarity) VALUES (?, ?, ?)",
+                "INSERT INTO term_aliases (term, expansions, similarity) VALUES (%s, %s, %s)",
                 (term, json.dumps([t for t, _ in expansions]), expansions[0][1]),
             )
             alias_count += 1
@@ -733,13 +732,13 @@ def _validate_aliases_with_llm(conn):
         if bad_terms:
             protected = set()
             for term in bad_terms:
-                row = conn.execute("SELECT similarity FROM term_aliases WHERE term = ?", (term,)).fetchone()
+                row = conn.execute("SELECT similarity FROM term_aliases WHERE term = %s", (term,)).fetchone()
                 if row and row["similarity"] >= 0.25:
                     protected.add(term)
 
             removable = bad_terms - protected
             for term in removable:
-                conn.execute("DELETE FROM term_aliases WHERE term = ?", (term,))
+                conn.execute("DELETE FROM term_aliases WHERE term = %s", (term,))
             conn.commit()
             logger.info(
                 f"Removed {len(removable)} noise aliases via LLM validation"
@@ -818,7 +817,7 @@ def rebuild_contact_frequency(db_path: Path) -> int:
         score = math.log(r["c"] + 1) / log_max if log_max > 0 else 0.0
         conn.execute(
             """INSERT INTO contact_frequency (email, message_count, score)
-               VALUES (?, ?, ?)
+               VALUES (%s, %s, %s)
                ON CONFLICT(email) DO UPDATE SET
                  message_count = excluded.message_count,
                  score = excluded.score""",
@@ -849,7 +848,7 @@ class JobProgress:
         conn.execute(
             """INSERT INTO job_progress
                  (job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at)
-               VALUES (?, '', 'running', 0, ?, ?, '', ?, ?)
+               VALUES (%s, '', 'running', 0, %s, %s, '', %s, %s)
                ON CONFLICT(job_id) DO UPDATE SET
                  stage = excluded.stage,
                  status = excluded.status,
@@ -869,7 +868,7 @@ class JobProgress:
 
         conn = get_connection(self.db_path)
         conn.execute(
-            "UPDATE job_progress SET stage=?, completed=?, total=?, detail=?, updated_at=? WHERE job_id=?",
+            "UPDATE job_progress SET stage=%s, completed=%s, total=%s, detail=%s, updated_at=%s WHERE job_id=%s",
             (stage, completed, total, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
         )
         conn.commit()
@@ -880,7 +879,7 @@ class JobProgress:
 
         conn = get_connection(self.db_path)
         conn.execute(
-            "UPDATE job_progress SET status=?, detail=?, updated_at=? WHERE job_id=?",
+            "UPDATE job_progress SET status=%s, detail=%s, updated_at=%s WHERE job_id=%s",
             (status, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
         )
         conn.commit()
@@ -890,7 +889,7 @@ class JobProgress:
     def get(db_path: Path, job_id: str = None) -> dict | list | None:
         conn = get_connection(db_path)
         if job_id:
-            row = conn.execute("SELECT * FROM job_progress WHERE job_id=?", (job_id,)).fetchone()
+            row = conn.execute("SELECT * FROM job_progress WHERE job_id=%s", (job_id,)).fetchone()
             conn.close()
             return dict(row) if row else None
         rows = conn.execute("SELECT * FROM job_progress ORDER BY updated_at DESC LIMIT 10").fetchall()
@@ -915,7 +914,7 @@ def reap_stale_jobs(conn, staleness_seconds: int = 600) -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=staleness_seconds)).isoformat()
     cur = conn.execute(
         "UPDATE job_progress SET status='stopped', detail='stale — process gone' "
-        "WHERE status='running' AND updated_at < ?",
+        "WHERE status='running' AND updated_at < %s",
         (cutoff,),
     )
     conn.commit()
@@ -955,24 +954,22 @@ def get_connection(db_path):
 
     Callers can assume:
         - `conn.execute(sql, params)` — runs the statement. Parameter
-          placeholders written with `?` are accepted (the wrapper rewrites
-          them to `%s`).
+          placeholders are psycopg-native `%s`.
         - `conn.commit()` / `conn.close()`.
         - Row access via `row["col"]` or `row.keys()` via psycopg's
           `dict_row`, wrapped in `_CompatRow` so `row[0]` also works.
 
     The PG wrapper is `_PgConnWrapper` below — a thin shim that adds
-    the `?`→`%s` rewrite and a `Cursor` façade.
+    a `Cursor` façade and sqlite3-style conveniences.
     """
     return _connect_pg()
 
 
 # ── Postgres connection layer ──────────────────────────────────────────────
 #
-# Design constraint: the 60 existing call sites across the codebase use
-# SQLite-flavored SQL with `?` placeholders. Rather than sed everything
-# at once (risky — one missed `?` is a runtime crash), we wrap psycopg
-# in a translation shim.
+# Thin wrapper around psycopg that preserves the sqlite3-style
+# `conn.execute(...)` ergonomics our call sites were written against.
+# Placeholders in SQL are psycopg-native `%s`.
 
 
 def _pg_dsn() -> str:
@@ -1052,34 +1049,9 @@ def _connect_pg():
     return _PgConnWrapper(raw)
 
 
-def _sqlite_to_pg_placeholders(sql: str) -> str:
-    """Rewrite `?` placeholders to `%s` — but not inside string
-    literals. `?` does appear in a couple of string literals across
-    the codebase (e.g. pattern-match prompts); ignoring those is
-    the only correctness subtlety.
-    """
-    out: list[str] = []
-    i, n = 0, len(sql)
-    in_single = in_double = False
-    while i < n:
-        ch = sql[i]
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            out.append(ch)
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-            out.append(ch)
-        elif ch == "?" and not in_single and not in_double:
-            out.append("%s")
-        else:
-            out.append(ch)
-        i += 1
-    return "".join(out)
-
-
 class _PgCursorWrapper:
-    """Cursor shim: rewrites SQL placeholders on every execute and
-    proxies everything else to the underlying psycopg cursor.
+    """Cursor shim: proxies psycopg cursor with a few sqlite3-style
+    conveniences (`lastrowid`, chainable `execute`).
     """
 
     def __init__(self, raw):
@@ -1087,15 +1059,14 @@ class _PgCursorWrapper:
         self.lastrowid = None
 
     def execute(self, sql, params=None):
-        sql2 = _sqlite_to_pg_placeholders(sql)
         if params is None:
-            self._raw.execute(sql2)
+            self._raw.execute(sql)
         else:
-            self._raw.execute(sql2, params)
+            self._raw.execute(sql, params)
         return self
 
     def executemany(self, sql, params_seq):
-        self._raw.executemany(_sqlite_to_pg_placeholders(sql), params_seq)
+        self._raw.executemany(sql, params_seq)
         return self
 
     def fetchone(self):
@@ -1123,9 +1094,8 @@ class _PgCursorWrapper:
 
 
 class _PgConnWrapper:
-    """Connection shim. Rewrites `?` → `%s` on every `execute`, exposes
-    `row_factory` as a no-op (PG uses `dict_row` at the connection
-    level), and proxies the rest.
+    """Connection shim. Exposes `row_factory` as a no-op (PG uses
+    `dict_row` at the connection level) and proxies the rest.
     """
 
     def __init__(self, raw):
@@ -1135,14 +1105,14 @@ class _PgConnWrapper:
     def execute(self, sql, params=None):
         cur = self._raw.cursor()
         if params is None:
-            cur.execute(_sqlite_to_pg_placeholders(sql))
+            cur.execute(sql)
         else:
-            cur.execute(_sqlite_to_pg_placeholders(sql), params)
+            cur.execute(sql, params)
         return _PgCursorWrapper(cur)
 
     def executemany(self, sql, params_seq):
         cur = self._raw.cursor()
-        cur.executemany(_sqlite_to_pg_placeholders(sql), params_seq)
+        cur.executemany(sql, params_seq)
         return _PgCursorWrapper(cur)
 
     def cursor(self):

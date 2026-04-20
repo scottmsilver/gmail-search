@@ -8,7 +8,7 @@ def upsert_message(conn, msg: Message) -> None:
     conn.execute(
         """INSERT INTO messages (id, thread_id, from_addr, to_addr, subject,
            body_text, body_html, date, labels, history_id, raw_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              to_addr=excluded.to_addr, subject=excluded.subject,
@@ -33,7 +33,7 @@ def upsert_message(conn, msg: Message) -> None:
 
 
 def get_message(conn, message_id: str) -> Message | None:
-    row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+    row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
     if row is None:
         return None
     return Message(
@@ -56,7 +56,7 @@ def get_messages_without_embeddings(conn, model: str) -> list[Message]:
         """SELECT m.* FROM messages m
            WHERE m.id NOT IN (
              SELECT DISTINCT message_id FROM embeddings
-             WHERE chunk_type = 'message' AND model = ?
+             WHERE chunk_type = 'message' AND model = %s
            )""",
         (model,),
     ).fetchall()
@@ -84,7 +84,7 @@ def upsert_attachment(conn, att: Attachment) -> int:
     cursor = conn.execute(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
            extracted_text, image_path, raw_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(message_id, filename) DO UPDATE SET
              mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
              raw_path=excluded.raw_path
@@ -102,7 +102,7 @@ def upsert_attachment(conn, att: Attachment) -> int:
 
 
 def get_attachments_for_message(conn, message_id: str) -> list[Attachment]:
-    rows = conn.execute("SELECT * FROM attachments WHERE message_id = ?", (message_id,)).fetchall()
+    rows = conn.execute("SELECT * FROM attachments WHERE message_id = %s", (message_id,)).fetchall()
     return [
         Attachment(
             id=r["id"],
@@ -142,7 +142,7 @@ def upsert_drive_stub(
     cursor = conn.execute(
         """INSERT INTO attachments
            (message_id, filename, mime_type, size_bytes)
-           VALUES (?, ?, ?, 0)
+           VALUES (%s, %s, %s, 0)
            ON CONFLICT (message_id, filename) DO NOTHING""",
         (message_id, filename, mime_type),
     )
@@ -157,7 +157,7 @@ def set_active_index_dir(conn, path: str) -> None:
     """
     conn.execute(
         """INSERT INTO scann_index_pointer (id, current_dir, updated_at)
-           VALUES (1, ?, CURRENT_TIMESTAMP)
+           VALUES (1, %s, CURRENT_TIMESTAMP)
            ON CONFLICT(id) DO UPDATE SET
              current_dir = excluded.current_dir,
              updated_at = CURRENT_TIMESTAMP""",
@@ -183,7 +183,7 @@ def fill_drive_attachment(
     """
     new_filename = f"Drive: {title} [{drive_id}]"
     conn.execute(
-        "UPDATE attachments SET extracted_text = ?, filename = ?, size_bytes = ? WHERE id = ?",
+        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s",
         (text, new_filename, len(text), attachment_id),
     )
 
@@ -195,7 +195,7 @@ def insert_embedding(conn, rec: EmbeddingRecord) -> int:
     cursor = conn.execute(
         """INSERT INTO embeddings (message_id, attachment_id, chunk_type,
            chunk_text, embedding, model)
-           VALUES (?, ?, ?, ?, ?, ?)
+           VALUES (%s, %s, %s, %s, %s, %s)
            RETURNING id""",
         (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model),
     )
@@ -213,22 +213,22 @@ def embedding_exists(conn, message_id: str, attachment_id: int | None, chunk_typ
     if attachment_id is None:
         row = conn.execute(
             """SELECT 1 FROM embeddings
-               WHERE message_id = ? AND attachment_id IS NULL
-               AND chunk_type = ? AND model = ?""",
+               WHERE message_id = %s AND attachment_id IS NULL
+               AND chunk_type = %s AND model = %s""",
             (message_id, chunk_type, model),
         ).fetchone()
     else:
         row = conn.execute(
             """SELECT 1 FROM embeddings
-               WHERE message_id = ? AND attachment_id = ?
-               AND chunk_type = ? AND model = ?""",
+               WHERE message_id = %s AND attachment_id = %s
+               AND chunk_type = %s AND model = %s""",
             (message_id, attachment_id, chunk_type, model),
         ).fetchone()
     return row is not None
 
 
 def load_all_embeddings(conn, model: str) -> tuple[list[int], list[bytes]]:
-    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ?", (model,)).fetchall()
+    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s", (model,)).fetchall()
     ids = [r["id"] for r in rows]
     blobs = [r["embedding"] for r in rows]
     return ids, blobs
@@ -236,14 +236,14 @@ def load_all_embeddings(conn, model: str) -> tuple[list[int], list[bytes]]:
 
 def set_sync_state(conn, key: str, value: str) -> None:
     conn.execute(
-        "INSERT INTO sync_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO sync_state (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
     conn.commit()
 
 
 def get_sync_state(conn, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
+    row = conn.execute("SELECT value FROM sync_state WHERE key = %s", (key,)).fetchone()
     return row["value"] if row else None
 
 
@@ -317,8 +317,8 @@ def _pg_bm25_messages(
         rows = conn.execute(
             "SELECT id AS message_id, paradedb.score(id) AS rank "
             "FROM messages "
-            "WHERE messages @@@ ? "
-            "ORDER BY rank DESC LIMIT ?",
+            "WHERE messages @@@ %s "
+            "ORDER BY rank DESC LIMIT %s",
             (bm25_query, limit),
         ).fetchall()
         for r in rows:
@@ -348,8 +348,8 @@ def _pg_bm25_attachments(
         rows = conn.execute(
             "SELECT message_id, paradedb.score(id) AS rank "
             "FROM attachments "
-            "WHERE attachments @@@ ? "
-            "ORDER BY rank DESC LIMIT ?",
+            "WHERE attachments @@@ %s "
+            "ORDER BY rank DESC LIMIT %s",
             (bm25_query, limit),
         ).fetchall()
         for r in rows:

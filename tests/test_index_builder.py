@@ -32,7 +32,7 @@ def _make_random_embedding(dims: int, seed: int) -> bytes:
 
 def _legacy_load_matrix(conn, model: str, dimensions: int):
     """The pre-fix implementation — kept here only as a parity oracle."""
-    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ? ORDER BY id", (model,)).fetchall()
+    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,)).fetchall()
     ids = [r["id"] for r in rows]
     vectors = np.array(
         [list(struct.unpack(f"{dimensions}f", r["embedding"])) for r in rows],

@@ -153,19 +153,19 @@ def _build_query_filters(
     clauses: list[str] = []
     params: list = []
     if sender:
-        clauses.append("m.from_addr LIKE ?")
+        clauses.append("m.from_addr LIKE %s")
         params.append(f"%{sender}%")
     if subject_contains:
-        clauses.append("m.subject LIKE ?")
+        clauses.append("m.subject LIKE %s")
         params.append(f"%{subject_contains}%")
     if date_from:
-        clauses.append("m.date >= ?")
+        clauses.append("m.date >= %s")
         params.append(date_from)
     if date_to:
-        clauses.append("m.date <= ?")
+        clauses.append("m.date <= %s")
         params.append(f"{date_to}T23:59:59+00:00")
     if label:
-        clauses.append("m.labels LIKE ?")
+        clauses.append("m.labels LIKE %s")
         params.append(f'%"{label}"%')
     return clauses, params
 
@@ -190,7 +190,7 @@ def _thread_ids_matching_filters(
              WHERE {where}
              GROUP BY m.thread_id
              ORDER BY {order}
-             LIMIT ?"""
+             LIMIT %s"""
     rows = conn.execute(sql, [*params, limit]).fetchall()
     return [r["thread_id"] for r in rows]
 
@@ -200,7 +200,7 @@ def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
         return []
     import json as _json
 
-    placeholders = ",".join("?" * len(thread_ids))
+    placeholders = ",".join(["%s"] * len(thread_ids))
     rows = conn.execute(
         f"""SELECT thread_id, subject, participants, message_count,
             date_first, date_last
@@ -231,7 +231,7 @@ def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
 def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
     if not thread_ids:
         return {}
-    placeholders = ",".join("?" * len(thread_ids))
+    placeholders = ",".join(["%s"] * len(thread_ids))
     rows = conn.execute(
         f"""SELECT m.thread_id, m.body_text FROM messages m
             INNER JOIN (
@@ -348,7 +348,7 @@ def create_app(
         # Get labels for the topics we found
         if topic_thread_counts:
             conn_f = get_connection(db_path)
-            placeholders = ",".join("?" * len(topic_thread_counts))
+            placeholders = ",".join(["%s"] * len(topic_thread_counts))
             rows = conn_f.execute(
                 f"SELECT topic_id, label FROM topics WHERE topic_id IN ({placeholders})",
                 list(topic_thread_counts.keys()),
@@ -383,7 +383,7 @@ def create_app(
         if not msg_ids:
             return {}
         conn_t = get_connection(db_path)
-        placeholders = ",".join("?" * len(msg_ids))
+        placeholders = ",".join(["%s"] * len(msg_ids))
         rows = conn_t.execute(
             f"""SELECT mt.message_id, mt.topic_id FROM message_topics mt
                 JOIN topics t ON mt.topic_id = t.topic_id
@@ -481,7 +481,7 @@ def create_app(
     async def api_thread(thread_id: str):
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT id FROM messages WHERE thread_id = ? ORDER BY date",
+            "SELECT id FROM messages WHERE thread_id = %s ORDER BY date",
             (thread_id,),
         ).fetchall()
         messages = []
@@ -575,7 +575,7 @@ def create_app(
             return JSONResponse({"error": "cite_ref must be hex"}, status_code=400)
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT thread_id, subject FROM thread_summary WHERE thread_id LIKE ? LIMIT 5",
+            "SELECT thread_id, subject FROM thread_summary WHERE thread_id LIKE %s LIMIT 5",
             (f"{prefix}%",),
         ).fetchall()
         conn.close()
@@ -640,7 +640,7 @@ def create_app(
         cur = conn.execute(
             """INSERT INTO model_battles
                  (question, variant_a, variant_b, winner, request_id_a, request_id_b)
-               VALUES (?, ?, ?, ?, ?, ?)
+               VALUES (%s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (
                 question[:1000],
@@ -727,7 +727,7 @@ def create_app(
                       (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) as message_count
                FROM conversations c
                ORDER BY c.updated_at DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (limit,),
         ).fetchall()
         conn.close()
@@ -750,7 +750,7 @@ def create_app(
 
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = %s",
             (conversation_id,),
         ).fetchone()
         if row is None:
@@ -758,7 +758,7 @@ def create_app(
             return JSONResponse({"error": "not found"}, status_code=404)
         msg_rows = conn.execute(
             """SELECT seq, role, parts FROM conversation_messages
-               WHERE conversation_id = ? ORDER BY seq""",
+               WHERE conversation_id = %s ORDER BY seq""",
             (conversation_id,),
         ).fetchall()
         conn.close()
@@ -787,20 +787,20 @@ def create_app(
             now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
             conn.execute(
                 """INSERT INTO conversations (id, title, created_at, updated_at)
-                   VALUES (?, ?, ?, ?)
+                   VALUES (%s, %s, %s, %s)
                    ON CONFLICT(id) DO UPDATE SET
                      title = COALESCE(excluded.title, conversations.title),
                      updated_at = excluded.updated_at""",
                 (conversation_id, title, now, now),
             )
             conn.execute(
-                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                "DELETE FROM conversation_messages WHERE conversation_id = %s",
                 (conversation_id,),
             )
             for seq, m in enumerate(messages):
                 conn.execute(
                     """INSERT INTO conversation_messages (conversation_id, seq, role, parts)
-                       VALUES (?, ?, ?, ?)""",
+                       VALUES (%s, %s, %s, %s)""",
                     (
                         conversation_id,
                         seq,
@@ -816,8 +816,8 @@ def create_app(
     @app.delete("/api/conversations/{conversation_id}")
     async def api_conversation_delete(conversation_id: str):
         conn = get_connection(db_path)
-        conn.execute("DELETE FROM conversation_messages WHERE conversation_id = ?", (conversation_id,))
-        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversation_messages WHERE conversation_id = %s", (conversation_id,))
+        conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
         conn.commit()
         conn.close()
         return {"ok": True}
@@ -826,7 +826,7 @@ def create_app(
     async def api_attachment_text(attachment_id: int):
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = ?",
+            "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = %s",
             (attachment_id,),
         ).fetchone()
         conn.close()
@@ -843,7 +843,7 @@ def create_app(
     async def api_attachment(attachment_id: int):
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT raw_path, mime_type, filename FROM attachments WHERE id = ?",
+            "SELECT raw_path, mime_type, filename FROM attachments WHERE id = %s",
             (attachment_id,),
         ).fetchone()
         conn.close()

@@ -466,7 +466,7 @@ def _fetch_attachments_for(conn, message_ids: list[str]) -> dict[str, list[dict]
     """
     if not message_ids:
         return {}
-    placeholders = ",".join("?" * len(message_ids))
+    placeholders = ",".join(["%s"] * len(message_ids))
     rows = conn.execute(
         f"""SELECT message_id, filename, extracted_text
             FROM attachments
@@ -491,14 +491,14 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
-          ON s.message_id = m.id AND s.model = ?
+          ON s.message_id = m.id AND s.model = %s
         WHERE s.message_id IS NULL
           AND length(m.body_text) > 20
         ORDER BY m.date DESC
     """
     params: list = [model]
     if limit:
-        sql += " LIMIT ?"
+        sql += " LIMIT %s"
         params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     msg_ids = [r["id"] for r in rows]
@@ -519,7 +519,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
 def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
     conn.execute(
         """INSERT INTO message_summaries (message_id, summary, model)
-           VALUES (?, ?, ?)
+           VALUES (%s, %s, %s)
            ON CONFLICT(message_id) DO UPDATE SET
              summary = excluded.summary,
              model = excluded.model,
@@ -726,12 +726,12 @@ def get_summary(conn, message_id: str, model: str | None = None) -> str | None:
     """
     if model is not None:
         row = conn.execute(
-            "SELECT summary FROM message_summaries WHERE message_id = ? AND model = ?",
+            "SELECT summary FROM message_summaries WHERE message_id = %s AND model = %s",
             (message_id, model),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT summary FROM message_summaries WHERE message_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT summary FROM message_summaries WHERE message_id = %s ORDER BY created_at DESC LIMIT 1",
             (message_id,),
         ).fetchone()
     return row["summary"] if row else None
@@ -756,12 +756,12 @@ def get_summaries_bulk_meta(conn, message_ids: Iterable[str], model: str | None 
     ids = list(message_ids)
     if not ids:
         return {}
-    placeholders = ",".join("?" * len(ids))
+    placeholders = ",".join(["%s"] * len(ids))
     if model is not None:
         rows = conn.execute(
             f"""SELECT message_id, summary, model, created_at
                 FROM message_summaries
-                WHERE message_id IN ({placeholders}) AND model = ?""",
+                WHERE message_id IN ({placeholders}) AND model = %s""",
             [*ids, model],
         ).fetchall()
     else:

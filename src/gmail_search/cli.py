@@ -246,9 +246,9 @@ def extract(ctx):
                     updates["image_path"] = str(result.images[0].parent if len(result.images) > 1 else result.images[0])
 
                 if updates:
-                    set_clause = ", ".join(f"{k} = ?" for k in updates)
+                    set_clause = ", ".join(f"{k} = %s" for k in updates)
                     conn.execute(
-                        f"UPDATE attachments SET {set_clause} WHERE id = ?",
+                        f"UPDATE attachments SET {set_clause} WHERE id = %s",
                         (*updates.values(), att.id),
                     )
                     conn.commit()
@@ -280,7 +280,7 @@ def embed(ctx, model, budget, force, batch_api):
         emb_model = cfg["embedding"]["model"]
         conn = get_connection(ctx.obj["db_path"])
         deleted = conn.execute(
-            "DELETE FROM embeddings WHERE chunk_type = 'message' AND model = ?", (emb_model,)
+            "DELETE FROM embeddings WHERE chunk_type = 'message' AND model = %s", (emb_model,)
         ).rowcount
         conn.commit()
         conn.close()
@@ -468,9 +468,9 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
                                 result.images[0].parent if len(result.images) > 1 else result.images[0]
                             )
                         if updates:
-                            set_clause = ", ".join(f"{k} = ?" for k in updates)
+                            set_clause = ", ".join(f"{k} = %s" for k in updates)
                             conn.execute(
-                                f"UPDATE attachments SET {set_clause} WHERE id = ?",
+                                f"UPDATE attachments SET {set_clause} WHERE id = %s",
                                 (*updates.values(), att.id),
                             )
                             conn.commit()
@@ -741,9 +741,9 @@ def watch(ctx, interval, budget, max_cycles):
                                     result.images[0].parent if len(result.images) > 1 else result.images[0]
                                 )
                             if updates:
-                                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                                set_clause = ", ".join(f"{k} = %s" for k in updates)
                                 conn.execute(
-                                    f"UPDATE attachments SET {set_clause} WHERE id = ?",
+                                    f"UPDATE attachments SET {set_clause} WHERE id = %s",
                                     (*updates.values(), att.id),
                                 )
                                 conn.commit()

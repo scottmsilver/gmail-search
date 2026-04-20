@@ -47,7 +47,7 @@ def test_get_connection(db_backend):
 def _insert_job(conn, job_id: str, status: str, updated_at_iso: str) -> None:
     conn.execute(
         "INSERT INTO job_progress (job_id, stage, status, total, completed, detail, started_at, updated_at) "
-        "VALUES (?, 'reindex', ?, 100, 50, 'test', ?, ?)",
+        "VALUES (%s, 'reindex', %s, 100, 50, 'test', %s, %s)",
         (job_id, status, updated_at_iso, updated_at_iso),
     )
     conn.commit()

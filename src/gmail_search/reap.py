@@ -109,7 +109,7 @@ def reap_zombie_jobs(
     try:
         stale_rows = conn.execute(
             "SELECT job_id, stage, updated_at FROM job_progress "
-            "WHERE status='running' AND updated_at < ? ORDER BY updated_at",
+            "WHERE status='running' AND updated_at < %s ORDER BY updated_at",
             (cutoff,),
         ).fetchall()
 

@@ -159,7 +159,7 @@ def test_row_cap_enforced(fake_db):
     for i in range(700):
         conn.execute(
             "INSERT INTO messages (id, thread_id, from_addr, to_addr, date) "
-            "VALUES (?, ?, 'a', 'b', '2026-01-01T00:00:00+00:00')",
+            "VALUES (%s, %s, 'a', 'b', '2026-01-01T00:00:00+00:00')",
             (f"m{i:04d}", f"t{i:04d}"),
         )
     conn.commit()

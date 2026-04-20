@@ -272,7 +272,7 @@ class SearchEngine:
         try:
             conn = get_connection(self.db_path)
             row = conn.execute(
-                "SELECT embedding FROM query_cache WHERE query_text = ? AND model = ?",
+                "SELECT embedding FROM query_cache WHERE query_text = %s AND model = %s",
                 (cache_key, self.config["embedding"]["model"]),
             ).fetchone()
             conn.close()
@@ -296,7 +296,7 @@ class SearchEngine:
             # of query_cache.
             conn.execute(
                 """INSERT INTO query_cache (query_text, model, embedding, created_at)
-                   VALUES (?, ?, ?, ?)
+                   VALUES (%s, %s, %s, %s)
                    ON CONFLICT(query_text, model) DO UPDATE SET
                      embedding = excluded.embedding,
                      created_at = excluded.created_at""",
@@ -370,7 +370,7 @@ class SearchEngine:
 
     def _fetch_embedding_rows(self, embedding_ids: list[int]):
         conn = get_connection(self.db_path)
-        placeholders = ",".join("?" * len(embedding_ids))
+        placeholders = ",".join(["%s"] * len(embedding_ids))
         rows = conn.execute(
             f"""SELECT e.id, e.message_id, e.attachment_id, e.chunk_type, e.chunk_text,
                        m.thread_id, m.subject, m.from_addr, m.date,
@@ -558,14 +558,14 @@ class SearchEngine:
         # no downstream work on messages outside the window.
         if has_date_filter and bm25_scores:
             ids = list(bm25_scores.keys())
-            placeholders = ",".join("?" * len(ids))
+            placeholders = ",".join(["%s"] * len(ids))
             date_where: list[str] = []
             params: list = list(ids)
             if date_from:
-                date_where.append("date >= ?")
+                date_where.append("date >= %s")
                 params.append(f"{date_from}T00:00:00")
             if date_to:
-                date_where.append("date <= ?")
+                date_where.append("date <= %s")
                 params.append(f"{date_to}T23:59:59")
             in_window = {
                 r["id"]
@@ -583,7 +583,7 @@ class SearchEngine:
 
         bm25_only_ids = [mid for mid in bm25_scores if mid not in scann_message_ids]
         if bm25_only_ids:
-            placeholders = ",".join("?" * len(bm25_only_ids))
+            placeholders = ",".join(["%s"] * len(bm25_only_ids))
             bm25_rows = conn.execute(
                 f"""SELECT id, thread_id, subject, from_addr, date, body_text
                     FROM messages WHERE id IN ({placeholders})""",
@@ -624,7 +624,7 @@ class SearchEngine:
         import json as _json
 
         thread_ids = list(threads.keys())
-        placeholders = ",".join("?" * len(thread_ids))
+        placeholders = ",".join(["%s"] * len(thread_ids))
         summary_rows = conn.execute(
             f"SELECT * FROM thread_summary WHERE thread_id IN ({placeholders})",
             thread_ids,
@@ -743,7 +743,7 @@ class SearchEngine:
         # thread_ids keeps this O(K) rather than O(K) queries.
         if pq.has_attachment and thread_results:
             tid_list = [t.thread_id for t in thread_results]
-            placeholders = ",".join("?" * len(tid_list))
+            placeholders = ",".join(["%s"] * len(tid_list))
             conn_a = get_connection(self.db_path)
             rows = conn_a.execute(
                 f"""SELECT DISTINCT m.thread_id FROM messages m

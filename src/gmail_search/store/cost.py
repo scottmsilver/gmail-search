@@ -22,7 +22,7 @@ def record_cost(
     conn.execute(
         """INSERT INTO costs (timestamp, operation, model, input_tokens,
            image_count, estimated_cost_usd, message_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (
             datetime.now(timezone.utc).isoformat(),
             operation,

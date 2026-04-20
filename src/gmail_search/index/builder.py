@@ -31,11 +31,11 @@ def _load_embeddings_matrix(conn, model: str, dimensions: int) -> tuple[list[int
     numpy's native float32 layout on the target platforms, so
     `np.frombuffer` is a zero-copy reinterpretation.
     """
-    count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = ?", (model,)).fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = %s", (model,)).fetchone()[0]
 
     ids: list[int] = []
     vectors = np.empty((count, dimensions), dtype=np.float32)
-    cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ? ORDER BY id", (model,))
+    cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
     for i, row in enumerate(cursor):
         ids.append(row["id"])
         vectors[i] = np.frombuffer(row["embedding"], dtype=np.float32)
@@ -107,7 +107,7 @@ def _stream_embeddings_to_memmap(
     Returns (ids, memmap). Caller is responsible for deleting memmap_path
     after ScaNN has finished consuming the array.
     """
-    count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = ?", (model,)).fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = %s", (model,)).fetchone()[0]
     if count == 0:
         return [], np.empty((0, dimensions), dtype=np.float32)  # type: ignore[return-value]
 
@@ -115,7 +115,7 @@ def _stream_embeddings_to_memmap(
     vectors = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(count, dimensions))
 
     ids: list[int] = []
-    cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ? ORDER BY id", (model,))
+    cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
     for i, row in enumerate(cursor):
         ids.append(row["id"])
         vectors[i] = np.frombuffer(row["embedding"], dtype=np.float32)
@@ -187,7 +187,7 @@ def _clean_old_shard_dirs(index_dir: Path) -> None:
 
 
 def _count_embeddings(conn, model: str) -> int:
-    return conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = ?", (model,)).fetchone()[0]
+    return conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = %s", (model,)).fetchone()[0]
 
 
 def _build_one_shard(
@@ -275,7 +275,7 @@ def build_index_sharded(
             conn.close()
             return target_dir
 
-        cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = ? ORDER BY id", (model,))
+        cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
         all_ids: list[int] = []
         shard_idx = 0
         buffer: list[tuple[int, bytes]] = []
