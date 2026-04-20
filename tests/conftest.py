@@ -89,14 +89,15 @@ def _pg_dsn_for_schema(schema_name: str) -> str:
 def db_backend(request, tmp_path, monkeypatch):
     """Dual-backend fixture. Tests see `{"kind": str, "db_path": Path|str}`.
 
-    On SQLite: a fresh tmp file per test, `DB_BACKEND` cleared so the
-    dispatch gate routes to the legacy path.
+    On SQLite: a fresh tmp file per test, `DB_BACKEND=sqlite` set so the
+    dispatch gate routes to the legacy path. (The gate now defaults to
+    Postgres, so we must opt in to SQLite explicitly.)
 
     On Postgres: a fresh `test_<uuid8>` schema per test. `DB_BACKEND` and
     `DB_DSN` are set for the duration; teardown drops the schema.
     """
     if request.param == "sqlite":
-        monkeypatch.delenv("DB_BACKEND", raising=False)
+        monkeypatch.setenv("DB_BACKEND", "sqlite")
         db_path = tmp_path / "test.db"
         yield {"kind": "sqlite", "db_path": db_path}
         return

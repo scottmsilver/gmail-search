@@ -30,8 +30,11 @@ def _using_postgres() -> bool:
     """Cheap env-var check. Kept inline rather than importing from
     `store.db` to avoid a circular-import risk (the lock module is
     small and gets imported early during pipeline setup).
+
+    Mirrors the default-Postgres gate in `store/db.py` (2026-04-20):
+    only `DB_BACKEND=sqlite` turns the OS write-lock back on.
     """
-    return (os.environ.get("DB_BACKEND") or "").lower() == "postgres"
+    return (os.environ.get("DB_BACKEND") or "").lower() != "sqlite"
 
 
 def _lock_path(data_dir: Path) -> Path:

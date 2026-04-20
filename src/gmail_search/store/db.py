@@ -1167,15 +1167,19 @@ def rebuild_fts(db_path: Path) -> int:
 
 
 def _is_postgres_backend() -> bool:
-    """Backend dispatch gate. `DB_BACKEND=postgres` routes every
-    connection through psycopg; anything else (including unset)
-    keeps the legacy SQLite path. The env var is read on every
-    `get_connection` call so a test can flip it per-case without
-    restarting the process.
+    """Backend dispatch gate. Default is now Postgres (the SQLite path
+    is deprecated as of 2026-04-20). Set `DB_BACKEND=sqlite` to force
+    the legacy path — required only for running the old snapshot DB or
+    rolling back. Any other value (including unset) routes through
+    psycopg.
+
+    Reason: production has migrated to paradedb + pg_search BM25; the
+    SQLite shim stays in the tree for Stage 2 cleanup.
     """
     import os as _os
 
-    return (_os.environ.get("DB_BACKEND") or "").lower() == "postgres"
+    backend = (_os.environ.get("DB_BACKEND") or "").lower()
+    return backend != "sqlite"
 
 
 def get_connection(db_path):
