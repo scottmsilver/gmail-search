@@ -244,6 +244,26 @@ def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
     return {r["thread_id"]: (r["body_text"] or "")[:500] for r in rows}
 
 
+def _latest_message_id_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
+    """Map thread_id → the ID of its latest-dated message. Used to join
+    `message_summaries` (keyed by message_id) back to the thread-level
+    row the inbox UI renders.
+    """
+    if not thread_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(thread_ids))
+    rows = conn.execute(
+        f"""SELECT m.thread_id, m.id FROM messages m
+            INNER JOIN (
+                SELECT thread_id, MAX(date) as max_date
+                FROM messages WHERE thread_id IN ({placeholders})
+                GROUP BY thread_id
+            ) latest ON m.thread_id = latest.thread_id AND m.date = latest.max_date""",
+        thread_ids,
+    ).fetchall()
+    return {r["thread_id"]: r["id"] for r in rows}
+
+
 def _run_structured_query(
     db_path: Path,
     sender: str | None,
@@ -508,6 +528,25 @@ def create_app(
             ).fetchall()
             thread_ids = [r["thread_id"] for r in rows]
             threads = _load_thread_summaries(conn, thread_ids)
+
+            # Attach the latest message's summary per thread so the UI row
+            # shows the LLM-written one-liner instead of the raw body
+            # snippet. Without this, every inbox row flashed "(no summary
+            # yet)" even when a fresh summary existed in the DB.
+            latest_msg_ids = _latest_message_id_per_thread(conn, thread_ids)
+            from gmail_search.summarize import get_summaries_bulk_meta
+
+            meta = get_summaries_bulk_meta(conn, latest_msg_ids.values())
+            for t in threads:
+                mid = latest_msg_ids.get(t["thread_id"])
+                m = meta.get(mid) if mid else None
+                if m:
+                    t["summary"] = m["summary"]
+                    t["summary_model"] = m["model"]
+                    t["summary_created_at"] = m["created_at"]
+                    t["latest_message_id"] = mid
+                elif mid:
+                    t["latest_message_id"] = mid
             return {"results": threads}
         finally:
             conn.close()

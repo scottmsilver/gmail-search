@@ -28,13 +28,16 @@ const toSearchThread = (t: QueryThread): SearchThread => {
     user_replied: false,
     matches: [
       {
-        message_id: t.thread_id,
+        message_id: t.latest_message_id ?? t.thread_id,
         score: 0,
         from_addr: topFrom,
         date: t.date_last,
         snippet: t.snippet,
         match_type: "inbox",
         attachment_filename: null,
+        summary: t.summary,
+        summary_model: t.summary_model ?? null,
+        summary_created_at: t.summary_created_at ?? null,
       },
     ],
   };

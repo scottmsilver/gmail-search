@@ -48,6 +48,13 @@ export type QueryThread = {
   date_first: string;
   date_last: string;
   snippet: string;
+  // Optional: `/api/inbox` populates these so the row can render the
+  // LLM-written summary instead of the raw snippet. `/api/query` does
+  // not (for now) — both responses deserialise fine either way.
+  summary?: string;
+  summary_model?: string | null;
+  summary_created_at?: string | null;
+  latest_message_id?: string;
 };
 
 export const searchEmailsBackend = async (args: {
