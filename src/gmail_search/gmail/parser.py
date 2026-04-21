@@ -144,6 +144,19 @@ def _parse_message_date(raw: dict[str, Any], headers: list[dict]) -> datetime:
     return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def _strip_nul(s: str) -> str:
+    """PG TEXT columns reject NUL (0x00). Gmail occasionally ships
+    attachments / mis-encoded bodies that decode to strings containing
+    NUL bytes — without this, the first such message crashes the
+    update / summarize / watch daemons with `psycopg.DataError:
+    PostgreSQL text fields cannot contain NUL (0x00) bytes`. Strip at
+    the parser boundary so every downstream consumer is safe.
+    """
+    if not s:
+        return s
+    return s.replace("\x00", "") if "\x00" in s else s
+
+
 def parse_message(raw: dict[str, Any]) -> tuple[Message, list[dict]]:
     payload = raw["payload"]
     headers = payload.get("headers", [])
@@ -155,15 +168,15 @@ def parse_message(raw: dict[str, Any]) -> tuple[Message, list[dict]]:
     msg = Message(
         id=raw["id"],
         thread_id=raw.get("threadId", raw["id"]),
-        from_addr=_get_header(headers, "From"),
-        to_addr=_get_header(headers, "To"),
-        subject=_get_header(headers, "Subject"),
-        body_text=body_text,
-        body_html=body_html,
+        from_addr=_strip_nul(_get_header(headers, "From")),
+        to_addr=_strip_nul(_get_header(headers, "To")),
+        subject=_strip_nul(_get_header(headers, "Subject")),
+        body_text=_strip_nul(body_text),
+        body_html=_strip_nul(body_html),
         date=date,
         labels=raw.get("labelIds", []),
         history_id=int(raw.get("historyId", 0)),
-        raw_json=json.dumps(raw),
+        raw_json=_strip_nul(json.dumps(raw)),
     )
 
     return msg, att_metas
