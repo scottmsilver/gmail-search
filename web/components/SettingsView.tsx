@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { JobsRunningResponse, RunningJob } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
+import { useShowSearchDebug } from "@/lib/prefs";
 
 const formatBytes = (n: number): string => {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
@@ -221,6 +222,38 @@ const AuthStatusCard = () => {
   );
 };
 
+// Local-only display preferences that don't need server round-trips.
+// Kept inline (vs. a separate file) because it's genuinely tiny and
+// every option will live here.
+const DisplayPrefsCard = () => {
+  const [showDebug, setShowDebug] = useShowSearchDebug();
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Display</CardTitle>
+        <CardDescription>Client-only preferences. Stored in your browser.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={showDebug}
+            onChange={(e) => setShowDebug(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-muted-foreground/40 text-primary focus:ring-primary"
+          />
+          <div className="min-w-0">
+            <div className="font-medium text-foreground">Show search debug row</div>
+            <div className="text-xs text-muted-foreground">
+              Adds a per-row footer with summary source, match type, score, and message ID
+              beneath every search / inbox result. Off by default.
+            </div>
+          </div>
+        </label>
+      </CardContent>
+    </Card>
+  );
+};
+
 export const SettingsView = () => {
   const [data, setData] = useState<JobsRunningResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -308,6 +341,8 @@ export const SettingsView = () => {
       )}
 
       <AuthStatusCard />
+
+      <DisplayPrefsCard />
 
       <Card>
         <CardHeader>

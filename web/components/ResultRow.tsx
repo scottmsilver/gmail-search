@@ -5,6 +5,7 @@ import { useState } from "react";
 import { MiddleTruncate } from "@/components/MiddleTruncate";
 import type { SearchThread } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
+import { useShowSearchDebug } from "@/lib/prefs";
 
 const cleanSender = (raw: string): string => {
   const angle = raw.match(/^([^<]+)</);
@@ -117,10 +118,21 @@ const PaperclipIcon = () => (
   </svg>
 );
 
-const ReplyIcon = () => (
-  <svg className="w-3 h-3 inline-block text-emerald-600 mr-1" viewBox="0 0 24 24" fill="currentColor">
-    <path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z" />
-  </svg>
+// Gmail-style chevron indicator shown next to the sender column when
+// the user was involved in the thread. A single `›` (sent-to or
+// replied) is what we render today. Gmail distinguishes `›` (user
+// in To/Cc alongside others) from `»` (user was the SOLE To
+// recipient); getting that right needs a server-side comparison of
+// the user's email against each matched message's to_addr list.
+// Flagged for follow-up.
+const SenderChevron = () => (
+  <span
+    aria-label="You are on this thread"
+    title="You are on this thread"
+    className="mr-1 select-none font-semibold text-muted-foreground"
+  >
+    ›
+  </span>
 );
 
 // Little external-link opener — rendered as <span role="button"> for
@@ -252,6 +264,7 @@ const ageString = (iso?: string | null): string => {
 
 export const ResultRow = ({ thread, onOpen }: Props) => {
   const top = thread.matches[0];
+  const [showDebug] = useShowSearchDebug();
   const hasSummary = !!(top?.summary && top.summary.trim());
   // Prefer the LLM-generated summary over the raw matched snippet;
   // fall back to the cleaned snippet when no summary exists. When
@@ -266,42 +279,35 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
       ? "snippet"
       : "empty";
   const hasAttachment = thread.matches.some((m) => m.attachment_filename);
-  const senderForAvatar = top?.from_addr ?? thread.participants[0] ?? "?";
 
-  // Two-row columnar layout:
-  //   Row 1:  avatar · names · subject · date
-  //   Row 2:  (avatar spans down)  ·  summary-spanning-names+subject+date
-  //
-  // The summary gets the full width under sender+subject+date columns
-  // rather than being constrained to the subject column alone. Avatar
-  // uses `row-span-2` so it doesn't leave an empty cell in row 2.
+  // Single-row grid:
+  //   sender-names · subject · date
+  // plus a row 2 below that holds the summary + (optional) debug
+  // footer, spanning all three columns. The avatar-initials circle
+  // was removed — it added colour but no information.
   return (
     <button
       type="button"
       onClick={() => onOpen(thread.thread_id)}
-      className="group grid w-full grid-cols-[auto_200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+      className="group grid w-full grid-cols-[200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
     >
-      <div className="row-span-2">
-        <Avatar from={senderForAvatar} />
-      </div>
-
-      {/* Names (row 1, col 2) */}
+      {/* Names (row 1, col 1) */}
       <div className="min-w-0 truncate pt-0.5">
-        {thread.user_replied && <ReplyIcon />}
+        {thread.user_replied && <SenderChevron />}
         <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
         {thread.message_count > 1 && (
           <span className="ml-1.5 text-xs font-normal text-muted-foreground">{thread.message_count}</span>
         )}
       </div>
 
-      {/* Subject (row 1, col 3) — middle-ellipsised so Gmail's
+      {/* Subject (row 1, col 2) — middle-ellipsised so Gmail's
           "Re: Fwd: Fwd: Re: real subject [EXT] [EXT] [EXT]" threads
           keep the meaningful middle visible instead of getting cut
           off on the right like end-truncate did. */}
       <div className="flex min-w-0 items-center gap-1 font-medium text-foreground">
         {hasAttachment && <PaperclipIcon />}
         <MiddleTruncate text={thread.subject} className="min-w-0 flex-1" />
-        {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
+        {/* Open in Gmail — new tab. Shift-click for popup window. */}
         <OpenLinkButton
           url={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`}
           label="in Gmail"
@@ -313,33 +319,37 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
       <div className="shrink-0 pt-1 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
 
       {/* Summary + debug footer (row 2, spans names+subject+date) */}
-      <div className="col-start-2 col-span-3 min-w-0">
+      {/* Summary row (row 2, spanning all three columns now that
+          the avatar column is gone). */}
+      <div className="col-start-1 col-span-3 min-w-0">
         {preview && (
           <div className="whitespace-normal break-words text-muted-foreground">{preview}</div>
         )}
-        {/* Debug footer — tells you where each row's data comes from
-            so problematic summaries can be traced back to a specific
-            prompt version / message / match type. */}
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight text-muted-foreground/70">
-          <span
-            title={top?.summary_model ?? ""}
-            className={previewSource === "summary" ? "text-emerald-600/80" : "text-amber-600/80"}
-          >
-            {previewSource === "summary"
-              ? `summary:${shortModel(top?.summary_model)} · ${ageString(top?.summary_created_at)}`
-              : previewSource === "snippet"
-                ? "snippet (no summary yet)"
-                : "no preview"}
-          </span>
-          {top?.match_type && <span>match:{top.match_type}</span>}
-          {top?.score !== undefined && <span>score:{top.score.toFixed(3)}</span>}
-          {top?.message_id && (
-            <span className="inline-flex items-center" title={top.message_id}>
-              id:{top.message_id.slice(-8)}
-              <CopyButton text={top.message_id} label="message id" />
+        {/* Debug footer — only rendered when the user flips on the
+            "Show search debug" toggle in Settings. Lives in
+            localStorage via `useShowSearchDebug`. */}
+        {showDebug && (
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight text-muted-foreground/70">
+            <span
+              title={top?.summary_model ?? ""}
+              className={previewSource === "summary" ? "text-emerald-600/80" : "text-amber-600/80"}
+            >
+              {previewSource === "summary"
+                ? `summary:${shortModel(top?.summary_model)} · ${ageString(top?.summary_created_at)}`
+                : previewSource === "snippet"
+                  ? "snippet (no summary yet)"
+                  : "no preview"}
             </span>
-          )}
-        </div>
+            {top?.match_type && <span>match:{top.match_type}</span>}
+            {top?.score !== undefined && <span>score:{top.score.toFixed(3)}</span>}
+            {top?.message_id && (
+              <span className="inline-flex items-center" title={top.message_id}>
+                id:{top.message_id.slice(-8)}
+                <CopyButton text={top.message_id} label="message id" />
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </button>
   );
