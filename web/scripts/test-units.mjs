@@ -231,6 +231,27 @@ test("preserves normal whitespace", () =>
 test("preserves accented characters", () =>
   eq(sanitizeBodyExcerpt("naïve résumé"), "naïve résumé"));
 
+// ─── cleanSender (RFC 5322 wrapper) ────────────────────────────────
+console.log("\ncleanSender");
+
+const { cleanSender } = await loadTs("lib/sender.ts");
+
+test("extracts display name from quoted form", () =>
+  eq(cleanSender('"Scott Silver" <scott@example.com>'), "Scott Silver"));
+test("extracts display name from unquoted form", () =>
+  eq(cleanSender("Scott Silver <scott@example.com>"), "Scott Silver"));
+test("returns email when only angle-bracketed address present", () =>
+  eq(cleanSender("<connie.lin@morganstanley.com>"), "connie.lin@morganstanley.com"));
+test("returns bare email as-is", () =>
+  eq(cleanSender("plain@example.com"), "plain@example.com"));
+test("handles empty input", () => eq(cleanSender(""), ""));
+test("strips surrounding whitespace", () =>
+  eq(cleanSender("  Alice <a@b.com>  "), "Alice"));
+test("credentials after comma survive", () =>
+  eq(cleanSender("Sasha Torres, MA, BCBA <sasha@x.com>"), "Sasha Torres, MA, BCBA"));
+test("paren-vendor suffix stays in name", () =>
+  eq(cleanSender('"San Bruno Flower Fashions (via X)" <x@y.com>'), "San Bruno Flower Fashions (via X)"));
+
 // ─── done ──────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

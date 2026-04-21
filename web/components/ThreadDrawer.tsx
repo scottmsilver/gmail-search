@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { EmailBody } from "@/components/EmailBody";
 import { fetchThread } from "@/lib/threadCache";
 import type { ThreadDetail, ThreadMessage } from "@/lib/backend";
-import { cleanSender } from "@/lib/sender";
+import { cleanRecipients, cleanSender } from "@/lib/sender";
 
 import { Drawer } from "./Drawer";
 
@@ -112,12 +112,14 @@ const MessageCard = ({ msg, pythonBaseUrl }: { msg: ThreadMessage; pythonBaseUrl
       <div className="flex items-baseline justify-between gap-2">
         <div className="font-medium text-sm text-neutral-900 truncate">{cleanSender(msg.from_addr)}</div>
         <div className="flex items-center gap-2 shrink-0">
-          <CopyIdPill id={msg.id} />
+          <CopyIdButton id={msg.id} />
           <div className="text-xs text-neutral-500">{formatDate(msg.date)}</div>
         </div>
       </div>
       {msg.to_addr && (
-        <div className="text-xs text-neutral-500 truncate">to {msg.to_addr}</div>
+        <div className="text-xs text-neutral-500 truncate" title={msg.to_addr}>
+          to {cleanRecipients(msg.to_addr)}
+        </div>
       )}
       <div className="mt-2">
         <EmailBody textBody={msg.body_text} htmlBody={msg.body_html} />
