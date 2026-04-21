@@ -495,7 +495,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     # summary yet)" forever. The backend prompt handles short inputs
     # gracefully.
     sql = """
-        SELECT m.id, m.from_addr, m.subject, m.body_text, m.labels
+        SELECT m.id, m.from_addr, m.subject, m.body_text, m.body_html, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
@@ -509,17 +509,32 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     rows = conn.execute(sql, params).fetchall()
     msg_ids = [r["id"] for r in rows]
     attachments_by_msg = _fetch_attachments_for(conn, msg_ids)
-    return [
-        {
-            "id": r["id"],
-            "from_addr": r["from_addr"],
-            "subject": r["subject"],
-            "body_text": r["body_text"],
-            "labels": r["labels"],
-            "attachments": attachments_by_msg.get(r["id"], []),
-        }
-        for r in rows
-    ]
+    from gmail_search.extract.text import html_to_text
+
+    out: list[dict] = []
+    for r in rows:
+        # If body_text is empty but body_html is there, extract text
+        # from the HTML so the summarizer has real content instead of
+        # a blank body + just subject + sender (e.g. a lot of Gmail
+        # marketing and transactional mail ships HTML-only; without
+        # this fallback their summaries degenerate to "Confirms order"
+        # with none of the useful details).
+        body_text = (r["body_text"] or "").strip()
+        if not body_text:
+            body_html = (r["body_html"] or "").strip()
+            if body_html:
+                body_text = html_to_text(body_html)
+        out.append(
+            {
+                "id": r["id"],
+                "from_addr": r["from_addr"],
+                "subject": r["subject"],
+                "body_text": body_text,
+                "labels": r["labels"],
+                "attachments": attachments_by_msg.get(r["id"], []),
+            }
+        )
+    return out
 
 
 def _store_summary(conn, message_id: str, summary: str, model: str) -> None:

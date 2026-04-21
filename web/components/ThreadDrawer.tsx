@@ -8,6 +8,42 @@ import type { ThreadDetail, ThreadMessage } from "@/lib/backend";
 
 import { Drawer } from "./Drawer";
 
+// Tiny "id · copy" pill shown in the opened-message header. Lives
+// here (vs. ResultRow's CopyButton) because the drawer isn't inside
+// a <button> so we can use real <button> elements with no nested-
+// button hydration warning to worry about. Shows the last 8 chars of
+// the message id so power users can copy-paste into the SQL console
+// without hunting through /api/thread.
+const CopyIdPill = ({ id }: { id: string }) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(id).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+      title={`Copy message id — ${id}`}
+      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
+    >
+      <span>id:{id.slice(-8)}</span>
+      {copied ? (
+        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={3}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2}>
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15V5a2 2 0 012-2h10" />
+        </svg>
+      )}
+    </button>
+  );
+};
+
 type Props = {
   threadId: string | null;
   onClose: () => void;
@@ -79,7 +115,10 @@ const MessageCard = ({ msg, pythonBaseUrl }: { msg: ThreadMessage; pythonBaseUrl
     <div className="flex-1 min-w-0">
       <div className="flex items-baseline justify-between gap-2">
         <div className="font-medium text-sm text-neutral-900 truncate">{cleanSender(msg.from_addr)}</div>
-        <div className="text-xs text-neutral-500 shrink-0">{formatDate(msg.date)}</div>
+        <div className="flex items-center gap-2 shrink-0">
+          <CopyIdPill id={msg.id} />
+          <div className="text-xs text-neutral-500">{formatDate(msg.date)}</div>
+        </div>
       </div>
       {msg.to_addr && (
         <div className="text-xs text-neutral-500 truncate">to {msg.to_addr}</div>
