@@ -242,6 +242,7 @@ def sync_new_messages(
 
     new_message_ids: list[str] = []
     page_token = None
+    history_expired = False
 
     try:
         while True:
@@ -262,9 +263,41 @@ def sync_new_messages(
                 break
     except Exception as e:
         if "404" in str(e):
-            logger.warning("History expired. Run full download to re-sync.")
-            return 0
-        raise
+            # Gmail drops history entries after ~7 days. Once our
+            # stored `last_history_id` falls out of that window every
+            # subsequent sync-new call returns 404 forever, which
+            # looks like "frontfill is broken" from the outside — new
+            # mail just never gets pulled in.
+            #
+            # Recovery: scan the last 14 days via `messages.list`
+            # (idempotent upsert downstream), then bump
+            # `last_history_id` to the account's current value so the
+            # NEXT sync starts fresh from the incremental API again.
+            history_expired = True
+            logger.warning("History expired — falling back to messages.list sweep of the last 14 days.")
+        else:
+            raise
+
+    if history_expired:
+        try:
+            next_page: str | None = None
+            recovered: list[str] = []
+            while True:
+                resp = (
+                    service.users()
+                    .messages()
+                    .list(userId="me", q="newer_than:14d", maxResults=500, pageToken=next_page)
+                    .execute()
+                )
+                for m in resp.get("messages", []):
+                    recovered.append(m["id"])
+                next_page = resp.get("nextPageToken")
+                if not next_page:
+                    break
+            logger.info(f"history-expired recovery found {len(recovered)} message IDs in the last 14 days")
+            new_message_ids.extend(recovered)
+        except Exception as e2:
+            logger.warning(f"messages.list fallback failed: {e2}")
 
     if not new_message_ids:
         logger.info("No new messages since last sync")
@@ -328,6 +361,22 @@ def sync_new_messages(
 
         count += 1
 
-    set_sync_state(conn, "last_history_id", str(max_history_id))
+    # If we recovered from a 404, also pull the account's CURRENT
+    # historyId so the next cycle starts from a fresh checkpoint —
+    # otherwise we'd only advance to the newest message's history_id,
+    # which might still be old if the inbox was quiet when we
+    # recovered. Belt-and-suspenders: also guard against max_history_id
+    # being somehow < the prior checkpoint.
+    if history_expired:
+        try:
+            profile = service.users().getProfile(userId="me").execute()
+            current = int(profile.get("historyId", 0))
+            if current > max_history_id:
+                max_history_id = current
+        except Exception as e:
+            logger.warning(f"couldn't fetch current historyId after recovery: {e}")
+
+    if max_history_id > int(last_history_id or 0):
+        set_sync_state(conn, "last_history_id", str(max_history_id))
     conn.close()
     return count

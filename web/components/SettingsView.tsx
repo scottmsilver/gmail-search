@@ -22,6 +22,7 @@ const formatBytes = (n: number): string => {
 const JobControlCard = ({
   title,
   description,
+  extra,
   running,
   pid,
   starting,
@@ -40,6 +41,11 @@ const JobControlCard = ({
 }: {
   title: string;
   description: string;
+  // Optional extra node rendered under the description — used by
+  // Backfill to surface crawl_urls sub-job state, since the crawler
+  // runs inline during each update cycle rather than as its own
+  // long-lived daemon.
+  extra?: React.ReactNode;
   running: boolean;
   pid: number | null;
   starting: boolean;
@@ -66,6 +72,7 @@ const JobControlCard = ({
             <span className="ml-1 font-medium text-foreground">Running (pid {pid}).</span>
           )}
         </CardDescription>
+        {extra && <div className="text-xs text-muted-foreground">{extra}</div>}
       </div>
       {running ? (
         <Button variant="outline" size="sm" disabled={stopping} onClick={onStop}>
@@ -319,11 +326,17 @@ export const SettingsView = () => {
   );
 
   const recent = data?.recent ?? [];
+  const running = data?.running ?? [];
   const disk = data?.disk;
   const frontfillRunning = data?.frontfill?.running ?? false;
   const frontfillPid = data?.frontfill?.pid ?? null;
   const backfillRunning = data?.backfill?.running ?? false;
   const backfillPid = data?.backfill?.pid ?? null;
+  // The URL crawler runs as a sub-step inside each `update --loop`
+  // cycle (between extract and embed). It's not a separate daemon,
+  // so it has no card of its own — we surface it here so you can
+  // see "Crawling: X of Y" when the inline step fires.
+  const crawlJob = running.find((j) => j.job_id === "crawl_urls");
   const summarizeRunning = data?.summarize?.running ?? false;
   const summarizePid = data?.summarize?.pid ?? null;
 
@@ -392,6 +405,13 @@ export const SettingsView = () => {
       <JobControlCard
         title="Backfill"
         description="Pull older messages in batches. Stops automatically when free disk hits the floor below."
+        extra={
+          crawlJob ? (
+            <span>
+              Crawling URLs: {crawlJob.completed}/{crawlJob.total} · {crawlJob.detail}
+            </span>
+          ) : undefined
+        }
         running={backfillRunning}
         pid={backfillPid}
         starting={busy === "backfill"}
