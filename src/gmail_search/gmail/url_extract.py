@@ -87,17 +87,22 @@ _DENY_HOSTS_EXACT = {
 # subdomain it'll get caught too; that's an acceptable false-
 # positive for this class of link.
 _DENY_HOST_PREFIXES = (
+    "ablink.mail.",
     "click.",
+    "click-",
     "clicks.",
     "ct.",
     "e.",
     "em.",
     "enews.",
+    "eventing.",
     "link.",
     "links.",
     "news.email.",
     "notifications.",
     "r.",
+    "s2.",  # common image/pixel tracker subdomain (washingtonpost, etc.)
+    "sg.",  # sendgrid + sendinblue notifications fall-through
     "t.",
     "tracker.",
     "tracking.",

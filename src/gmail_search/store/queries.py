@@ -312,7 +312,7 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
             WHERE mime_type = 'text/html'
               AND extracted_text IS NULL
               AND filename LIKE %s
-            ORDER BY id ASC
+            ORDER BY id DESC
             LIMIT %s""",
         ("URL: %", overfetch),
     ).fetchall()
