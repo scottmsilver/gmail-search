@@ -508,7 +508,11 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
 
                     from gmail_search.gmail.url_fetcher import run as _crawl_urls_run
 
-                    crawl_result = _asyncio.run(_crawl_urls_run(db_path, concurrency=3, limit=100))
+                    # Sized for a ~62GB / 20-core box: ~10 concurrent
+                    # Chromium tabs ≈ 1-2GB RAM, well under what's free.
+                    # Halves the inline crawl latency per update cycle
+                    # vs the old `concurrency=3` default.
+                    crawl_result = _asyncio.run(_crawl_urls_run(db_path, concurrency=10, limit=200))
                     if crawl_result["total"]:
                         click.echo(
                             f"Crawled {crawl_result['done']}/{crawl_result['total']} URL stubs "
@@ -1073,7 +1077,14 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep)
 
 
 @main.command(help="Crawl URLs linked in emails and store the page text as attachments.extracted_text")
-@click.option("--concurrency", type=int, default=3, help="Parallel crawl4ai fetches (default 3)")
+@click.option(
+    "--concurrency",
+    type=int,
+    default=10,
+    help="Parallel crawl4ai fetches. Default 10 is sized for a ~20-core / 32GB box. "
+    "Each Chromium tab is ~100-200MB + a CPU burst for JS, so bump to 15-20 on bigger "
+    "hardware or drop to 3-5 if RAM is tight.",
+)
 @click.option("--limit", type=int, default=None, help="Max URLs per pass")
 @click.option(
     "--loop",
