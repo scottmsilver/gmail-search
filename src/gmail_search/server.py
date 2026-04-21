@@ -580,31 +580,21 @@ def create_app(
         limit: int = Query(50, le=200),
         offset: int = Query(0, ge=0),
     ):
-        """Inbox view. Mirrors Gmail's Primary-tab semantics rather
-        than the literal "Priority Inbox" feature:
-
-          * Must be in INBOX (label 'INBOX').
-          * Must be CATEGORY_PERSONAL — so auto-categorised
-            Promotions / Updates / Social / Forums (which Gmail
-            skips from the Primary tab by default) don't fill
-            the view.
-          * OR is user-flagged IMPORTANT without any of those
-            de-prioritised categories, to catch things Gmail
-            escalated even if they landed in Updates.
-
-        This matches what you actually see when you open Gmail.
-        The older "IMPORTANT AND INBOX" query was too strict —
-        a lot of recent mail has IMPORTANT *or* INBOX but not both,
-        and the view went stale-looking.
+        """Inbox view. Mirrors Gmail's default web INBOX listing —
+        every thread with at least one message carrying the INBOX
+        label, newest-first. (Gmail's classic all-in-one view, NOT
+        the category-tab split — Promotions / Updates / Social stay
+        in the list.)
         """
         import json as _json
 
         conn = get_connection(db_path)
         try:
-            # Thread is "in the primary inbox" if ANY message on it
-            # meets the predicate. We check the per-message labels
-            # (not thread_summary.all_labels) because categories are
-            # per-message — the thread aggregate would misclassify.
+            # Thread is "in the inbox" if ANY message on it still has
+            # the INBOX label. We check per-message labels because
+            # archiving removes INBOX from one message but leaves it
+            # on earlier ones; matching on messages (not
+            # thread_summary.all_labels) catches that drift.
             rows = conn.execute(
                 """
                 WITH priority_threads AS (
@@ -618,20 +608,7 @@ def create_app(
                     WHERE EXISTS (
                         SELECT 1 FROM messages m
                         WHERE m.thread_id = ts.thread_id
-                          AND (
-                              -- Primary-tab shape: in the inbox AND
-                              -- Gmail categorised it Personal.
-                              (m.labels LIKE %s AND m.labels LIKE %s)
-                              OR
-                              -- Escalated-by-Gmail shape: user-flagged
-                              -- IMPORTANT, not in a de-prioritised
-                              -- category tab.
-                              (m.labels LIKE %s
-                                AND m.labels NOT LIKE %s
-                                AND m.labels NOT LIKE %s
-                                AND m.labels NOT LIKE %s
-                                AND m.labels NOT LIKE %s)
-                          )
+                          AND m.labels LIKE %s
                     )
                     ORDER BY ts.date_last DESC
                     LIMIT %s OFFSET %s
@@ -664,17 +641,7 @@ def create_app(
                        ON ms.message_id = lm.latest_message_id
                 ORDER BY pt.date_last DESC
                 """,
-                (
-                    '%"INBOX"%',
-                    '%"CATEGORY_PERSONAL"%',
-                    '%"IMPORTANT"%',
-                    '%"CATEGORY_PROMOTIONS"%',
-                    '%"CATEGORY_UPDATES"%',
-                    '%"CATEGORY_SOCIAL"%',
-                    '%"CATEGORY_FORUMS"%',
-                    limit,
-                    offset,
-                ),
+                ('%"INBOX"%', limit, offset),
             ).fetchall()
 
             results = []
