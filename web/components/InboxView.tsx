@@ -156,18 +156,6 @@ const InboxInner = () => {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b px-4 py-1.5">
-        <CorpusStatus latencyMs={latencyMs} />
-      </div>
-      <header className="flex items-center justify-between border-b px-6 py-3">
-        <div>
-          <h1 className="text-base font-semibold">Priority inbox</h1>
-          <p className="text-xs text-muted-foreground">
-            Threads flagged IMPORTANT and still in the inbox, newest first.
-          </p>
-        </div>
-        <div className="text-xs text-muted-foreground">{threads.length} threads</div>
-      </header>
       <div className="flex-1 overflow-y-auto">
         <InboxList threads={threads} loading={loading} />
         {!reachedEnd && threads.length > 0 && (
@@ -186,6 +174,17 @@ const InboxInner = () => {
             </button>
           </div>
         )}
+      </div>
+      {/* Bottom status strip: corpus stats on the left, thread count
+          on the right. Single thin line at the bottom of the page —
+          replaces the previous full header. */}
+      <div className="flex shrink-0 items-center justify-between gap-3 border-t px-2 py-1.5">
+        <div className="min-w-0 flex-1">
+          <CorpusStatus latencyMs={latencyMs} />
+        </div>
+        <span className="shrink-0 whitespace-nowrap text-[10px] text-muted-foreground/80">
+          {threads.length} {threads.length === 1 ? "thread" : "threads"}
+        </span>
       </div>
     </div>
   );
