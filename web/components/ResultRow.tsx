@@ -123,6 +123,54 @@ const ReplyIcon = () => (
   </svg>
 );
 
+// Little external-link opener — rendered as <span role="button"> for
+// the same reason CopyButton is: the outer row is already a <button>,
+// and HTML forbids nested buttons. Opens the URL in a new tab on
+// plain click; a shift-click opens a sized popup window instead for
+// users who prefer a floating Gmail window. Iframe-inline isn't
+// possible — Gmail sends `X-Frame-Options: DENY`, so the browser
+// refuses to render it.
+const OpenLinkButton = ({
+  url,
+  label,
+  popupName,
+}: {
+  url: string;
+  label: string;
+  popupName?: string;
+}) => {
+  const onActivate = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const native = (e as unknown as React.MouseEvent).shiftKey;
+    if (native && popupName) {
+      window.open(url, popupName, "popup,width=1100,height=800,noopener,noreferrer");
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${label}`}
+      title={`Open ${label}${popupName ? " (shift-click for popup)" : ""}`}
+      onClick={onActivate}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onActivate(e);
+      }}
+      className="ml-1 inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground"
+    >
+      {/* External-link glyph: box with an arrow pointing out the top-right. */}
+      <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2}>
+        <path d="M14 5h5v5" />
+        <path d="M19 5L10 14" />
+        <path d="M19 13v5a1 1 0 01-1 1H6a1 1 0 01-1-1V6a1 1 0 011-1h5" />
+      </svg>
+    </span>
+  );
+};
+
 // Copy-to-clipboard control. Rendered as <span role="button"> because
 // the row's outer element is already a <button>, and HTML forbids
 // nested buttons (React 19 now throws a hydration error for this).
@@ -254,7 +302,11 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
         {hasAttachment && <PaperclipIcon />}
         <MiddleTruncate text={thread.subject} className="min-w-0 flex-1" />
         {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
-        <CopyButton text={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`} label="Gmail link" />
+        <OpenLinkButton
+          url={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`}
+          label="in Gmail"
+          popupName="gmail-popup"
+        />
       </div>
 
       {/* Date (row 1, col 4) */}
