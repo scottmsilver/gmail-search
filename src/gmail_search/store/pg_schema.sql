@@ -186,8 +186,19 @@ CREATE TABLE IF NOT EXISTS job_progress (
     start_completed BIGINT NOT NULL DEFAULT 0,
     detail TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- OS pid of the worker process currently owning this row. Written by
+    -- `JobProgress.__init__` (via os.getpid()), used by the supervisor
+    -- and /api/jobs/*-stop to signal the right process without needing
+    -- a pid file on disk. Nullable so rows predating the column don't
+    -- break.
+    pid BIGINT
 );
+
+-- Idempotent column add for databases provisioned before `pid` existed.
+-- Postgres 9.6+ supports `ADD COLUMN IF NOT EXISTS`; our docker-compose
+-- stack is on 16, so this is safe.
+ALTER TABLE job_progress ADD COLUMN IF NOT EXISTS pid BIGINT;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- scann_index_pointer

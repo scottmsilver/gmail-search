@@ -1115,17 +1115,67 @@ def create_app(
             "running_job": running[0] if running else None,
         }
 
-    # ── Background-job plumbing (frontfill + backfill share everything) ──
+    # ── Background-job plumbing ──────────────────────────────────────────
     #
-    # Both are long-running gmail-search subcommands spawned detached from
-    # the HTTP layer. Authoritative status is a PID file under data_dir;
-    # start writes it, stop SIGTERMs + unlinks it, status reads it. The
-    # two endpoints below are just (pid_name, argv) configuration — the
-    # shared helpers handle everything else.
+    # Long-running gmail-search subcommands (watch, update, summarize) are
+    # spawned detached from the HTTP layer. Liveness is read from the
+    # `job_progress` table: every daemon calls `JobProgress(...)` at
+    # startup (which records `os.getpid()` + `updated_at`) and then
+    # continues to bump `updated_at` either via `.update(...)` during
+    # work or `.heartbeat()` when idle. A row is considered running iff
+    # `status='running'` AND `updated_at` is newer than
+    # `_DAEMON_STALE_SECONDS`.
     #
-    # PID files:
-    #   data/watch.pid     frontfill (the watch daemon)
-    #   data/backfill.pid  backfill (the update pipeline)
+    # The `auth` flow still uses a pid file (`auth.pid`) because it's a
+    # one-shot, not a daemon — it never writes job_progress.
+    _DAEMON_STALE_SECONDS = 90
+
+    # Map API-surface key → `job_progress.job_id`. Keeps the UI contract
+    # ("frontfill/backfill/summarize") while the DB uses the CLI's
+    # subcommand names ("watch/update/summarize").
+    _DAEMON_JOB_IDS = {
+        "frontfill": "watch",
+        "backfill": "update",
+        "summarize": "summarize",
+    }
+
+    def _daemon_status(job_id: str) -> dict:
+        """Read the latest `job_progress` row for `job_id` and derive
+        a daemon-liveness view. A daemon is considered running iff the
+        row's status is `running` AND `updated_at` is fresher than the
+        stale threshold. Returns:
+          {running, pid, age_seconds, stage, detail}
+        Missing row → {running: False, pid: None, age_seconds: None, ...}.
+        """
+        from datetime import datetime, timezone
+
+        from gmail_search.store.db import JobProgress
+
+        row = JobProgress.get(db_path, job_id)
+        if not row:
+            return {
+                "running": False,
+                "pid": None,
+                "age_seconds": None,
+                "stage": "",
+                "detail": "",
+            }
+        try:
+            updated = datetime.fromisoformat(row["updated_at"])
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - updated).total_seconds()
+        except (ValueError, TypeError):
+            age = None
+        pid = row.get("pid")
+        running = row.get("status") == "running" and (age is not None and age < _DAEMON_STALE_SECONDS)
+        return {
+            "running": bool(running),
+            "pid": int(pid) if pid else None,
+            "age_seconds": round(age, 1) if age is not None else None,
+            "stage": row.get("stage") or "",
+            "detail": row.get("detail") or "",
+        }
 
     def _pid_file_status(pid_path: Path) -> dict:
         """Is the process at pid_path alive AND not a zombie?
@@ -1206,6 +1256,48 @@ def create_app(
             pid_path.unlink(missing_ok=True)
             return {"ok": True, "detail": "process was already gone"}
 
+    def _spawn_daemon(job_key: str, log_filename: str, extra_args: list[str]):
+        """Spawn a detached daemon subprocess. Liveness is checked via
+        `_daemon_status(job_id)` (heartbeat on `job_progress`); no pid
+        file is written — the daemon itself records `pid` via
+        `JobProgress.__init__` on startup. 409 if already running.
+        """
+        from fastapi.responses import JSONResponse
+
+        from gmail_search.jobs import gmail_search_command, spawn_detached
+
+        job_id = _DAEMON_JOB_IDS[job_key]
+        status = _daemon_status(job_id)
+        if status["running"]:
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": f"already running (pid {status['pid']})"},
+            )
+
+        argv = gmail_search_command() + extra_args + ["--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, data_dir / log_filename)
+        return {"ok": True, "pid": pid}
+
+    def _stop_daemon(job_key: str):
+        """SIGTERM the pid recorded in `job_progress.pid` for this
+        daemon. Idempotent: 404 when the heartbeat says not running,
+        200 otherwise (even if the OS says the process is already gone).
+        """
+        import os
+        import signal
+
+        from fastapi.responses import JSONResponse
+
+        job_id = _DAEMON_JOB_IDS[job_key]
+        status = _daemon_status(job_id)
+        if not status["running"] or not status["pid"]:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "not running"})
+        try:
+            os.kill(status["pid"], signal.SIGTERM)
+            return {"ok": True, "pid": status["pid"]}
+        except (ProcessLookupError, PermissionError):
+            return {"ok": True, "detail": "process was already gone"}
+
     def _enrich_with_eta(job: dict) -> dict:
         """Add `rate_per_sec` + `eta_seconds` fields to a running job
         row when enough signal exists to compute them. Works off the
@@ -1238,9 +1330,10 @@ def create_app(
     @app.get("/api/jobs/running")
     async def api_jobs_running():
         """Everything /settings needs: all running job_progress rows +
-        disk usage + per-job (frontfill/backfill) authoritative status
-        from the pid files. Running rows are enriched with rate_per_sec
-        + eta_seconds when the baseline + elapsed time permit it.
+        disk usage + per-daemon (frontfill/backfill/summarize)
+        authoritative liveness derived from `job_progress.updated_at`.
+        Running rows are enriched with rate_per_sec + eta_seconds when
+        the baseline + elapsed time permit it.
         """
         import shutil as _shutil
 
@@ -1258,9 +1351,9 @@ def create_app(
                 "used_bytes": usage.used,
                 "free_bytes": usage.free,
             },
-            "frontfill": _pid_file_status(data_dir / "watch.pid"),
-            "backfill": _pid_file_status(data_dir / "backfill.pid"),
-            "summarize": _pid_file_status(data_dir / "summarize.pid"),
+            "frontfill": _daemon_status(_DAEMON_JOB_IDS["frontfill"]),
+            "backfill": _daemon_status(_DAEMON_JOB_IDS["backfill"]),
+            "summarize": _daemon_status(_DAEMON_JOB_IDS["summarize"]),
         }
 
     # ── OAuth status + re-auth ──────────────────────────────────────────
@@ -1320,19 +1413,18 @@ def create_app(
     @app.post("/api/jobs/frontfill")
     async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
         """Start the continuous watch daemon: sync new messages every
-        `interval` seconds, then extract/embed/reindex. Writes
-        data/watch.pid, same convention as `gmail-search start`, so CLI
-        and UI stay interchangeable.
+        `interval` seconds, then extract/embed/reindex. Liveness is
+        tracked via the `watch` row in `job_progress` (heartbeat).
         """
-        return _start_detached_job(
-            pid_filename="watch.pid",
+        return _spawn_daemon(
+            job_key="frontfill",
             log_filename="watch.log",
             extra_args=["watch", "--interval", str(interval)],
         )
 
     @app.post("/api/jobs/frontfill/stop")
     async def api_jobs_frontfill_stop():
-        return _stop_detached_job("watch.pid")
+        return _stop_daemon("frontfill")
 
     @app.post("/api/jobs/backfill")
     async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
@@ -1340,15 +1432,15 @@ def create_app(
         via `--loop`: once caught up (or if a cycle crashes), sleeps 5
         min and resumes. Pauses batches when free disk < min_free_gb.
         """
-        return _start_detached_job(
-            pid_filename="backfill.pid",
+        return _spawn_daemon(
+            job_key="backfill",
             log_filename="backfill.log",
             extra_args=["update", "--min-free-gb", str(min_free_gb), "--loop"],
         )
 
     @app.post("/api/jobs/backfill/stop")
     async def api_jobs_backfill_stop():
-        return _stop_detached_job("backfill.pid")
+        return _stop_daemon("backfill")
 
     @app.post("/api/jobs/summarize")
     async def api_jobs_summarize(
@@ -1358,8 +1450,8 @@ def create_app(
         """Run `gmail-search summarize` in the background. Rate + ETA
         land in /api/jobs/running via the `summarize` job_progress row.
         """
-        return _start_detached_job(
-            pid_filename="summarize.pid",
+        return _spawn_daemon(
+            job_key="summarize",
             log_filename="summarize.log",
             extra_args=[
                 "summarize",
@@ -1372,6 +1464,6 @@ def create_app(
 
     @app.post("/api/jobs/summarize/stop")
     async def api_jobs_summarize_stop():
-        return _stop_detached_job("summarize.pid")
+        return _stop_daemon("summarize")
 
     return app

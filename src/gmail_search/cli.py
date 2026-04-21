@@ -599,7 +599,24 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
             except Exception:
                 pass
         click.echo(f"\n[backfill] sleeping {loop_sleep}s before next cycle...")
-        _time.sleep(loop_sleep)
+        # Hold the `update` heartbeat warm during the inter-cycle sleep
+        # so the supervisor / HTTP status don't see the daemon as dead
+        # while it's waiting to start the next cycle. We flip status back
+        # to 'running' with stage=idle so /api/status reflects reality.
+        try:
+            from gmail_search.store.db import JobProgress as _JP
+
+            idle = _JP(db_path, "update", start_completed=0)
+            idle.update("idle", 0, 0, "waiting for next cycle")
+        except Exception:
+            idle = None
+        for i in range(loop_sleep):
+            if idle is not None and i % 30 == 0:
+                try:
+                    idle.heartbeat()
+                except Exception:
+                    pass
+            _time.sleep(1)
 
 
 def _pid_file(data_dir: Path) -> Path:
@@ -818,10 +835,18 @@ def watch(ctx, interval, budget, max_cycles):
             else:
                 progress.update("idle", cycle, 0, "no new messages")
 
-        # Sleep in small increments so Ctrl+C is responsive
-        for _ in range(interval):
+        # Sleep in small increments so Ctrl+C is responsive. Heartbeat
+        # every ~30s so an idle watch (no new mail = no .update() call
+        # this cycle) stays well under the supervisor's 90s stale
+        # threshold without hammering the DB.
+        for i in range(interval):
             if not running:
                 break
+            if i % 30 == 0:
+                try:
+                    progress.heartbeat()
+                except Exception as _e:
+                    logger.warning(f"heartbeat failed: {_e}")
             _time.sleep(1)
 
     progress.finish("stopped", f"ran {cycle} cycles")
@@ -852,6 +877,162 @@ def reap(ctx, staleness_seconds, kill_timeout_sec):
     click.echo(f"Reaped {report.rows_reaped} stale row(s), killed {report.processes_killed} process(es).")
     for line in report.details:
         click.echo(f"  {line}")
+
+
+@main.command(help="Watchdog that keeps watch/update/summarize alive")
+@click.option("--interval", type=int, default=30, help="Seconds between heartbeat checks")
+@click.option(
+    "--restart-delay",
+    type=int,
+    default=15,
+    help="Seconds to wait before considering a dead daemon for respawn",
+)
+@common_options
+@click.pass_context
+def supervise(ctx, interval, restart_delay):
+    """Keep the three long-lived daemons alive.
+
+    Polls `job_progress.updated_at` for each of `watch`, `update`, and
+    `summarize`. If a row is stale for more than 90s (and we haven't
+    just tried to restart it) we respawn the daemon detached. The
+    supervisor itself also writes a `supervisor` row so you can see
+    it's alive.
+
+    Idempotent — running this under systemd-user or a tmux is fine;
+    if a daemon was already alive the 'already running' check in each
+    branch prevents a double-spawn.
+    """
+    import logging as _logging
+    import signal as _signal
+    import time as _time
+    from datetime import datetime, timezone
+
+    from gmail_search.jobs import gmail_search_command, spawn_detached
+    from gmail_search.store.db import JobProgress
+
+    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _log = _logging.getLogger("supervisor")
+
+    data_dir = ctx.obj["data_dir"]
+    db_path = ctx.obj["db_path"]
+
+    # Supervisor-side view of the three daemons. "job_id" is the
+    # job_progress row key (same as the CLI subcommand), "argv" is what
+    # we respawn if the daemon is stale, and "log" is the file stdout
+    # + stderr land in.
+    daemons = [
+        {
+            "job_id": "watch",
+            "argv": ["watch", "--interval", "120"],
+            "log": data_dir / "watch.log",
+        },
+        {
+            "job_id": "update",
+            "argv": ["update", "--loop"],
+            "log": data_dir / "backfill.log",
+        },
+        {
+            "job_id": "summarize",
+            "argv": ["summarize", "--concurrency", "12", "--batch-size", "1", "--loop"],
+            "log": data_dir / "summarize.log",
+        },
+    ]
+
+    # Track when we last attempted to spawn each daemon so we don't
+    # thrash on a process that dies immediately after start.
+    last_spawn_attempt: dict[str, float] = {}
+
+    running = True
+
+    def _on_signal(sig, frame):
+        nonlocal running
+        _log.info(f"received signal {sig} — stopping supervisor (supervised daemons stay alive)")
+        running = False
+
+    _signal.signal(_signal.SIGINT, _on_signal)
+    _signal.signal(_signal.SIGTERM, _on_signal)
+
+    # Self-heartbeat so operators can see the supervisor is alive.
+    supervisor_progress = JobProgress(db_path, "supervisor", start_completed=0)
+    supervisor_progress.update("starting", 0, len(daemons), "supervisor online")
+
+    _STALE_SECONDS = 90
+
+    def _row_age_seconds(row: dict | None) -> float | None:
+        if not row:
+            return None
+        try:
+            updated = datetime.fromisoformat(row["updated_at"])
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - updated).total_seconds()
+        except (ValueError, TypeError):
+            return None
+
+    def _is_alive(row: dict | None) -> bool:
+        age = _row_age_seconds(row)
+        if age is None:
+            return False
+        if row.get("status") != "running":
+            return False
+        return age < _STALE_SECONDS
+
+    def _should_respawn(job_id: str) -> bool:
+        now = _time.time()
+        last = last_spawn_attempt.get(job_id, 0.0)
+        return (now - last) >= restart_delay
+
+    def _spawn(daemon: dict) -> None:
+        argv = gmail_search_command() + daemon["argv"] + ["--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, daemon["log"])
+        last_spawn_attempt[daemon["job_id"]] = _time.time()
+        _log.info(f"supervisor: spawned {daemon['job_id']} pid={pid}")
+
+    click.echo(
+        f"Supervisor online: watching {[d['job_id'] for d in daemons]} "
+        f"every {interval}s (stale > {_STALE_SECONDS}s, restart-delay {restart_delay}s)"
+    )
+
+    while running:
+        alive = 0
+        for daemon in daemons:
+            job_id = daemon["job_id"]
+            row = JobProgress.get(db_path, job_id)
+            if _is_alive(row):
+                alive += 1
+                continue
+            if not _should_respawn(job_id):
+                _log.debug(f"{job_id} stale but in restart-delay window — skipping")
+                continue
+            prev_detail = (row.get("detail") if row else "") or "(no prior row)"
+            age = _row_age_seconds(row)
+            _log.info(
+                f"{job_id} is stale "
+                f"(age={age!r}s, status={row.get('status') if row else 'MISSING'}, "
+                f"prev_detail={prev_detail!r}) — respawning"
+            )
+            try:
+                _spawn(daemon)
+            except Exception as e:
+                _log.exception(f"failed to spawn {job_id}: {e}")
+
+        try:
+            supervisor_progress.update(
+                "watching",
+                alive,
+                len(daemons),
+                f"{alive}/{len(daemons)} alive",
+            )
+        except Exception:
+            pass
+
+        for _ in range(interval):
+            if not running:
+                break
+            _time.sleep(1)
+
+    supervisor_progress.finish("stopped", "supervisor exited cleanly")
+    click.echo("Supervisor stopped.")
 
 
 @main.command(help="Show progress of running jobs and daemon status")
@@ -1056,7 +1237,20 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep)
         f"limit={pass_limit}, loop={loop})"
     )
 
+    # In loop mode we keep an `summarize` job_progress row warm between
+    # passes so the supervisor / /api/jobs/running see the daemon as
+    # alive even when there's nothing to summarize. Created lazily —
+    # no-op for the one-shot path.
+    from gmail_search.store.db import JobProgress as _JP
+
+    idle_progress = _JP(ctx.obj["db_path"], "summarize", start_completed=0) if loop else None
+
     while True:
+        if idle_progress is not None:
+            try:
+                idle_progress.update("pass", 0, 0, "checking for pending summaries")
+            except Exception:
+                pass
         result = backfill(
             ctx.obj["db_path"],
             concurrency=concurrency,
@@ -1071,9 +1265,24 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep)
             break
         # Idle sleep when nothing to do; otherwise loop straight into the
         # next pass so newly-arrived mail gets picked up within one
-        # batch's latency.
+        # batch's latency. Heartbeat during the idle sleep so the
+        # supervisor doesn't consider us dead.
         if result["total"] == 0:
-            time.sleep(loop_sleep)
+            if idle_progress is not None:
+                try:
+                    idle_progress.update("idle", 0, 0, "waiting for new pending messages")
+                except Exception:
+                    pass
+            slept = 0
+            while slept < loop_sleep:
+                if idle_progress is not None and slept % 30 == 0:
+                    try:
+                        idle_progress.heartbeat()
+                    except Exception:
+                        pass
+                chunk = min(1.0, loop_sleep - slept)
+                time.sleep(chunk)
+                slept += 1
 
 
 @main.command(help="Crawl URLs linked in emails and store the page text as attachments.extracted_text")

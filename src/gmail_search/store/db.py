@@ -107,7 +107,7 @@ TABLE_DOCS: dict[str, str] = {
     ),
     "job_progress": (
         "Live status of long-running jobs (sync, watch, update). Used by /api/status.\n"
-        "- job_id (TEXT PK), stage, status, total, completed, detail, started_at, updated_at."
+        "- job_id (TEXT PK), stage, status, total, completed, detail, started_at, updated_at, pid."
     ),
     # Tables intentionally NOT documented for the LLM:
     # - embeddings: huge BLOB column, never query directly (use search_emails).
@@ -838,17 +838,23 @@ class JobProgress:
         how many units the job had already completed before this run
         began. For backfill it's the existing corpus size; for sync-style
         jobs it's 0.
+
+        Also records `os.getpid()` into `job_progress.pid` so the
+        supervisor and HTTP stop endpoints can signal the right process
+        without a pid file on disk.
         """
         self.db_path = db_path
         self.job_id = job_id
+        import os as _os
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc).isoformat()
+        my_pid = _os.getpid()
         conn = get_connection(db_path)
         conn.execute(
             """INSERT INTO job_progress
-                 (job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at)
-               VALUES (%s, '', 'running', 0, %s, %s, '', %s, %s)
+                 (job_id, stage, status, total, completed, start_completed, detail, started_at, updated_at, pid)
+               VALUES (%s, '', 'running', 0, %s, %s, '', %s, %s, %s)
                ON CONFLICT(job_id) DO UPDATE SET
                  stage = excluded.stage,
                  status = excluded.status,
@@ -857,8 +863,9 @@ class JobProgress:
                  start_completed = excluded.start_completed,
                  detail = excluded.detail,
                  started_at = excluded.started_at,
-                 updated_at = excluded.updated_at""",
-            (job_id, start_completed, start_completed, now, now),
+                 updated_at = excluded.updated_at,
+                 pid = excluded.pid""",
+            (job_id, start_completed, start_completed, now, now, my_pid),
         )
         conn.commit()
         conn.close()
@@ -870,6 +877,25 @@ class JobProgress:
         conn.execute(
             "UPDATE job_progress SET stage=%s, completed=%s, total=%s, detail=%s, updated_at=%s WHERE job_id=%s",
             (stage, completed, total, detail, datetime.now(timezone.utc).isoformat(), self.job_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def heartbeat(self):
+        """Bump `updated_at = now()` without touching any other column.
+
+        Used by the watch daemon's idle sleep so an idle frontfill
+        doesn't look dead to the supervisor / heartbeat-based status
+        endpoints. The other two daemons (update, summarize) already
+        call `.update()` frequently enough during work to serve the
+        same purpose.
+        """
+        from datetime import datetime, timezone
+
+        conn = get_connection(self.db_path)
+        conn.execute(
+            "UPDATE job_progress SET updated_at=%s WHERE job_id=%s",
+            (datetime.now(timezone.utc).isoformat(), self.job_id),
         )
         conn.commit()
         conn.close()
