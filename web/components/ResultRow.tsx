@@ -6,11 +6,7 @@ import { MiddleTruncate } from "@/components/MiddleTruncate";
 import type { SearchThread } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
 import { useShowSearchDebug } from "@/lib/prefs";
-
-const cleanSender = (raw: string): string => {
-  const angle = raw.match(/^([^<]+)</);
-  return (angle?.[1] ?? raw).replace(/"/g, "").trim();
-};
+import { cleanSender } from "@/lib/sender";
 
 const senderInitial = (raw: string): string =>
   cleanSender(raw).charAt(0).toUpperCase() || "?";

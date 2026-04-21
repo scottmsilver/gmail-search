@@ -5,16 +5,17 @@ import { useEffect, useState } from "react";
 import { EmailBody } from "@/components/EmailBody";
 import { fetchThread } from "@/lib/threadCache";
 import type { ThreadDetail, ThreadMessage } from "@/lib/backend";
+import { cleanSender } from "@/lib/sender";
 
 import { Drawer } from "./Drawer";
 
-// Tiny "id · copy" pill shown in the opened-message header. Lives
-// here (vs. ResultRow's CopyButton) because the drawer isn't inside
-// a <button> so we can use real <button> elements with no nested-
-// button hydration warning to worry about. Shows the last 8 chars of
-// the message id so power users can copy-paste into the SQL console
-// without hunting through /api/thread.
-const CopyIdPill = ({ id }: { id: string }) => {
+// Little "copy message id" button in the opened-message header. Just
+// the copy icon — the id itself is in the tooltip so hovering reveals
+// it. The full id goes on the clipboard so power users can paste it
+// straight into the SQL console. Lives here (vs. ResultRow's
+// CopyButton) because the drawer isn't inside a <button>, so we can
+// use a real <button> without the nested-button hydration warning.
+const CopyIdButton = ({ id }: { id: string }) => {
   const [copied, setCopied] = useState(false);
   return (
     <button
@@ -27,15 +28,15 @@ const CopyIdPill = ({ id }: { id: string }) => {
         });
       }}
       title={`Copy message id — ${id}`}
-      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
+      aria-label="Copy message id"
+      className="inline-flex h-5 w-5 items-center justify-center rounded text-neutral-400 hover:bg-neutral-100 hover:text-neutral-900"
     >
-      <span>id:{id.slice(-8)}</span>
       {copied ? (
-        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={3}>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={3}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
         </svg>
       ) : (
-        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2}>
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2}>
           <rect x="9" y="9" width="11" height="11" rx="2" />
           <path d="M5 15V5a2 2 0 012-2h10" />
         </svg>
@@ -59,11 +60,6 @@ const formatDate = (iso: string) => {
   } catch {
     return iso;
   }
-};
-
-const cleanSender = (raw: string): string => {
-  const angle = raw.match(/^([^<]+)</);
-  return (angle?.[1] ?? raw).replace(/"/g, "").trim();
 };
 
 const senderInitial = (raw: string): string => {

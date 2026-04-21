@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { cleanSender } from "@/lib/sender";
 import { fetchThread, getCachedThread, subscribeThread } from "@/lib/threadCache";
 
 export type ThreadHint = {
@@ -31,12 +32,6 @@ const useCachedThread = (threadId: string) =>
     () => getCachedThread(threadId),
     () => undefined,
   );
-
-const cleanSender = (raw: string): string => {
-  if (!raw) return "";
-  const angle = raw.match(/^([^<]+)</);
-  return (angle?.[1] ?? raw).replace(/"/g, "").trim();
-};
 
 export const CitationChip = ({ threadId, hints, onOpen }: Props) => {
   const cached = useCachedThread(threadId);
