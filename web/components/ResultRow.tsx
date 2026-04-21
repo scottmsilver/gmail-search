@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { MiddleTruncate } from "@/components/MiddleTruncate";
 import type { SearchThread } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
 
@@ -185,10 +186,13 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
         )}
       </div>
 
-      {/* Subject (row 1, col 3) */}
-      <div className="flex min-w-0 items-center gap-1 truncate font-medium text-foreground">
+      {/* Subject (row 1, col 3) — middle-ellipsised so Gmail's
+          "Re: Fwd: Fwd: Re: real subject [EXT] [EXT] [EXT]" threads
+          keep the meaningful middle visible instead of getting cut
+          off on the right like end-truncate did. */}
+      <div className="flex min-w-0 items-center gap-1 font-medium text-foreground">
         {hasAttachment && <PaperclipIcon />}
-        <span className="truncate">{thread.subject}</span>
+        <MiddleTruncate text={thread.subject} className="min-w-0 flex-1" />
         {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
         <CopyButton text={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`} label="Gmail link" />
       </div>
