@@ -181,7 +181,7 @@ def download_messages(
             from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
             from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-            for url in _extract_urls(msg.body_text or ""):
+            for url in _extract_urls(msg.body_text or "", labels=msg.labels):
                 _upsert_url_stub(conn, message_id=msg.id, url=url)
 
             for att_meta in att_metas:
@@ -300,7 +300,7 @@ def sync_new_messages(
         from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
         from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-        for url in _extract_urls(msg.body_text or ""):
+        for url in _extract_urls(msg.body_text or "", labels=msg.labels):
             _upsert_url_stub(conn, message_id=msg.id, url=url)
 
         for att_meta in att_metas:

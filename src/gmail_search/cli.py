@@ -188,10 +188,10 @@ def extract(ctx):
         from gmail_search.gmail.url_extract import extract_crawlable_urls
         from gmail_search.store.queries import upsert_url_stub
 
-        msg_rows = conn.execute("SELECT id, body_text FROM messages WHERE length(body_text) >= 50").fetchall()
+        msg_rows = conn.execute("SELECT id, body_text, labels FROM messages WHERE length(body_text) >= 50").fetchall()
         new_url_stubs = 0
         for r in tqdm(msg_rows, desc="Scanning bodies for URLs"):
-            for url in extract_crawlable_urls(r["body_text"] or ""):
+            for url in extract_crawlable_urls(r["body_text"] or "", labels=r["labels"]):
                 new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url)
         conn.commit()
         if new_url_stubs:

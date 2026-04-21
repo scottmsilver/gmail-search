@@ -263,9 +263,63 @@ def _is_denied(url: str) -> bool:
     return False
 
 
-def extract_crawlable_urls(body_text: str) -> list[str]:
+# Per-message URL caps.
+#
+# Bulk mail (Gmail categories PROMOTIONS / UPDATES / SOCIAL / FORUMS)
+# with more than `_BULK_URL_CAP` URLs is almost always a newsletter or
+# digest where the value was the curation itself — crawling every
+# linked article burns hours and rarely surfaces anything useful for a
+# summary. We drop the URL list entirely for those.
+#
+# Personal mail keeps a much looser cap; we only bail if the thing is
+# pathological (link-bomb / obvious spam / auto-generated). Someone
+# sharing a vacation recap with 30 links still deserves a crawl.
+_BULK_URL_CAP = 10
+_HARD_URL_CAP = 50
+
+# Gmail categories that indicate bulk / automated mail.
+_BULK_LABELS = frozenset(
+    {
+        "CATEGORY_PROMOTIONS",
+        "CATEGORY_UPDATES",
+        "CATEGORY_SOCIAL",
+        "CATEGORY_FORUMS",
+    }
+)
+
+
+def _looks_bulk(labels: object) -> bool:
+    """True if the message's Gmail labels put it in a bulk category.
+
+    Labels come from our DB as either a JSON-encoded list (string) or
+    a decoded list — callers have historically passed both. Handle
+    both without a separate json import in the hot path.
+    """
+    if not labels:
+        return False
+    if isinstance(labels, str):
+        s = labels.strip()
+        if not s:
+            return False
+        # Cheap: look for the category tokens as substrings. JSON
+        # list encoding doesn't mangle these, and we don't want the
+        # import cost of json.loads on every message.
+        return any(cat in s for cat in _BULK_LABELS)
+    if isinstance(labels, (list, tuple, set, frozenset)):
+        return any(lab in _BULK_LABELS for lab in labels)
+    return False
+
+
+def extract_crawlable_urls(body_text: str, labels: object = None) -> list[str]:
     """Return a de-duplicated, order-preserving list of crawlable URLs
     extracted from `body_text`. URLs that hit the denylist are dropped.
+
+    Two caps guard against digest / newsletter bombs:
+      * Bulk mail (see `_BULK_LABELS`) with > `_BULK_URL_CAP` URLs
+        returns an empty list — we don't stub any of them.
+      * Anything over `_HARD_URL_CAP` returns empty regardless —
+        even a personal email with 50+ URLs is almost certainly
+        auto-generated.
 
     Matches the shape of `extract_drive_ids` — pure function, callers
     do the side-effecting upsert.
@@ -285,4 +339,8 @@ def extract_crawlable_urls(body_text: str) -> list[str]:
             continue
         seen.add(candidate)
         out.append(candidate)
+    if len(out) > _HARD_URL_CAP:
+        return []
+    if _looks_bulk(labels) and len(out) > _BULK_URL_CAP:
+        return []
     return out
