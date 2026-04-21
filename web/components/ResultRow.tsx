@@ -41,6 +41,62 @@ const cleanSnippet = (s: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+// Summaries frequently restate the sender's name as their first
+// subject ("Scott Silver says X", "Jesica Peterson asks Y") — which
+// is redundant because the sender column right above the summary
+// already shows the same name. If the summary starts with a prefix
+// that matches the cleaned sender name (case-insensitive), drop it
+// and re-capitalize the next word so the sentence still reads as a
+// sentence: "Scott Silver says X" → "Says X".
+//
+// We try several candidate prefixes derived from the sender header
+// so that noise like credentials or vendor-via suffixes doesn't
+// block the match:
+//   "Sasha Torres, MA, BCBA"           → also try "Sasha Torres"
+//   "San Bruno Flower Fashions (via X)" → also try "San Bruno Flower Fashions"
+//
+// Possessives ("Scott Silver's reply…") and partial-name phrases
+// ("Scott and Joy met…") are left alone because they aren't
+// redundant — the name is load-bearing there.
+const _senderPrefixCandidates = (name: string): string[] => {
+  const out = new Set<string>();
+  const add = (s: string) => {
+    const trimmed = s.trim();
+    if (trimmed.length >= 2) out.add(trimmed);
+  };
+  add(name);
+  // Strip credentials after a comma: "Sasha Torres, MA, BCBA" → "Sasha Torres"
+  const commaIdx = name.indexOf(",");
+  if (commaIdx > 0) add(name.slice(0, commaIdx));
+  // Strip "(via X)" / parenthetical suffix.
+  const parenIdx = name.indexOf("(");
+  if (parenIdx > 0) add(name.slice(0, parenIdx));
+  // Also the combination of both trims.
+  if (parenIdx > 0 && commaIdx > 0) {
+    add(name.slice(0, Math.min(parenIdx, commaIdx)));
+  }
+  // Sort longest-first so we always strip the MOST specific match.
+  return [...out].sort((a, b) => b.length - a.length);
+};
+
+const stripRedundantSenderPrefix = (summary: string, fromAddr: string): string => {
+  const base = cleanSender(fromAddr).trim();
+  if (!base) return summary;
+  for (const cand of _senderPrefixCandidates(base)) {
+    if (summary.length <= cand.length) continue;
+    if (summary.slice(0, cand.length).toLowerCase() !== cand.toLowerCase()) continue;
+    const nextChar = summary.charAt(cand.length);
+    // Must be a word-break — space / tab — not a letter or a digit.
+    if (nextChar !== " " && nextChar !== "\t") continue;
+    const rest = summary.slice(cand.length).trimStart();
+    // Possessive — keep the name.
+    if (rest.startsWith("'s ") || rest.startsWith("’s ")) return summary;
+    if (!rest) continue;
+    return rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
+  return summary;
+};
+
 const shortPeople = (participants: string[]): string => {
   const names = participants.map(cleanSender).filter(Boolean);
   if (names.length <= 3) return names.join(", ");
@@ -150,8 +206,12 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
   const top = thread.matches[0];
   const hasSummary = !!(top?.summary && top.summary.trim());
   // Prefer the LLM-generated summary over the raw matched snippet;
-  // fall back to the cleaned snippet when no summary exists.
-  const preview = hasSummary ? top!.summary!.trim() : cleanSnippet(top?.snippet ?? "").slice(0, 180);
+  // fall back to the cleaned snippet when no summary exists. When
+  // the summary starts with the sender's name (redundant with the
+  // sender column rendered right above it), strip the name prefix.
+  const rawPreview = hasSummary ? top!.summary!.trim() : cleanSnippet(top?.snippet ?? "").slice(0, 180);
+  const preview =
+    hasSummary && top?.from_addr ? stripRedundantSenderPrefix(rawPreview, top.from_addr) : rawPreview;
   const previewSource: "summary" | "snippet" | "empty" = hasSummary
     ? "summary"
     : preview
