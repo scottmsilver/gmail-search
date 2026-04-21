@@ -251,6 +251,10 @@ CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations (updated_a
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages (conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_model_battles_created ON model_battles (created_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments (message_id);
+
+-- Reconciler watermark (`WHERE history_id > $N`) — without this the
+-- drift-detector daemon seq-scans all messages every pass.
+CREATE INDEX IF NOT EXISTS idx_messages_history_id ON messages (history_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings (message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
     ON embeddings (message_id, attachment_id, chunk_type, model);

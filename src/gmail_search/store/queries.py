@@ -34,14 +34,25 @@ def upsert_message(conn, msg: Message) -> None:
 
 
 def _touch_thread_summary(conn, msg: Message) -> None:
-    """Incrementally refresh the thread_summary row for this message's
-    thread. Keeps /api/inbox and other thread-grouped views live —
-    without this, new mail lands in `messages` but its thread is
-    missing from `thread_summary`, so the inbox query's JOIN drops it
-    entirely and the UI looks stuck days behind.
+    """Fast-path inline refresh fired from `upsert_message`. Wraps
+    `recompute_thread_summary` so the reconciler and the ingest hot
+    path share one implementation.
+    """
+    recompute_thread_summary(conn, msg.thread_id, fallback_subject=msg.subject)
 
-    Cheap: one SELECT aggregate + one UPSERT per inserted message. We
-    don't recompute ALL threads — just the affected one.
+
+def recompute_thread_summary(conn, thread_id: str, fallback_subject: str = "") -> bool:
+    """Refresh the thread_summary row for one thread from the current
+    `messages` content. Returns True on a write, False when the
+    thread has no messages (deleted / race).
+
+    Called from two places:
+      * `_touch_thread_summary` — inline during ingest, low-latency
+        happy path.
+      * `gmail-search reconcile` — background drift-detector daemon
+        that sweeps any rows missed by the inline path. That's what
+        makes the inline call a fast path rather than a correctness
+        requirement.
     """
     row = conn.execute(
         """SELECT
@@ -54,12 +65,10 @@ def _touch_thread_summary(conn, msg: Message) -> None:
              array_agg(DISTINCT from_addr ORDER BY from_addr) AS from_addrs,
              string_agg(DISTINCT labels, '|')           AS labels_raw
            FROM messages WHERE thread_id = %s""",
-        (msg.thread_id, msg.thread_id),
+        (thread_id, thread_id),
     ).fetchone()
     if row is None or not row["message_count"]:
-        return
-    # Flatten labels_raw (pipe-joined JSON-array strings) into a de-
-    # duped list. Cheap + defensive — any malformed row is skipped.
+        return False
     labels: set[str] = set()
     for chunk in (row["labels_raw"] or "").split("|"):
         chunk = chunk.strip()
@@ -69,9 +78,6 @@ def _touch_thread_summary(conn, msg: Message) -> None:
             labels.update(json.loads(chunk))
         except Exception:
             continue
-    # `row["from_addrs"]` comes back as a Python list from the
-    # array_agg — already unique + sorted. Preserve that as the
-    # participants order to match the rebuild path.
     from_addrs = list(row["from_addrs"] or [])
     conn.execute(
         """INSERT INTO thread_summary
@@ -87,8 +93,8 @@ def _touch_thread_summary(conn, msg: Message) -> None:
              date_first = excluded.date_first,
              date_last = excluded.date_last""",
         (
-            msg.thread_id,
-            row["subject"] or msg.subject,
+            thread_id,
+            row["subject"] or fallback_subject,
             json.dumps(from_addrs),
             json.dumps(from_addrs),
             json.dumps(sorted(labels)),
@@ -97,6 +103,7 @@ def _touch_thread_summary(conn, msg: Message) -> None:
             row["date_last"],
         ),
     )
+    return True
 
 
 def get_message(conn, message_id: str) -> Message | None:

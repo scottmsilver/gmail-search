@@ -879,7 +879,119 @@ def reap(ctx, staleness_seconds, kill_timeout_sec):
         click.echo(f"  {line}")
 
 
-@main.command(help="Watchdog that keeps watch/update/summarize alive")
+@main.command(help="Reconcile thread_summary with messages (drift detector)")
+@click.option(
+    "--batch",
+    type=int,
+    default=2000,
+    help="Max threads recomputed per pass. Keeps each pass bounded so a huge " "drift event doesn't stall the daemon.",
+)
+@click.option("--loop", is_flag=True, default=False, help="Keep running. Sleeps between passes.")
+@click.option(
+    "--loop-sleep",
+    type=float,
+    default=30.0,
+    help="Seconds to sleep between passes when --loop is set (default 30).",
+)
+@common_options
+@click.pass_context
+def reconcile(ctx, batch, loop, loop_sleep):
+    """Scan `messages` for thread drift and refresh `thread_summary`.
+
+    Belt-and-suspenders for the inline `_touch_thread_summary` call in
+    `upsert_message`: if any writer ever forgets to call it (new
+    ingest path, a bulk import, a migration that bypasses the helper),
+    this daemon catches up within one sleep interval.
+
+    Watermark: `sync_state['last_reconciled_history_id']`. Each pass
+    grabs threads whose messages have `history_id > watermark` and
+    recomputes their summary rows, then advances the watermark.
+
+    Also writes a heartbeat via JobProgress so the supervisor can see
+    it's alive and respawn it if it dies.
+    """
+    import logging as _logging
+    import time as _time
+
+    from gmail_search.store.db import JobProgress, get_connection
+    from gmail_search.store.queries import get_sync_state as _get_state
+    from gmail_search.store.queries import recompute_thread_summary
+    from gmail_search.store.queries import set_sync_state as _set_state
+
+    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = _logging.getLogger("reconcile")
+
+    db_path = ctx.obj["db_path"]
+    progress = JobProgress(db_path, "reconcile", start_completed=0)
+
+    def _one_pass() -> tuple[int, int]:
+        """Returns (threads_recomputed, new_watermark_bumped_by)."""
+        conn = get_connection(db_path)
+        try:
+            watermark = int(_get_state(conn, "last_reconciled_history_id") or 0)
+            rows = conn.execute(
+                """SELECT DISTINCT thread_id
+                     FROM messages
+                    WHERE history_id > %s
+                    ORDER BY thread_id
+                    LIMIT %s""",
+                (watermark, batch),
+            ).fetchall()
+            if not rows:
+                # Also sweep threads that are in messages but missing
+                # from thread_summary — catches historical data that
+                # predated the inline touch + a zero watermark.
+                missing = conn.execute(
+                    """SELECT DISTINCT m.thread_id
+                         FROM messages m
+                         LEFT JOIN thread_summary ts USING (thread_id)
+                        WHERE ts.thread_id IS NULL
+                        LIMIT %s""",
+                    (batch,),
+                ).fetchall()
+                rows = missing
+
+            count = 0
+            for r in rows:
+                if recompute_thread_summary(conn, r["thread_id"]):
+                    count += 1
+
+            # Advance watermark to the max history_id seen so far, so
+            # next pass starts from there. We query globally (not just
+            # on the rows we touched) to avoid getting stuck if the
+            # batch happened to land on old messages.
+            max_row = conn.execute("SELECT max(history_id) AS m FROM messages").fetchone()
+            new_watermark = int(max_row["m"] or 0) if max_row else watermark
+            if new_watermark > watermark:
+                _set_state(conn, "last_reconciled_history_id", str(new_watermark))
+            conn.commit()
+            return count, new_watermark - watermark
+        finally:
+            conn.close()
+
+    pass_no = 0
+    while True:
+        pass_no += 1
+        start = _time.time()
+        try:
+            recomputed, bump = _one_pass()
+        except Exception as e:
+            log.exception(f"pass crashed: {e}")
+            progress.update("error", pass_no, 0, f"{type(e).__name__}: {str(e)[:100]}")
+            if not loop:
+                raise
+            _time.sleep(loop_sleep)
+            continue
+        elapsed = _time.time() - start
+        detail = f"pass {pass_no}: {recomputed} recomputed, watermark +{bump} in {elapsed:.2f}s"
+        progress.update("reconciling", pass_no, 0, detail)
+        log.info(detail)
+        if not loop:
+            break
+        _time.sleep(loop_sleep)
+
+
+@main.command(help="Watchdog that keeps watch/update/summarize/reconcile alive")
 @click.option("--interval", type=int, default=30, help="Seconds between heartbeat checks")
 @click.option(
     "--restart-delay",
@@ -916,7 +1028,7 @@ def supervise(ctx, interval, restart_delay):
     data_dir = ctx.obj["data_dir"]
     db_path = ctx.obj["db_path"]
 
-    # Supervisor-side view of the three daemons. "job_id" is the
+    # Supervisor-side view of the supervised daemons. "job_id" is the
     # job_progress row key (same as the CLI subcommand), "argv" is what
     # we respawn if the daemon is stale, and "log" is the file stdout
     # + stderr land in.
@@ -935,6 +1047,15 @@ def supervise(ctx, interval, restart_delay):
             "job_id": "summarize",
             "argv": ["summarize", "--concurrency", "12", "--batch-size", "1", "--loop"],
             "log": data_dir / "summarize.log",
+        },
+        {
+            "job_id": "reconcile",
+            # Drift detector: scans for threads whose `thread_summary`
+            # disagrees with `messages`, rebuilds them. Belt-and-
+            # suspenders behind the inline `_touch_thread_summary`
+            # call in upsert_message.
+            "argv": ["reconcile", "--loop"],
+            "log": data_dir / "reconcile.log",
         },
     ]
 
