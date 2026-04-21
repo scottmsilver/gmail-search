@@ -29,7 +29,74 @@ def upsert_message(conn, msg: Message) -> None:
             msg.raw_json,
         ),
     )
+    _touch_thread_summary(conn, msg)
     conn.commit()
+
+
+def _touch_thread_summary(conn, msg: Message) -> None:
+    """Incrementally refresh the thread_summary row for this message's
+    thread. Keeps /api/inbox and other thread-grouped views live —
+    without this, new mail lands in `messages` but its thread is
+    missing from `thread_summary`, so the inbox query's JOIN drops it
+    entirely and the UI looks stuck days behind.
+
+    Cheap: one SELECT aggregate + one UPSERT per inserted message. We
+    don't recompute ALL threads — just the affected one.
+    """
+    row = conn.execute(
+        """SELECT
+             count(*)                                   AS message_count,
+             min(date)                                  AS date_first,
+             max(date)                                  AS date_last,
+             min(subject) FILTER (WHERE date =
+                 (SELECT min(date) FROM messages
+                  WHERE thread_id = %s))                AS subject,
+             array_agg(DISTINCT from_addr ORDER BY from_addr) AS from_addrs,
+             string_agg(DISTINCT labels, '|')           AS labels_raw
+           FROM messages WHERE thread_id = %s""",
+        (msg.thread_id, msg.thread_id),
+    ).fetchone()
+    if row is None or not row["message_count"]:
+        return
+    # Flatten labels_raw (pipe-joined JSON-array strings) into a de-
+    # duped list. Cheap + defensive — any malformed row is skipped.
+    labels: set[str] = set()
+    for chunk in (row["labels_raw"] or "").split("|"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            labels.update(json.loads(chunk))
+        except Exception:
+            continue
+    # `row["from_addrs"]` comes back as a Python list from the
+    # array_agg — already unique + sorted. Preserve that as the
+    # participants order to match the rebuild path.
+    from_addrs = list(row["from_addrs"] or [])
+    conn.execute(
+        """INSERT INTO thread_summary
+             (thread_id, subject, participants, all_from_addrs, all_labels,
+              message_count, date_first, date_last)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT(thread_id) DO UPDATE SET
+             subject = excluded.subject,
+             participants = excluded.participants,
+             all_from_addrs = excluded.all_from_addrs,
+             all_labels = excluded.all_labels,
+             message_count = excluded.message_count,
+             date_first = excluded.date_first,
+             date_last = excluded.date_last""",
+        (
+            msg.thread_id,
+            row["subject"] or msg.subject,
+            json.dumps(from_addrs),
+            json.dumps(from_addrs),
+            json.dumps(sorted(labels)),
+            row["message_count"],
+            row["date_first"],
+            row["date_last"],
+        ),
+    )
 
 
 def get_message(conn, message_id: str) -> Message | None:

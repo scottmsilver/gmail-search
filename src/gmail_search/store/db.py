@@ -183,11 +183,22 @@ def _init_db_pg() -> None:
     `gmail_search/store/pg_schema.sql`. Uses a fresh psycopg
     connection (no wrapper) because the schema script contains
     `$$`-quoted function bodies and other raw-SQL idioms.
+
+    Serialized via a Postgres transaction-scoped advisory lock so
+    concurrent CLI starts (supervisor + daemons + server all call
+    `init_db` at boot) don't deadlock on `ALTER TABLE … ADD COLUMN
+    IF NOT EXISTS` while other sessions hold row-level locks on the
+    same tables for normal writes (heartbeats, upserts). The lock
+    key is a fixed sentinel — no risk of collision with anything
+    else in the app.
     """
     import psycopg
 
+    _INIT_DB_LOCK_KEY = 0x676D_7373_6368_6D61  # "gmsschma" (gmail-search schema)
+
     with psycopg.connect(_pg_dsn()) as raw:
         with raw.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_INIT_DB_LOCK_KEY,))
             cur.execute(_PG_SCHEMA_PATH.read_text())
         raw.commit()
 
