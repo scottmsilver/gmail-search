@@ -159,22 +159,24 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
   const hasAttachment = thread.matches.some((m) => m.attachment_filename);
   const senderForAvatar = top?.from_addr ?? thread.participants[0] ?? "?";
 
-  // Columnar layout with 4 tracks:
-  //   avatar · names · (subject + summary stacked) · date
+  // Two-row columnar layout:
+  //   Row 1:  avatar · names · subject · date
+  //   Row 2:  (avatar spans down)  ·  summary-spanning-names+subject+date
   //
-  // Subject renders bold on the first line; the v5 summary wraps
-  // beneath it in muted text. Row uses items-start so the date
-  // aligns with the top of the subject, not the bottom of a long
-  // wrapping summary.
+  // The summary gets the full width under sender+subject+date columns
+  // rather than being constrained to the subject column alone. Avatar
+  // uses `row-span-2` so it doesn't leave an empty cell in row 2.
   return (
     <button
       type="button"
       onClick={() => onOpen(thread.thread_id)}
-      className="group grid w-full grid-cols-[auto_200px_1fr_auto] items-start gap-3 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+      className="group grid w-full grid-cols-[auto_200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
     >
-      <Avatar from={senderForAvatar} />
+      <div className="row-span-2">
+        <Avatar from={senderForAvatar} />
+      </div>
 
-      {/* Names */}
+      {/* Names (row 1, col 2) */}
       <div className="min-w-0 truncate pt-0.5">
         {thread.user_replied && <ReplyIcon />}
         <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
@@ -183,19 +185,21 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
         )}
       </div>
 
-      {/* Subject + summary, stacked, with debug footer */}
-      <div className="min-w-0">
-        <div className="flex items-center gap-1 truncate font-medium text-foreground">
-          {hasAttachment && <PaperclipIcon />}
-          <span className="truncate">{thread.subject}</span>
-          {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
-          <CopyButton
-            text={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`}
-            label="Gmail link"
-          />
-        </div>
+      {/* Subject (row 1, col 3) */}
+      <div className="flex min-w-0 items-center gap-1 truncate font-medium text-foreground">
+        {hasAttachment && <PaperclipIcon />}
+        <span className="truncate">{thread.subject}</span>
+        {/* Copy Gmail link for this thread — jumps straight to Gmail web. */}
+        <CopyButton text={`https://mail.google.com/mail/u/0/#all/${thread.thread_id}`} label="Gmail link" />
+      </div>
+
+      {/* Date (row 1, col 4) */}
+      <div className="shrink-0 pt-1 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
+
+      {/* Summary + debug footer (row 2, spans names+subject+date) */}
+      <div className="col-start-2 col-span-3 min-w-0">
         {preview && (
-          <div className="mt-0.5 whitespace-normal break-words text-muted-foreground">{preview}</div>
+          <div className="whitespace-normal break-words text-muted-foreground">{preview}</div>
         )}
         {/* Debug footer — tells you where each row's data comes from
             so problematic summaries can be traced back to a specific
@@ -220,11 +224,6 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
             </span>
           )}
         </div>
-      </div>
-
-      {/* Date */}
-      <div className="shrink-0 text-xs text-muted-foreground pt-1">
-        {formatSmartDate(thread.date_last)}
       </div>
     </button>
   );
