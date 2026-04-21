@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import _pg_dsn, get_connection
 from gmail_search.store.queries import get_attachments_for_message, get_message
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────
 # Read-only SQL endpoint helpers
@@ -287,12 +290,12 @@ def create_app(
     app = FastAPI(title="Gmail Search")
 
     templates_dir = Path(__file__).parent.parent.parent / "templates"
-    # Resolve the active index through the DB pointer so a mid-reindex
-    # swap is picked up on the next /api/search without restarting the
-    # server. Fallback is the legacy fixed path.
+    # Index dir is resolved on-demand in `get_engine` / `_prewarm_engine`
+    # / `_engine_swap_watcher` so a mid-reindex pointer flip is picked
+    # up without a server restart (see below). We don't bind it at
+    # server-init time — the dir we saw at boot can be GC'd by the
+    # next reindex cycle, stranding any cached reference.
     from gmail_search.index.searcher import resolve_active_index_dir
-
-    index_dir = resolve_active_index_dir(db_path, data_dir / "scann_index")
 
     def _format_thread_result(r):
         return {
@@ -365,13 +368,108 @@ def create_app(
             reverse=True,
         )
 
+    # Engine state. Guarded by `_engine_lock` because both the startup
+    # coroutine and the background poller can try to rebuild at the
+    # same time, and the search handler reads from the same slot.
+    import threading as _threading
+
     _engine: SearchEngine | None = None
+    _engine_index_dir: Path | None = None
+    _engine_lock = _threading.Lock()
+
+    def _build_engine(path: Path) -> SearchEngine:
+        """Synchronous construction — SymSpell dict load + sharded
+        ScaNN load runs here. Called from startup (once) and from the
+        background poller (on pointer flip). The search request path
+        NEVER builds synchronously; it always reads the cached
+        instance via `get_engine()`.
+        """
+        return SearchEngine(db_path, path, config)
 
     def get_engine() -> SearchEngine:
-        nonlocal _engine
-        if _engine is None:
-            _engine = SearchEngine(db_path, index_dir, config)
-        return _engine
+        """Return the currently-warm SearchEngine.
+
+        Reads `_engine` under the lock. If the engine was somehow not
+        warmed yet (e.g. a request raced startup), falls back to a
+        synchronous build so the request still succeeds — but the
+        happy path is "already built, just return it". The background
+        poller swaps `_engine` atomically when the index pointer
+        moves.
+        """
+        nonlocal _engine, _engine_index_dir
+        with _engine_lock:
+            if _engine is not None:
+                return _engine
+        # Miss — startup hasn't finished yet. Fall back to a sync
+        # build so the request doesn't fail. This path shouldn't hit
+        # in practice once startup completes.
+        current = resolve_active_index_dir(db_path, data_dir / "scann_index")
+        built = _build_engine(current)
+        with _engine_lock:
+            if _engine is None:
+                _engine = built
+                _engine_index_dir = current
+            return _engine  # another thread may have won the race — return whoever's in the slot
+
+    async def _prewarm_engine() -> None:
+        """Startup hook: build the initial engine in a worker thread so
+        uvicorn's event loop doesn't block, and log how long it took
+        so the operator can tell if SymSpell / ScaNN is pathological.
+        """
+        import asyncio as _asyncio
+        import time as _time
+
+        nonlocal _engine, _engine_index_dir
+        start = _time.time()
+        current = resolve_active_index_dir(db_path, data_dir / "scann_index")
+        built = await _asyncio.to_thread(_build_engine, current)
+        with _engine_lock:
+            _engine = built
+            _engine_index_dir = current
+        logger.info(f"engine prewarmed in {_time.time() - start:.1f}s (index={current.name})")
+
+    async def _engine_swap_watcher() -> None:
+        """Background task: poll the DB pointer every 10s. When it
+        moves (a reindex landed), build the replacement engine off
+        the event loop, then atomically swap. The old engine keeps
+        serving until the new one is ready, so the swap is invisible
+        to the user — no 10-30s SymSpell stall on the first post-
+        reindex search.
+        """
+        import asyncio as _asyncio
+        import time as _time
+
+        nonlocal _engine, _engine_index_dir
+        while True:
+            try:
+                await _asyncio.sleep(10)
+                current = resolve_active_index_dir(db_path, data_dir / "scann_index")
+                with _engine_lock:
+                    stale = _engine_index_dir is not None and current != _engine_index_dir
+                if not stale:
+                    continue
+                start = _time.time()
+                built = await _asyncio.to_thread(_build_engine, current)
+                with _engine_lock:
+                    _engine = built
+                    _engine_index_dir = current
+                logger.info(f"engine hot-swapped in {_time.time() - start:.1f}s (index={current.name})")
+            except _asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Don't let the watcher die — worst case we fall back
+                # to the lazy rebuild in get_engine() next search.
+                logger.warning(f"engine swap watcher error: {e}")
+
+    @app.on_event("startup")
+    async def _on_startup() -> None:  # noqa: RUF029
+        import asyncio as _asyncio
+
+        # Block startup on the initial build so the first incoming
+        # request hits a warm engine, not a cold one.
+        await _prewarm_engine()
+        # Then fire off the poller as a background task.
+        _asyncio.create_task(_engine_swap_watcher())
 
     @app.get("/", response_class=HTMLResponse)
     async def home():
