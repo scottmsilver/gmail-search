@@ -695,6 +695,13 @@ def create_app(
                     "to_addr": msg.to_addr,
                     "subject": msg.subject,
                     "body_text": msg.body_text,
+                    # Full HTML body is included so the thread drawer can
+                    # render HTML-only emails (marketing / receipts / many
+                    # transactional messages have empty body_text but
+                    # well-formed body_html). The client renders this
+                    # inside a sandboxed iframe — the UI layer owns the
+                    # isolation, the API just hands over the bytes.
+                    "body_html": msg.body_html,
                     "date": msg.date.isoformat(),
                     "labels": msg.labels,
                     "attachments": [

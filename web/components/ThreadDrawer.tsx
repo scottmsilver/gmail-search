@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { EmailBody } from "@/components/EmailBody";
 import { fetchThread } from "@/lib/threadCache";
 import type { ThreadDetail, ThreadMessage } from "@/lib/backend";
 
@@ -83,7 +84,9 @@ const MessageCard = ({ msg, pythonBaseUrl }: { msg: ThreadMessage; pythonBaseUrl
       {msg.to_addr && (
         <div className="text-xs text-neutral-500 truncate">to {msg.to_addr}</div>
       )}
-      <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-neutral-800 leading-relaxed">{msg.body_text}</pre>
+      <div className="mt-2">
+        <EmailBody textBody={msg.body_text} htmlBody={msg.body_html} />
+      </div>
       <AttachmentPills attachments={msg.attachments} pythonBaseUrl={pythonBaseUrl} />
     </div>
   </div>
