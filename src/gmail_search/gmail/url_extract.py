@@ -14,7 +14,34 @@ own pipelines so we don't double-stub them.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from urllib.parse import urlparse
+
+# Curated email-tracker host list sourced from disconnectme/disconnect-
+# tracking-protection `services.json` (Email category only — the
+# EmailAggressive category was too broad, e.g. flagged `adobe.com`
+# whole). Loaded lazily and cached at module-import.
+#
+# Regenerate with `scripts/refresh_disconnect.py`. The list is ~213
+# hosts and is bundled into the repo so the crawler works offline.
+_DISCONNECT_HOSTS_FILE = Path(__file__).parent / "disconnect_email_hosts.txt"
+
+
+def _load_disconnect_hosts() -> frozenset[str]:
+    try:
+        text = _DISCONNECT_HOSTS_FILE.read_text()
+    except OSError:
+        return frozenset()
+    hosts = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        hosts.add(line.lower())
+    return frozenset(hosts)
+
+
+_DISCONNECT_HOSTS = _load_disconnect_hosts()
 
 # Strict-enough URL regex. Stops at whitespace, quotes, angle-brackets.
 # Parens + square-brackets are allowed *inside* the URL (Wikipedia and
@@ -47,13 +74,35 @@ _DENY_HOSTS_EXACT = {
 }
 
 # Prefix matches on the host. Used for click-tracker subdomain
-# patterns that don't anchor to a TLD — e.g. "click.mail.*" matches
-# click.mail.vendor.com.
+# patterns that don't anchor to a TLD — e.g. "click.*" matches
+# click.t.delta.com, click.adlmail.org, click.email.americastestkitchen.com.
+#
+# Aggressive on purpose: a full-corpus catch-up scan found that
+# ~75% of the naive URL matches were click trackers / marketing
+# dispatchers that redirect to the real destination. Crawling them
+# wastes a browser render per hit and produces no content — the
+# landing page is just "redirecting…" or a cookie-consent shell.
+#
+# If a real site happens to sit on a `click.*` / `tracker.*`
+# subdomain it'll get caught too; that's an acceptable false-
+# positive for this class of link.
 _DENY_HOST_PREFIXES = (
-    "click.mail.",
-    "link.email.",
-    "click.e.",
-    "trk.klclick",
+    "click.",
+    "clicks.",
+    "ct.",
+    "e.",
+    "em.",
+    "enews.",
+    "link.",
+    "links.",
+    "news.email.",
+    "notifications.",
+    "r.",
+    "t.",
+    "tracker.",
+    "tracking.",
+    "trk.",
+    "view.",
 )
 
 # Domain suffix matches. An entry X matches a host Y if Y == X or Y
@@ -65,6 +114,16 @@ _DENY_DOMAIN_SUFFIXES = (
     "hubspotlinks.com",
     "constantcontact.com",
     "email.salesforce.com",
+    # Bulk-email redirects / marketing dispatchers that the prefix
+    # rules don't catch.
+    "rs6.net",  # Constant Contact redirector (r20.rs6.net, etc.)
+    "e2ma.net",  # Emma email service
+    "adlmail.org",
+    "mkt.com",
+    "sendgrid.net",
+    "mailgun.net",
+    "sparkpostmail.com",
+    "salesforce-experience.com",
     # Drive is handled by gmail/drive.py — don't double-stub.
     "docs.google.com",
     "drive.google.com",
@@ -154,9 +213,16 @@ def _host_is_denied(host: str) -> bool:
     host = host.lower()
     if host in _DENY_HOSTS_EXACT:
         return True
+    if host in _DISCONNECT_HOSTS:
+        return True
     if any(host.startswith(p) for p in _DENY_HOST_PREFIXES):
         return True
-    return any(host == s or host.endswith("." + s) for s in _DENY_DOMAIN_SUFFIXES)
+    if any(host == s or host.endswith("." + s) for s in _DENY_DOMAIN_SUFFIXES):
+        return True
+    # Check domain-suffix match against the Disconnect list too (so
+    # `open.mkt1248.com` gets caught even though only `mkt1248.com`
+    # is in the list, when the list entry is a bare registrable).
+    return any(host.endswith("." + d) for d in _DISCONNECT_HOSTS)
 
 
 def _path_is_denied(path_and_query: str) -> bool:

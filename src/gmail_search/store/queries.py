@@ -286,9 +286,11 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     """Return URL stubs that haven't been fetched yet, oldest message
     first. Each dict carries `{id, message_id, url}`.
 
-    The URL is parsed out of the filename via `url_from_stub_filename`
-    — same round-trip trick Drive uses. Rows where the filename is
-    malformed (shouldn't happen, but) are silently skipped.
+    Rows whose URL is now on the denylist (the list can tighten over
+    time — see `gmail/url_extract.py::_is_denied`) are deleted here so
+    the crawler never wastes a Chromium render on them. This is a
+    self-healing purge: any time the crawler runs, the next batch
+    sweeps newly-denied pending rows off the table.
     """
     # Scope to our stub shape so real HTML email attachments
     # (`message.html`, `ATT00001.htm` etc — also mime='text/html')
@@ -297,6 +299,13 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     #
     # LIKE pattern bound as a param because psycopg treats bare `%`
     # in the SQL text as a placeholder marker.
+    #
+    # Overfetch by 5× so that even when most of the batch is denied
+    # we still return `limit` real URLs. Cheap: the filter runs in
+    # Python, and denied rows get deleted in the same pass.
+    from gmail_search.gmail.url_extract import _is_denied
+
+    overfetch = max(limit * 5, 500)
     rows = conn.execute(
         """SELECT id, message_id, filename
              FROM attachments
@@ -305,14 +314,31 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
               AND filename LIKE %s
             ORDER BY id ASC
             LIMIT %s""",
-        ("URL: %", limit),
+        ("URL: %", overfetch),
     ).fetchall()
+
     out: list[dict] = []
+    deny_ids: list[int] = []
     for r in rows:
         url = url_from_stub_filename(r["filename"])
         if not url:
+            deny_ids.append(int(r["id"]))
+            continue
+        if _is_denied(url):
+            deny_ids.append(int(r["id"]))
             continue
         out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url})
+        if len(out) >= limit:
+            break
+
+    if deny_ids:
+        B = 1000
+        for i in range(0, len(deny_ids), B):
+            batch = deny_ids[i : i + B]
+            placeholders = ",".join(["%s"] * len(batch))
+            conn.execute(f"DELETE FROM attachments WHERE id IN ({placeholders})", batch)
+        conn.commit()
+
     return out
 
 
