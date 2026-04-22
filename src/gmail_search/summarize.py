@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # need a migration, and the column is only consumed by two places
 # (backfill dedup + search-time lookup), both of which route through
 # this constant.
-PROMPT_VERSION = "v5"
+PROMPT_VERSION = "v6"
 DEFAULT_MODEL = f"{get_backend().model_id}+{PROMPT_VERSION}"
 
 # Budget math against vLLM's 8192-token context window (see
@@ -96,10 +96,40 @@ Do NOT begin with "This email...", "The email...", "It looks like...",
 
 Do NOT wrap the output in quotes or prefix it with "Summary:", "TLDR:".
 
+FORWARDED / SHARED LINKS: If the sender wrote little or nothing and the
+email is mainly a link/attachment, say they SHARED it, not that they
+announce/recommend it. If the linked content was captured (you'll see it
+in the body or as an attachment), SUMMARIZE THE CONTENT itself — what
+the article says, the recipe's key steps, the argument's thesis — not
+just the title. Attribute the share to the sender at the start or end.
+If the sender included a short personal note, include it verbatim in
+quotes. If the linked content wasn't captured, say so plainly.
+
+LINK URLS: If a `Links:` block is present in the user prompt, render
+the most relevant URL as a Markdown link: `[short label](url)`. Always
+close with `)` — never `]`. The label MUST be human-readable text
+(article title, recipe name, call to action, product name) and must
+be 2-6 words — NEVER put the URL itself inside the `[...]` brackets;
+the URL belongs ONLY in the `(...)` parens. Put the link at the end
+of the summary. Do not invent URLs; only copy from the `Links:` block.
+
+PRESERVE CALL-TO-ACTION links always — "Pay now", "Confirm",
+"Track package", "View statement", "RSVP", "Reset password",
+"Download receipt", "Verify your email", "Complete your order",
+"Review booking", "View invoice", "Open ticket". These are the links
+the reader most needs to click later. For transactional mail these
+links are more valuable than article links.
+
+Only skip the `Links:` block entirely when every URL is clearly
+noise (browser-preview of a newsletter, social-share buttons, signup
+referrals) OR the email is a bare security code with no actionable
+link.
+
 Examples:
 - "Rebecca Miller asks Rick Chen to confirm whether the kitchen's wood wall can move 12 inches right, noting the change shifts cabinet placement. She needs an answer by Friday so the contractor can finalize the order."
 - "OpenAI billing charged $5.78 to card ending 9535 for API credit (order #ch_3N8X, April 18). No action required."
-- "Stratechery (Ben Thompson) reports ESPN, Fox, and Warner Bros. Discovery are forming a joint sports-streaming service, each with one-third ownership, encompassing ~55% of U.S. sports rights and launching in the fall. Asks no action."
+- "Stratechery (Ben Thompson) reports ESPN, Fox, and Warner Bros. Discovery are forming a joint sports-streaming service, each with one-third ownership, encompassing ~55% of U.S. sports rights and launching in the fall. Asks no action. [The real bundle](https://stratechery.com/2026/sports-bundle/)"
+- "Alex Chen shared a link titled 'Why rent control backfires' with the note \\"worth a read\\" — linked content was not captured. [Why rent control backfires](https://example.com/rent-control)"
 """
 
 
@@ -240,14 +270,72 @@ def _format_attachments(attachments: list[dict], budget_chars: int) -> str:
     return "".join(parts)
 
 
+# URL patterns we always want to drop before picking a "primary" link.
+# Goal: a link the reader could click and get the thing the email is
+# really about. Tracking, unsubscribe, and inline images are noise.
+_LINK_NOISE_HINTS = (
+    "unsubscribe",
+    "preferences",
+    "list-manage.com",
+    "sparkpost",
+    "sendgrid.net",
+    "mail.beehiiv",
+    "click.",
+    "track.",
+    "/unsub",
+    "optout",
+    "/px/",
+    "pixel.",
+    "view-in-browser",
+    "viewonline",
+)
+
+_LINK_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico", ".bmp")
+
+
+def _is_noisy_link(url: str) -> bool:
+    low = url.lower()
+    if any(low.endswith(ext) for ext in _LINK_IMAGE_EXTS):
+        return True
+    if any(hint in low for hint in _LINK_NOISE_HINTS):
+        return True
+    return False
+
+
+def _extract_primary_links(body_text: str, limit: int = 2) -> list[str]:
+    """Return up to `limit` distinct URLs from the raw body, in the
+    order they appeared, skipping obvious noise (unsubscribe /
+    tracking / preview images). Run BEFORE `_clean_body`, which
+    replaces every URL with "[link]".
+    """
+    if not body_text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for match in _URL.finditer(body_text):
+        url = match.group(0).rstrip(".,);:>'\"")
+        if url in seen:
+            continue
+        if _is_noisy_link(url):
+            continue
+        seen.add(url)
+        out.append(url)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _build_user_prompt(
     from_addr: str,
     subject: str,
     body_text: str,
     attachments: list[dict] | None = None,
 ) -> str:
+    links = _extract_primary_links(body_text or "")
     body = _truncate_body(_clean_body(body_text or ""))
     prompt = f"From: {from_addr}\nSubject: {subject}\n\n{body}"
+    if links:
+        prompt += "\n\nLinks:\n" + "\n".join(links)
 
     # Pack as much attachment text as fits under the hard cap. Bodies
     # that hog the budget leave no room; short bodies (typical for
@@ -494,13 +582,29 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     # and a 1-line summary of those is better than the UI showing "(no
     # summary yet)" forever. The backend prompt handles short inputs
     # gracefully.
+    # Prioritize messages the user actually looks at: INBOX first, then
+    # STARRED / IMPORTANT, then by recency. This matters a lot when
+    # PROMPT_VERSION has just been bumped and the daemon is working
+    # through ~173k existing rows — without this clause, the user's
+    # inbox keeps showing old-prompt summaries for hours.
+    # `labels` is a JSON-encoded array; LIKE is faster than parsing per
+    # row and the false-positive rate is effectively zero (no legitimate
+    # label contains another as a substring).
     sql = """
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.body_html, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
         WHERE s.message_id IS NULL
-        ORDER BY m.date DESC
+        ORDER BY
+          -- Frontfill wins over backfill: anything received in the
+          -- last 24h (i.e. what `watch` / `sync_new_messages` just
+          -- pulled) goes to the top of the queue, ahead of the
+          -- 173k-message v6 re-backfill that's still grinding.
+          (m.date::timestamptz > NOW() - INTERVAL '1 day') DESC,
+          (m.labels LIKE '%%"INBOX"%%') DESC,
+          (m.labels LIKE '%%"STARRED"%%' OR m.labels LIKE '%%"IMPORTANT"%%') DESC,
+          m.date DESC
     """
     params: list = [model]
     if limit:
@@ -537,6 +641,29 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     return out
 
 
+# Common LLM markdown-link mistakes that would otherwise render as a
+# 900-char literal URL in the UI:
+#   "[label](url]"   — wrong closing bracket
+#   "[label](url"    — truncated before the close paren
+# The second is trickier: we can't just append `)` because the URL
+# itself may have been cut mid-token. Safer to drop the malformed
+# link so it renders as plain sentence.
+_MD_LINK_WRONG_CLOSE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s\]]*)\]")
+_MD_LINK_TRUNCATED_TAIL = re.compile(r"\[([^\]]+)\]\((https?://[^)\s\]]*)\s*$")
+
+
+def _repair_broken_markdown_links(text: str) -> str:
+    """Fix the two malformed markdown-link patterns the Gemma summarizer
+    emits occasionally. Called before the summary is stored so every
+    consumer (UI, search, chat citations) sees clean markdown.
+    """
+    if not text:
+        return text
+    fixed = _MD_LINK_WRONG_CLOSE.sub(r"[\1](\2)", text)
+    fixed = _MD_LINK_TRUNCATED_TAIL.sub(r"[\1](\2)", fixed)
+    return fixed
+
+
 def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
     conn.execute(
         """INSERT INTO message_summaries (message_id, summary, model)
@@ -547,6 +674,35 @@ def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
              created_at = CURRENT_TIMESTAMP""",
         (message_id, summary, model),
     )
+
+
+def _record_summary_failure(conn, message_id: str, model: str, error: str) -> None:
+    """Persist a summarization failure so it can be triaged later.
+
+    Called from the summarizer's per-email and batch fallback paths
+    whenever a message ends the cycle without a usable summary. The
+    row is deleted in `_clear_summary_failure` on the next successful
+    attempt, so the table is always "currently broken" — not an
+    append-only log.
+    """
+    # Cap `error` to keep pathological backend tracebacks from
+    # bloating the table; a 400-char head is enough to distinguish
+    # known failure modes (context overflow, parse failures, backend
+    # 5xx) from new ones.
+    conn.execute(
+        """INSERT INTO summary_failures (message_id, model, error, attempts)
+           VALUES (%s, %s, %s, 1)
+           ON CONFLICT (message_id) DO UPDATE SET
+             model = EXCLUDED.model,
+             error = EXCLUDED.error,
+             attempts = summary_failures.attempts + 1,
+             last_seen = NOW()""",
+        (message_id, model, (error or "unknown")[:400]),
+    )
+
+
+def _clear_summary_failure(conn, message_id: str) -> None:
+    conn.execute("DELETE FROM summary_failures WHERE message_id = %s", (message_id,))
 
 
 def backfill(
@@ -599,16 +755,25 @@ def backfill(
     failed = 0
     start = time.time()
 
-    def _persist(summaries_by_id: dict[str, str], batch_messages: list[dict]) -> None:
+    def _persist(
+        summaries_by_id: dict[str, str],
+        batch_messages: list[dict],
+        errors_by_id: dict[str, str] | None = None,
+    ) -> None:
         nonlocal done, auto_classified, failed
+        errs = errors_by_id or {}
         for m in batch_messages:
             summary = summaries_by_id.get(m["id"])
             if summary:
+                summary = _repair_broken_markdown_links(summary)
                 _store_summary(conn, m["id"], summary, model)
+                _clear_summary_failure(conn, m["id"])
                 done += 1
                 if _auto_mail_summary(m["labels"], m["from_addr"]) is not None:
                     auto_classified += 1
             else:
+                err = errs.get(m["id"]) or "missing_from_output"
+                _record_summary_failure(conn, m["id"], model, err)
                 failed += 1
         conn.commit()
         processed = done + failed
@@ -673,10 +838,16 @@ def _run_per_email(client, pending, concurrency, backend, persist, progress, sta
             m = futures[fut]
             try:
                 summary = fut.result()
-                persist({m["id"]: summary} if summary else {}, [m])
+                if summary:
+                    persist({m["id"]: summary}, [m])
+                else:
+                    # The backend returned nothing (or something the
+                    # post-processor rejected). Record it so we can
+                    # distinguish "never tried" from "tried, empty".
+                    persist({}, [m], {m["id"]: "empty_output"})
             except Exception as e:
                 logger.warning(f"summarize failed for {m['id']}: {e!s}")
-                persist({}, [m])
+                persist({}, [m], {m["id"]: f"{type(e).__name__}: {e!s}"})
             processed += 1
             if progress and time.time() - last_log > 3:
                 _log_progress(processed, total, start)
@@ -711,12 +882,15 @@ def _run_batched(client, pending, concurrency, batch_size, backend, persist, pro
         futures = {pool.submit(summarize_batch, client, batch, backend): i for i, batch in enumerate(batches)}
         for fut in as_completed(futures):
             i = futures[fut]
+            errors: dict[str, str] = {}
             try:
                 summaries = fut.result()
             except Exception as e:
                 logger.warning(f"batch failed: {e!s}")
                 summaries = {}
-            persist(summaries, originals[i])
+                err = f"batch {type(e).__name__}: {e!s}"
+                errors = {m["id"]: err for m in originals[i]}
+            persist(summaries, originals[i], errors)
             processed += len(originals[i])
             if progress and time.time() - last_log > 3:
                 _log_progress(processed, total, start)

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { CitableMarkdown } from "@/components/CitableMarkdown";
 import { MiddleTruncate } from "@/components/MiddleTruncate";
 import type { SearchThread } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
@@ -281,11 +282,23 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
   // plus a row 2 below that holds the summary + (optional) debug
   // footer, spanning all three columns. The avatar-initials circle
   // was removed — it added colour but no information.
+  // We can't use <button> as the outer because summaries now render
+  // markdown, which embeds <a> elements — nesting an <a> inside a
+  // <button> is invalid HTML (and some browsers swallow the click).
+  // So we use role=button + keyboard handling instead.
+  const handleActivate = () => onOpen(thread.thread_id);
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(thread.thread_id)}
-      className="group grid w-full grid-cols-[200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50"
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={handleActivate}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleActivate();
+        }
+      }}
+      className="group grid w-full cursor-pointer grid-cols-[200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {/* Names (row 1, col 1) */}
       <div className="min-w-0 truncate pt-0.5">
@@ -319,7 +332,13 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
           the avatar column is gone). */}
       <div className="col-start-1 col-span-3 min-w-0">
         {preview && (
-          <div className="whitespace-normal break-words text-muted-foreground">{preview}</div>
+          <div className="whitespace-normal break-words text-muted-foreground">
+            {previewSource === "summary" ? (
+              <CitableMarkdown text={preview} hints={[]} variant="inline" />
+            ) : (
+              preview
+            )}
+          </div>
         )}
         {/* Debug footer — only rendered when the user flips on the
             "Show search debug" toggle in Settings. Lives in
@@ -347,6 +366,6 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
           </div>
         )}
       </div>
-    </button>
+    </div>
   );
 };

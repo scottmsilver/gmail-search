@@ -79,6 +79,16 @@ TABLE_DOCS: dict[str, str] = {
         "- model (TEXT): which model produced it (e.g. 'qwen2.5:7b').\n"
         "- created_at (TEXT)."
     ),
+    "summary_failures": (
+        "Messages where the summarizer currently fails. Row written on each failure,\n"
+        "deleted on the next successful attempt — so this is a live 'what's broken now' list,\n"
+        "not an append-only log. Use to triage backend outages, prompt bugs, or pathological inputs.\n"
+        "- message_id (TEXT PK FK).\n"
+        "- model (TEXT): model key at time of last failure.\n"
+        "- error (TEXT): short error message (first 400 chars).\n"
+        "- attempts (INT): cumulative failure count.\n"
+        "- first_seen / last_seen (TIMESTAMPTZ)."
+    ),
     "model_battles": (
         "User vote results from A/B model comparisons in chat.\n"
         "- id (INT PK), question (TEXT), variant_a/variant_b (TEXT JSON: model + thinking level).\n"
@@ -196,11 +206,28 @@ def _init_db_pg() -> None:
 
     _INIT_DB_LOCK_KEY = 0x676D_7373_6368_6D61  # "gmsschma" (gmail-search schema)
 
+    # The advisory lock serializes concurrent `init_db` calls (supervisor
+    # + daemons + server all hit this at boot) — but once inside, the
+    # schema DDL takes ACCESS EXCLUSIVE on tables that are constantly
+    # being written by the running daemons (heartbeats, upserts, etc).
+    # Without a lock_timeout, the DDL parks forever and a concurrent
+    # write → deadlock. Prefer "schema init aborted, try again" over
+    # "daemon crashes on start-up". The schema is idempotent, so a
+    # transient skip is safe.
     with psycopg.connect(_pg_dsn()) as raw:
         with raw.cursor() as cur:
+            cur.execute("SET lock_timeout = '3s'")
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (_INIT_DB_LOCK_KEY,))
-            cur.execute(_PG_SCHEMA_PATH.read_text())
-        raw.commit()
+            try:
+                cur.execute(_PG_SCHEMA_PATH.read_text())
+                raw.commit()
+            except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected):
+                raw.rollback()
+                # Schema is idempotent — if we can't grab the locks now,
+                # the schema is presumably already up to date (or another
+                # caller will finish it). Skip silently so the daemon
+                # comes up instead of crash-looping on start.
+                return
 
 
 def rebuild_thread_summary(db_path: Path) -> int:

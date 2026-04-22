@@ -135,6 +135,24 @@ CREATE TABLE IF NOT EXISTS message_summaries (
     created_at TEXT NOT NULL DEFAULT NOW()
 );
 
+-- Durable record of summarization failures so they can be triaged
+-- (backend down, context overflow, parse errors, empty model output).
+-- A row is written on each failure and deleted when the message
+-- eventually gets a successful summary. The running daemon logs a
+-- warning regardless; this table lets us answer "what's still
+-- broken?" without scraping logs.
+CREATE TABLE IF NOT EXISTS summary_failures (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    error TEXT NOT NULL,
+    attempts INT NOT NULL DEFAULT 1,
+    first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_summary_failures_last_seen
+    ON summary_failures (last_seen DESC);
+
 -- ─────────────────────────────────────────────────────────────────────
 -- Conversations + chat history
 -- ─────────────────────────────────────────────────────────────────────
