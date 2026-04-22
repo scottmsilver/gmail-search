@@ -1019,7 +1019,7 @@ def supervise(ctx, interval, restart_delay):
     import time as _time
     from datetime import datetime, timezone
 
-    from gmail_search.jobs import gmail_search_command, spawn_detached
+    from gmail_search.jobs import gmail_search_command, is_daemon_running, spawn_detached
     from gmail_search.store.db import JobProgress
 
     _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1124,6 +1124,17 @@ def supervise(ctx, interval, restart_delay):
                 continue
             if not _should_respawn(job_id):
                 _log.debug(f"{job_id} stale but in restart-delay window — skipping")
+                continue
+            # Stale heartbeat + OS process still alive = daemon blocked
+            # (long HTTP call, flaky backend). Don't spawn a duplicate.
+            # Before this guard, we'd pile up 10+ summarize daemons all
+            # fighting for vLLM and reducing throughput to a crawl.
+            if is_daemon_running(job_id):
+                _log.warning(
+                    f"{job_id} heartbeat stale but process still alive — "
+                    "skipping respawn (probably blocked on backend)"
+                )
+                alive += 1
                 continue
             prev_detail = (row.get("detail") if row else "") or "(no prior row)"
             age = _row_age_seconds(row)
