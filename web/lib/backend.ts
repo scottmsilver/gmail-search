@@ -122,6 +122,34 @@ export const getInboxBackend = async (args: {
   return data.results ?? [];
 };
 
+// Gmail-style Priority Inbox — three sections, each the same row shape
+// as `getInboxBackend` so the UI can reuse `ResultRow` unchanged.
+export type PriorityInboxSectionKey = "important_unread" | "starred" | "everything_else";
+
+export type PriorityInboxSection = {
+  title: string;
+  key: PriorityInboxSectionKey;
+  threads: QueryThread[];
+};
+
+export type PriorityInboxResponse = {
+  sections: PriorityInboxSection[];
+};
+
+export const getPriorityInboxBackend = async (args: {
+  limit?: number;
+  offset?: number;
+}): Promise<PriorityInboxResponse> => {
+  const url = new URL(`${pythonApiUrl()}/api/priority-inbox`);
+  if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
+  if (args.offset !== undefined) url.searchParams.set("offset", String(args.offset));
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    throw new Error(`priority-inbox backend failed: ${res.status}`);
+  }
+  return (await res.json()) as PriorityInboxResponse;
+};
+
 export type AttachmentMeta = {
   id: number;
   filename: string;

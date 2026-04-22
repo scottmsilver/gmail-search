@@ -267,6 +267,96 @@ def _run_structured_query(
         conn.close()
 
 
+def _inbox_rows(
+    conn,
+    predicate_sql: str,
+    predicate_params: tuple,
+    limit: int,
+    offset: int,
+) -> list[dict]:
+    """Return inbox-shaped thread rows whose messages match `predicate_sql`.
+
+    `predicate_sql` is spliced into a parameterised `EXISTS` subquery — it
+    must be a trusted, statically-defined fragment (never user input);
+    every value inside it must be a `%s` placeholder bound via
+    `predicate_params`. The built query is the same one that used to live
+    inside `api_inbox`: take the newest `limit` thread_summary rows where
+    the predicate matches, then join the latest message + its summary.
+    """
+    import json as _json
+
+    sql = f"""
+        WITH priority_threads AS (
+            SELECT ts.thread_id,
+                   ts.subject,
+                   ts.participants,
+                   ts.message_count,
+                   ts.date_first,
+                   ts.date_last
+            FROM thread_summary ts
+            WHERE EXISTS (
+                SELECT 1 FROM messages m
+                WHERE m.thread_id = ts.thread_id
+                  AND ({predicate_sql})
+            )
+            ORDER BY ts.date_last DESC
+            LIMIT %s OFFSET %s
+        ),
+        latest_msg AS (
+            SELECT DISTINCT ON (m.thread_id)
+                   m.thread_id,
+                   m.id AS latest_message_id,
+                   m.from_addr AS latest_from_addr,
+                   m.body_text AS latest_body
+            FROM messages m
+            WHERE m.thread_id IN (SELECT thread_id FROM priority_threads)
+            ORDER BY m.thread_id, m.date DESC
+        )
+        SELECT pt.thread_id,
+               pt.subject,
+               pt.participants,
+               pt.message_count,
+               pt.date_first,
+               pt.date_last,
+               lm.latest_message_id,
+               lm.latest_from_addr,
+               lm.latest_body,
+               ms.summary,
+               ms.model       AS summary_model,
+               ms.created_at  AS summary_created_at
+        FROM priority_threads pt
+        JOIN latest_msg lm USING (thread_id)
+        LEFT JOIN message_summaries ms
+               ON ms.message_id = lm.latest_message_id
+        ORDER BY pt.date_last DESC
+    """
+    rows = conn.execute(sql, (*predicate_params, limit, offset)).fetchall()
+
+    results: list[dict] = []
+    for r in rows:
+        row: dict = {
+            "thread_id": r["thread_id"],
+            "subject": r["subject"],
+            "participants": _json.loads(r["participants"]),
+            "message_count": r["message_count"],
+            "date_first": r["date_first"],
+            "date_last": r["date_last"],
+            "snippet": (r["latest_body"] or "")[:500],
+            "latest_message_id": r["latest_message_id"],
+            "latest_from_addr": r["latest_from_addr"],
+        }
+        if r["summary"]:
+            row["summary"] = r["summary"]
+            row["summary_model"] = r["summary_model"]
+            row["summary_created_at"] = (
+                r["summary_created_at"].isoformat()
+                if hasattr(r["summary_created_at"], "isoformat")
+                else r["summary_created_at"]
+            )
+        results.append(row)
+    return results
+
+
 def create_app(
     db_path: Path,
     data_dir: Path,
@@ -586,8 +676,6 @@ def create_app(
         the category-tab split — Promotions / Updates / Social stay
         in the list.)
         """
-        import json as _json
-
         conn = get_connection(db_path)
         try:
             # Thread is "in the inbox" if ANY message on it still has
@@ -595,78 +683,92 @@ def create_app(
             # archiving removes INBOX from one message but leaves it
             # on earlier ones; matching on messages (not
             # thread_summary.all_labels) catches that drift.
-            rows = conn.execute(
-                """
-                WITH priority_threads AS (
-                    SELECT ts.thread_id,
-                           ts.subject,
-                           ts.participants,
-                           ts.message_count,
-                           ts.date_first,
-                           ts.date_last
-                    FROM thread_summary ts
-                    WHERE EXISTS (
-                        SELECT 1 FROM messages m
-                        WHERE m.thread_id = ts.thread_id
-                          AND m.labels LIKE %s
-                    )
-                    ORDER BY ts.date_last DESC
-                    LIMIT %s OFFSET %s
-                ),
-                latest_msg AS (
-                    SELECT DISTINCT ON (m.thread_id)
-                           m.thread_id,
-                           m.id AS latest_message_id,
-                           m.from_addr AS latest_from_addr,
-                           m.body_text AS latest_body
-                    FROM messages m
-                    WHERE m.thread_id IN (SELECT thread_id FROM priority_threads)
-                    ORDER BY m.thread_id, m.date DESC
-                )
-                SELECT pt.thread_id,
-                       pt.subject,
-                       pt.participants,
-                       pt.message_count,
-                       pt.date_first,
-                       pt.date_last,
-                       lm.latest_message_id,
-                       lm.latest_from_addr,
-                       lm.latest_body,
-                       ms.summary,
-                       ms.model       AS summary_model,
-                       ms.created_at  AS summary_created_at
-                FROM priority_threads pt
-                JOIN latest_msg lm USING (thread_id)
-                LEFT JOIN message_summaries ms
-                       ON ms.message_id = lm.latest_message_id
-                ORDER BY pt.date_last DESC
-                """,
-                ('%"INBOX"%', limit, offset),
-            ).fetchall()
-
-            results = []
-            for r in rows:
-                row: dict = {
-                    "thread_id": r["thread_id"],
-                    "subject": r["subject"],
-                    "participants": _json.loads(r["participants"]),
-                    "message_count": r["message_count"],
-                    "date_first": r["date_first"],
-                    "date_last": r["date_last"],
-                    "snippet": (r["latest_body"] or "")[:500],
-                    "latest_message_id": r["latest_message_id"],
-                    "latest_from_addr": r["latest_from_addr"],
-                }
-                if r["summary"]:
-                    row["summary"] = r["summary"]
-                    row["summary_model"] = r["summary_model"]
-                    row["summary_created_at"] = (
-                        r["summary_created_at"].isoformat()
-                        if hasattr(r["summary_created_at"], "isoformat")
-                        else r["summary_created_at"]
-                    )
-                results.append(row)
+            results = _inbox_rows(
+                conn,
+                "m.labels LIKE %s",
+                ('%"INBOX"%',),
+                limit,
+                offset,
+            )
             return {"results": results}
+        finally:
+            conn.close()
+
+    @app.get("/api/priority-inbox")
+    async def api_priority_inbox(
+        limit: int = Query(25, le=100),
+        offset: int = Query(0, ge=0),
+    ):
+        """Gmail-style Priority Inbox — three sections:
+
+          1. Important and unread — IMPORTANT + UNREAD + INBOX
+          2. Starred             — STARRED (regardless of INBOX / read)
+          3. Everything else     — INBOX, minus anything already in
+                                    sections 1 or 2
+
+        Each section is independently paginated (same limit/offset per
+        section) and sorted newest-first by `thread_summary.date_last`.
+        Rows use the exact same shape as `/api/inbox` — the frontend
+        can feed them through the same adapter.
+        """
+        conn = get_connection(db_path)
+        try:
+            important_unread = _inbox_rows(
+                conn,
+                "m.labels LIKE %s AND m.labels LIKE %s AND m.labels LIKE %s",
+                ('%"IMPORTANT"%', '%"UNREAD"%', '%"INBOX"%'),
+                limit,
+                offset,
+            )
+            starred = _inbox_rows(
+                conn,
+                "m.labels LIKE %s",
+                ('%"STARRED"%',),
+                limit,
+                offset,
+            )
+            # "Everything else" = INBOX threads NOT already in sections
+            # 1 or 2. We exclude by thread_id (not message_id) because a
+            # section's thread should appear exactly once on the page.
+            everything_else = _inbox_rows(
+                conn,
+                (
+                    "m.labels LIKE %s"
+                    " AND m.thread_id NOT IN ("
+                    "   SELECT m2.thread_id FROM messages m2"
+                    "   WHERE (m2.labels LIKE %s AND m2.labels LIKE %s AND m2.labels LIKE %s)"
+                    "      OR (m2.labels LIKE %s)"
+                    " )"
+                ),
+                (
+                    '%"INBOX"%',
+                    '%"IMPORTANT"%',
+                    '%"UNREAD"%',
+                    '%"INBOX"%',
+                    '%"STARRED"%',
+                ),
+                limit,
+                offset,
+            )
+            return {
+                "sections": [
+                    {
+                        "title": "Important and unread",
+                        "key": "important_unread",
+                        "threads": important_unread,
+                    },
+                    {
+                        "title": "Starred",
+                        "key": "starred",
+                        "threads": starred,
+                    },
+                    {
+                        "title": "Everything else",
+                        "key": "everything_else",
+                        "threads": everything_else,
+                    },
+                ]
+            }
         finally:
             conn.close()
 
