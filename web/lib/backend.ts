@@ -292,6 +292,13 @@ export type CorpusStatus = {
   // (search-as-you-type pays per debounce-boundary keystroke).
   query_embeds?: number;
   query_embed_cost_usd?: number;
+  // Summarization backlog against the CURRENT prompt version. During a
+  // version bump the daemon re-summarizes every message; this surfaces
+  // how many are still pending and how fast the queue is draining.
+  summary_pending?: number;
+  summary_rate_per_sec?: number;
+  summary_eta_seconds?: number | null;
+  summary_model_key?: string;
   running_job: { stage?: string } | null;
 };
 

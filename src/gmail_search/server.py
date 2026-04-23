@@ -1197,6 +1197,31 @@ def create_app(
         query_cost_row = conn.execute(
             "SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM costs WHERE operation = 'embed_query'"
         ).fetchone()
+        # Backlog surface for the current prompt version. `DEFAULT_MODEL`
+        # combines backend.model_id + PROMPT_VERSION, so a prompt bump
+        # makes everyone's summaries count as pending and the UI shows
+        # the queue draining in real time. Rate is derived from the last
+        # 10 min of writes — matches what we'd compute manually.
+        from gmail_search.summarize import DEFAULT_MODEL as _SUMMARY_KEY
+
+        pending_row = conn.execute(
+            """SELECT COUNT(*) FROM messages m
+               LEFT JOIN message_summaries s
+                 ON s.message_id = m.id AND s.model = %s
+               WHERE s.message_id IS NULL""",
+            (_SUMMARY_KEY,),
+        ).fetchone()
+        rate_row = conn.execute(
+            """SELECT COUNT(*) FROM message_summaries
+               WHERE model = %s
+                 AND created_at::timestamptz > NOW() - INTERVAL '10 minutes'""",
+            (_SUMMARY_KEY,),
+        ).fetchone()
+        summary_pending = int(pending_row[0] or 0)
+        summary_rate_per_sec = round((int(rate_row[0] or 0)) / 600.0, 3)
+        summary_eta_seconds = (
+            int(summary_pending / summary_rate_per_sec) if summary_rate_per_sec > 0 and summary_pending > 0 else None
+        )
         conn.close()
         jobs = JobProgress.get(db_path) or []
         running = [j for j in jobs if j["status"] == "running"]
@@ -1209,6 +1234,10 @@ def create_app(
             "budget_remaining_usd": round(remaining, 4),
             "query_embeds": int(query_count_row[0] or 0),
             "query_embed_cost_usd": round(float(query_cost_row[0] or 0.0), 6),
+            "summary_pending": summary_pending,
+            "summary_rate_per_sec": summary_rate_per_sec,
+            "summary_eta_seconds": summary_eta_seconds,
+            "summary_model_key": _SUMMARY_KEY,
             "running_job": running[0] if running else None,
         }
 
