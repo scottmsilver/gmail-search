@@ -64,11 +64,18 @@ async def _get(path: str, *, params: dict | None = None, base_url: str | None = 
     client call from an async request handler deadlocks the event
     loop (tool waits on the socket, uvicorn can't accept the new
     inbound request because its event loop is blocked). Async
-    yields while waiting, so the inbound handler runs and replies."""
+    yields while waiting, so the inbound handler runs and replies.
+
+    4xx / 5xx responses are NOT raised — they're returned as
+    `{error: "<body>"}` so the LLM sees the server's message as a
+    tool result and can retry with a corrected query. Raising would
+    crash the whole turn on one bad SQL syntax mistake.
+    """
     url = (base_url or _default_base_url()) + path
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         resp = await client.get(url, params=params or {})
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            return _error_payload(resp)
         return resp.json()
 
 
@@ -76,8 +83,22 @@ async def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
     url = (base_url or _default_base_url()) + path
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         resp = await client.post(url, json=json)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            return _error_payload(resp)
         return resp.json()
+
+
+def _error_payload(resp) -> dict:
+    """Turn an upstream error response into a tool result the model
+    can reason about. Tries to extract the server's JSON error
+    field; falls back to the raw body."""
+    try:
+        body = resp.json()
+        if isinstance(body, dict) and "error" in body:
+            return {"error": str(body["error"]), "status": resp.status_code}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"error": resp.text[:500], "status": resp.status_code}
 
 
 # ── search_emails ──────────────────────────────────────────────────

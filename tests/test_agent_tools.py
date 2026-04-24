@@ -32,6 +32,9 @@ def _stub_httpx_async(monkeypatch, response_json: dict):
     from gmail_search.agents import tools
 
     class _R:
+        status_code = 200
+        text = ""
+
         def __init__(self, payload):
             self._payload = payload
 

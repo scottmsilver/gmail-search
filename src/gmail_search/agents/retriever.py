@@ -25,6 +25,10 @@ Tools:
   get_thread(thread_id)                                — full bodies
   sql_query(query)                                     — aggregations
 
+If a tool returns `{error: "..."}` instead of data, READ the error
+message, fix your query (wrong SQL dialect, bad arg name, etc.),
+and retry. Do NOT give up on the first failure.
+
 Rules:
 - At most 5 retrieval calls. If you can't answer in 5 you need to
   stop and let the Writer explain why the archive doesn't contain it.
