@@ -62,7 +62,7 @@ def build_critic_agent(*, model: str | None = None):
     open-ended reasoning."""
     from google.adk import Agent
 
-    model_name = model or os.environ.get("GMAIL_CRITIC_MODEL", "gemini-2.5-flash")
+    model_name = model or os.environ.get("GMAIL_CRITIC_MODEL", "gemini-3.1-pro-preview")
     return Agent(
         name="critic",
         model=model_name,

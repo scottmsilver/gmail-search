@@ -197,7 +197,12 @@ def build_analyst_agent(
         session_id=session_id,
         db_conn=db_conn,
     )
-    model_name = model or os.environ.get("GMAIL_ANALYST_MODEL", "gemini-2.5-flash")
+    # Default model bumped from gemini-2.5-flash to 3.1-pro after a
+    # live test: flash agents reliably failed to invoke `run_code`
+    # even on questions whose plan explicitly required computation
+    # (matplotlib plots, aggregations). Pro-3.1 chose the tool on
+    # the first try. Override via $GMAIL_ANALYST_MODEL.
+    model_name = model or os.environ.get("GMAIL_ANALYST_MODEL", "gemini-3.1-pro-preview")
     return Agent(
         name="analyst",
         model=model_name,

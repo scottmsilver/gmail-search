@@ -59,7 +59,7 @@ def build_writer_agent(*, model: str | None = None):
     more often."""
     from google.adk import Agent
 
-    model_name = model or os.environ.get("GMAIL_WRITER_MODEL", "gemini-2.5-pro")
+    model_name = model or os.environ.get("GMAIL_WRITER_MODEL", "gemini-3.1-pro-preview")
     return Agent(
         name="writer",
         model=model_name,

@@ -74,7 +74,7 @@ def build_planner_agent(*, model: str | None = None):
     pro-tier reasoning."""
     from google.adk import Agent
 
-    model_name = model or os.environ.get("GMAIL_PLANNER_MODEL", "gemini-2.5-flash")
+    model_name = model or os.environ.get("GMAIL_PLANNER_MODEL", "gemini-3.1-pro-preview")
     return Agent(
         name="planner",
         model=model_name,

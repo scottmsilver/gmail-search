@@ -57,7 +57,7 @@ def build_retriever_agent(*, model: str | None = None):
 
     from gmail_search.agents.tools import build_retrieval_tools
 
-    model_name = model or os.environ.get("GMAIL_RETRIEVER_MODEL", "gemini-2.5-flash")
+    model_name = model or os.environ.get("GMAIL_RETRIEVER_MODEL", "gemini-3.1-pro-preview")
     return Agent(
         name="retriever",
         model=model_name,
