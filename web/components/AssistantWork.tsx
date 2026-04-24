@@ -6,35 +6,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { AttachmentInlineViewer } from "./AttachmentInlineViewer";
-
-type ToolPart = {
-  type: "tool-call";
-  toolCallId: string;
-  toolName: string;
-  args: unknown;
-  result?: unknown;
-  isError?: boolean;
-};
-
-type ReasoningPart = { type: "reasoning"; text: string };
-
-// Deep-mode stage events travel as `data-deep-stage` SSE frames,
-// which assistant-ui's client reshapes to `{type: "data", name:
-// "deep-stage", data: {...}}` before they land in m.content. So we
-// filter on `type === "data" && name === "deep-stage"` — NOT on the
-// wire protocol's `type === "data-deep-stage"`. (Cost me an hour.)
-type DeepStagePart = {
-  type: "data";
-  name: "deep-stage";
-  data: { kind: string; payload?: unknown };
-};
-
-type WorkPart = ToolPart | ReasoningPart | DeepStagePart;
-
-const isToolPart = (p: { type: string }): p is ToolPart => p.type === "tool-call";
-const isReasoningPart = (p: { type: string }): p is ReasoningPart => p.type === "reasoning";
-const isDeepStagePart = (p: { type: string; name?: string }): p is DeepStagePart =>
-  p.type === "data" && (p as { name?: string }).name === "deep-stage";
+import {
+  type DeepStagePart,
+  type ReasoningPart,
+  type ToolPart,
+  type WorkPart,
+  isDeepStagePart,
+  isReasoningPart,
+  isToolPart,
+} from "@/lib/messageParts";
 
 const Caret = ({ open }: { open: boolean }) => (
   <svg

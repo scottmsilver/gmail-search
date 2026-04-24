@@ -252,6 +252,70 @@ test("credentials after comma survive", () =>
 test("paren-vendor suffix stays in name", () =>
   eq(cleanSender('"San Bruno Flower Fashions (via X)" <x@y.com>'), "San Bruno Flower Fashions (via X)"));
 
+// ─── isDeepStagePart reshape (assistant-ui DataMessagePart) ─────────
+//
+// Deep-mode stage events leave the server as `data-deep-stage` SSE
+// frames. assistant-ui's client reshapes them in-memory into
+// `{type: "data", name: "deep-stage", data: {...}}` (see
+// node_modules/@assistant-ui/core/src/types/message.ts ->
+// DataMessagePart). The AssistantWork component filters on the
+// reshaped form. If a future @assistant-ui bump changes the field
+// names ("name" -> "kind", say) this guard returns false silently,
+// and the deep-mode disclosure stops rendering. This test catches
+// that regression in CI before a user hits it.
+console.log("\nisDeepStagePart reshape (assistant-ui DataMessagePart)");
+
+const { isDeepStagePart, isToolPart, isReasoningPart } = await loadTs("lib/messageParts.ts");
+
+test("matches a reshaped data-deep-stage part", () => {
+  // This is the shape assistant-ui places into m.content after
+  // consuming a `data-deep-stage` SSE frame from /api/agent/analyze.
+  const part = {
+    type: "data",
+    name: "deep-stage",
+    data: { kind: "plan", payload: { plan: { question_type: "factual" } } },
+  };
+  truthy(isDeepStagePart(part), "should accept a reshaped deep-stage part");
+});
+
+test("rejects a different data-* part (e.g. data-debug-id)", () => {
+  // Other custom data parts share the `type: "data"` envelope; we
+  // must NOT eat them or the wrong block renders for them.
+  const part = { type: "data", name: "debug-id", data: { id: "abc" } };
+  eq(isDeepStagePart(part), false, "data parts with a different name must not match");
+});
+
+test("rejects a tool-call part", () => {
+  const part = { type: "tool-call", toolCallId: "1", toolName: "f", args: {} };
+  eq(isDeepStagePart(part), false);
+});
+
+test("rejects a reasoning part", () => {
+  eq(isDeepStagePart({ type: "reasoning", text: "thinking" }), false);
+});
+
+test("rejects the wire-format type 'data-deep-stage' (must be the reshaped form)", () => {
+  // Catches the regression we hit once: code that filters on the
+  // wire-format type instead of the reshaped {type:"data",
+  // name:"deep-stage"} sees this part and silently drops it.
+  const part = { type: "data-deep-stage", data: { kind: "plan" } };
+  eq(isDeepStagePart(part), false);
+});
+
+test("rejects a data part missing the name field", () => {
+  // Defensive: malformed parts mid-flight shouldn't trigger the
+  // deep-stage branch.
+  const part = { type: "data", data: { kind: "plan" } };
+  eq(isDeepStagePart(part), false);
+});
+
+test("isToolPart and isReasoningPart still match their shapes (sanity)", () => {
+  truthy(isToolPart({ type: "tool-call", toolCallId: "1", toolName: "f", args: {} }));
+  truthy(isReasoningPart({ type: "reasoning", text: "x" }));
+  eq(isToolPart({ type: "data", name: "deep-stage", data: {} }), false);
+  eq(isReasoningPart({ type: "data", name: "deep-stage", data: {} }), false);
+});
+
 // ─── done ──────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
