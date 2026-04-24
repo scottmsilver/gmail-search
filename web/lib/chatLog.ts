@@ -81,6 +81,7 @@ export type LogEvent = {
     | "answer"
     | "validation"
     | "error"
+    | "empty_text"
     | "done"
     | "battle_start"
     | "battle_done";

@@ -513,6 +513,49 @@ export async function POST(req: NextRequest) {
           citations: total,
           broken,
         });
+
+        // Empty-text detection. Gemini occasionally returns no text after
+        // tool-use — the UI then shows a blank assistant bubble and the
+        // user assumes the server died. Surface the finish reason so they
+        // know it was a model output, not an infrastructure failure.
+        if (!finalText || finalText.trim().length === 0) {
+          const finishReason =
+            steps.length > 0 ? (steps[steps.length - 1].finishReason ?? "unknown") : "no-steps";
+          const warningsText = steps
+            .flatMap((s) => s.warnings ?? [])
+            .map((w) => (w as { message?: string }).message ?? String(w))
+            .join("; ");
+          console.error(
+            `[chat ${logger.id}] EMPTY TEXT attempt=${attempt + 1} finish=${finishReason} warnings=${warningsText}`,
+          );
+          await logger.log("empty_text", {
+            attempt: attempt + 1,
+            finish_reason: finishReason,
+            warnings: warningsText,
+          });
+          const humanMsg =
+            `_The model returned no text (finish reason: **${finishReason}**)._ ` +
+            `This usually means a silent provider truncation or a tool-call loop that never emitted a final answer. ` +
+            (warningsText ? `Provider warnings: ${warningsText}. ` : "") +
+            `Try rephrasing, reducing context size (fewer attachments inlined at once), or switching models.`;
+          const id = `empty-notice-${attempt}`;
+          writer.write({ type: "text-start", id });
+          writer.write({ type: "text-delta", id, delta: humanMsg });
+          writer.write({ type: "text-end", id });
+          await logger.log("done", { attempts: attempt + 1, ms: logger.elapsedMs() });
+          if (conversationId) {
+            const persisted: Array<{ role: string; parts: unknown[] }> = messages.map((m) => ({
+              role: m.role,
+              parts: m.parts as unknown[],
+            }));
+            persisted.push({
+              role: "assistant",
+              parts: [{ type: "text", text: humanMsg }],
+            });
+            await saveConversation(conversationId, persisted, deriveTitle(messages));
+          }
+          return;
+        }
         await logger.log("validation", {
           attempt: attempt + 1,
           known_refs: [...knownRefs].length,
