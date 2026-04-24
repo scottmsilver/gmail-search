@@ -20,6 +20,11 @@ export type ChatSettings = {
   model: (typeof AVAILABLE_MODELS)[number];
   thinkingLevel: ThinkingLevel;
   battleMode: boolean;
+  // When on, the next message is routed through the deep-analysis
+  // multi-agent pipeline (planner → retriever → analyst → writer →
+  // critic) instead of the single-agent chat. Slower + more
+  // expensive; use for real analysis questions.
+  deepMode: boolean;
   theme: Theme;
   sidebarOpen: boolean;
 };
@@ -28,6 +33,7 @@ const defaultSettings = (): ChatSettings => ({
   model: AVAILABLE_MODELS[0],
   thinkingLevel: DEFAULT_THINKING,
   battleMode: false,
+  deepMode: false,
   theme: "light",
   sidebarOpen: false,
 });
@@ -57,12 +63,13 @@ const loadFromStorage = () => {
       ? (parsed.thinkingLevel as ThinkingLevel)
       : current.thinkingLevel;
     const battleMode = typeof parsed.battleMode === "boolean" ? parsed.battleMode : current.battleMode;
+    const deepMode = typeof parsed.deepMode === "boolean" ? parsed.deepMode : current.deepMode;
     const theme = (THEMES as readonly string[]).includes(parsed.theme ?? "")
       ? (parsed.theme as Theme)
       : current.theme;
     const sidebarOpen =
       typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : current.sidebarOpen;
-    current = { model, thinkingLevel, battleMode, theme, sidebarOpen };
+    current = { model, thinkingLevel, battleMode, deepMode, theme, sidebarOpen };
   } catch {
     // ignore malformed storage
   }

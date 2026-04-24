@@ -55,6 +55,7 @@ export const ModelPicker = () => {
   }, [open]);
 
   const battleOn = settings.battleMode;
+  const deepOn = settings.deepMode;
   const triggerLabel = battleOn
     ? "⚔ battle mode"
     : `${shortModel(settings.model)} · ${settings.thinkingLevel}`;
@@ -111,6 +112,28 @@ export const ModelPicker = () => {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
+              Deep analysis
+            </div>
+            <button
+              type="button"
+              onClick={() => setChatSettings({ deepMode: !deepOn })}
+              className={
+                deepOn
+                  ? "w-full rounded bg-purple-700 text-white px-2 py-1 font-medium hover:bg-purple-600"
+                  : "w-full rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
+              }
+              title={
+                deepOn
+                  ? "Next message runs the multi-agent pipeline (planner → retriever → analyst → writer → critic). Slower + spends real $."
+                  : "Use the single-agent chat path (fast, cheap)."
+              }
+            >
+              🔬 {deepOn ? "on — multi-agent with Python sandbox" : "off — single agent"}
+            </button>
           </div>
 
           <div>

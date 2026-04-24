@@ -214,12 +214,156 @@ const runVariantOnce = async (
   }
 };
 
+// ── Deep-mode translator ──────────────────────────────────────────
+//
+// The Python agent service streams SSE with a small vocabulary:
+//   session   — assigns session_id (unused on the chat side)
+//   plan      — Planner emitted JSON
+//   evidence  — Retriever summary
+//   tool_call — retriever called search/query/sql/get_thread
+//   analysis  — Analyst summary after its run_code calls
+//   skipped   — Analyst skipped (plan had no analysis steps)
+//   code_run  — Analyst ran a snippet
+//   draft     — Writer draft (may be revised by critic)
+//   critique  — Critic JSON verdict
+//   revision  — Writer rewrite
+//   cost      — per-stage token usage + USD
+//   final     — final markdown answer
+//   error     — orchestrator raised
+//
+// We translate each kind into a UIMessageStream part the chat UI
+// already renders:
+//   - stage events (plan / evidence / analysis / critique / cost)
+//     become `data-deep-stage` parts so the Thread can render a
+//     "Working (N steps)" disclosure just like regular tool calls.
+//   - `final` → text chunk in the assistant bubble (with [ref:],
+//     [att:], [art:] citation chips from CitableMarkdown).
+//   - `error` → text chunk explaining the failure.
+
+type DeepStreamArgs = {
+  question: string;
+  conversationId: string | null;
+  loggerId: string;
+  loggerPath: string;
+};
+
+const createDeepModeStream = (args: DeepStreamArgs) =>
+  createUIMessageStream({
+    execute: async ({ writer }) => {
+      writer.write({
+        type: "data-debug-id",
+        id: `dbg-${args.loggerId}`,
+        data: { id: args.loggerId, log_path: args.loggerPath },
+      });
+
+      const upstream = await fetch(`${pythonApiUrl()}/api/agent/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: args.question,
+          conversation_id: args.conversationId,
+        }),
+      });
+      if (!upstream.ok || !upstream.body) {
+        const textId = "deep-error";
+        writer.write({ type: "text-start", id: textId });
+        writer.write({
+          type: "text-delta",
+          id: textId,
+          delta: `_Deep-mode upstream failed (HTTP ${upstream.status})._`,
+        });
+        writer.write({ type: "text-end", id: textId });
+        return;
+      }
+
+      const reader = upstream.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      let finalText = "";
+      let finalStartedId: string | null = null;
+
+      const emitStage = (kind: string, payload: unknown) => {
+        writer.write({
+          type: "data-deep-stage",
+          id: `deep-${kind}-${Math.random().toString(36).slice(2, 10)}`,
+          data: { kind, payload },
+        });
+      };
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += value;
+          let sep: number;
+          while ((sep = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            let kind = "message";
+            let data: Record<string, unknown> = {};
+            for (const line of frame.split("\n")) {
+              if (line.startsWith("event:")) kind = line.slice(6).trim();
+              else if (line.startsWith("data:")) {
+                try {
+                  data = JSON.parse(line.slice(5).trim()) as Record<string, unknown>;
+                } catch {
+                  /* keep empty */
+                }
+              }
+            }
+            if (kind === "final") {
+              // Stream the final answer as a proper text part so the
+              // chat bubble renders through MarkdownText (which uses
+              // CitableMarkdown → ref/att/art chips work).
+              finalText =
+                typeof (data.payload as { text?: unknown })?.text === "string"
+                  ? ((data.payload as { text: string }).text as string)
+                  : finalText;
+              finalStartedId = `deep-final-${args.loggerId}`;
+              writer.write({ type: "text-start", id: finalStartedId });
+              writer.write({ type: "text-delta", id: finalStartedId, delta: finalText });
+              writer.write({ type: "text-end", id: finalStartedId });
+            } else if (kind === "error") {
+              finalStartedId = `deep-error-${args.loggerId}`;
+              writer.write({ type: "text-start", id: finalStartedId });
+              writer.write({
+                type: "text-delta",
+                id: finalStartedId,
+                delta: `_Deep-mode error: ${String((data.payload as { message?: string })?.message ?? "unknown")}_`,
+              });
+              writer.write({ type: "text-end", id: finalStartedId });
+            } else if (kind === "session") {
+              /* session id frame — don't surface in the UI */
+            } else {
+              emitStage(kind, data.payload ?? data);
+            }
+          }
+        }
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        if (!finalStartedId) {
+          const id = `deep-streamerr-${args.loggerId}`;
+          writer.write({ type: "text-start", id });
+          writer.write({ type: "text-delta", id, delta: `_Deep-mode stream error: ${err}_` });
+          writer.write({ type: "text-end", id });
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  });
+
+
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as {
     messages?: UIMessage[];
     model?: string;
     thinkingLevel?: string;
     battle?: boolean;
+    deep?: boolean;
     conversation_id?: string;
   };
   const messages = body.messages;
@@ -237,6 +381,22 @@ export async function POST(req: NextRequest) {
   const logger = new ChatLogger();
   const question = lastUserText(messages);
   const conversationId = body.conversation_id || null;
+
+  // Deep-mode fork: when the picker toggle is on, forward to the
+  // Python multi-agent service and translate its SSE event stream
+  // into a UIMessageStream the chat runtime already knows how to
+  // render. Same conversation bubble shape, same chip support via
+  // CitableMarkdown.
+  if (body.deep) {
+    console.log(`[chat ${logger.id}] deep-mode q=${JSON.stringify(question.slice(0, 80))}`);
+    const stream = createDeepModeStream({
+      question,
+      conversationId,
+      loggerId: logger.id,
+      loggerPath: logger.path,
+    });
+    return createUIMessageStreamResponse({ stream });
+  }
   await logger.log("request", {
     id: logger.id,
     question,

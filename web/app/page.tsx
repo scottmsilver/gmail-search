@@ -74,6 +74,7 @@ export default function Page() {
             model: s.model,
             thinkingLevel: s.thinkingLevel,
             battle: s.battleMode,
+            deep: s.deepMode,
             conversation_id: conversationIdRef.current,
           };
         },
