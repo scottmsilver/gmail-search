@@ -176,10 +176,16 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
     from gmail_search.agents.session import append_event
     from gmail_search.agents.writer import build_writer_agent
 
-    # Shared DB connection for the whole turn. The orchestrator does
-    # one event append per stage, not a hot loop, so serialising on
-    # one connection is fine.
+    # Two distinct DB connections: one for the orchestrator's writes
+    # (events, costs, finalize) and one for the poller's reads
+    # (`fetch_events_after`). psycopg does NOT allow concurrent
+    # `execute` on the same connection — sharing one would race the
+    # moment a stage finishes while the poller is mid-fetch and
+    # produce `OperationalError: another command is already in
+    # progress`. Two connections cost almost nothing here (one deep
+    # turn = one pair); the safety win is worth it.
     conn = get_connection(db_path)
+    poll_conn = get_connection(db_path)
 
     # Cost sink: every ADK call lands one row in `costs` with
     # operation='deep_<agent_name>' so the existing spend breakdown
@@ -244,13 +250,15 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
     )
 
     # Kick off the orchestration; a parallel poller drains events as
-    # they land and yields SSE frames.
+    # they land and yields SSE frames. The poller uses its OWN
+    # connection (`poll_conn`) so it can read while the orchestrator
+    # is mid-write on `conn` — see comment above.
     orch_task = asyncio.create_task(orch.run(question))
     last_seq = 0
     try:
         while True:
             # Any new events since last tick.
-            new_events = list(fetch_events_after(conn, session_id, after_seq=last_seq))
+            new_events = list(fetch_events_after(poll_conn, session_id, after_seq=last_seq))
             for ev in new_events:
                 last_seq = max(last_seq, ev.seq)
                 yield _sse(
@@ -261,7 +269,7 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
                 break
             await asyncio.sleep(0.1)
         # Drain any stragglers written after the done flag flipped.
-        for ev in fetch_events_after(conn, session_id, after_seq=last_seq):
+        for ev in fetch_events_after(poll_conn, session_id, after_seq=last_seq):
             yield _sse(
                 ev.kind,
                 {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload},
@@ -273,13 +281,51 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         if exc is not None:
             logger.exception(f"orchestrator raised in session {session_id}: {exc}")
     finally:
+        # Close the poller first (it's the read-only one) then the
+        # orchestrator's writer. Both must close even if one raises
+        # during close — the suppression is intentional.
+        try:
+            poll_conn.close()
+        except Exception:
+            logger.exception(f"closing poll_conn for session {session_id} failed")
         conn.close()
+
+
+def _probe_adk_imports() -> None:
+    """Boot-time check: try to import every ADK module the deep
+    pipeline reaches for inside `_real_run`. Surfaces broken installs
+    at server startup instead of at the first /api/agent/analyze
+    request — operators see the problem when they boot, not when a
+    user clicks "Deep mode" hours later. Chat mode is unaffected, so
+    we log a warning and return rather than crashing the server."""
+    try:
+        # Touch every import the live pipeline performs. If any of
+        # these is broken the deep path is broken.
+        from gmail_search.agents import (  # noqa: F401
+            analyst,
+            critic,
+            orchestration,
+            planner,
+            retriever,
+            runtime,
+            writer,
+        )
+    except Exception as e:
+        logger.warning(
+            "ADK imports failed at startup — deep mode (/api/agent/analyze) "
+            "will fail at request time. Chat mode is unaffected. Underlying "
+            f"error: {type(e).__name__}: {e}"
+        )
 
 
 def register_agent_routes(app: FastAPI, db_path: Path) -> None:
     """Attach the deep-agent endpoints to an existing FastAPI app.
     Called from `create_app` so the agent surface is an opt-in add-on
     that doesn't affect chat-mode code paths."""
+    # Probe ADK imports at registration time so a broken install is
+    # visible in the server logs at boot rather than at the first
+    # deep-mode request hours later.
+    _probe_adk_imports()
 
     @app.post("/api/agent/analyze")
     async def analyze(req: AnalyzeRequest) -> Response:
