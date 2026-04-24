@@ -68,9 +68,17 @@ CREATE TABLE IF NOT EXISTS costs (
     model TEXT NOT NULL,
     input_tokens BIGINT NOT NULL DEFAULT 0,
     image_count BIGINT NOT NULL DEFAULT 0,
+    output_tokens BIGINT NOT NULL DEFAULT 0,
     estimated_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     message_id TEXT NOT NULL
 );
+
+-- Idempotent column add for databases provisioned before `output_tokens`
+-- existed. Previously, deep-mode agents packed LLM output tokens into
+-- the `image_count` column (which means "images processed" elsewhere),
+-- silently mixing two units in analytics. New rows write the real count
+-- here; old rows default to 0.
+ALTER TABLE costs ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,

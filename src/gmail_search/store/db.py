@@ -107,7 +107,8 @@ TABLE_DOCS: dict[str, str] = {
     ),
     "costs": (
         "Per-API-call cost log for embeddings + summarization.\n"
-        "- id, timestamp, operation, model, input_tokens, image_count, estimated_cost_usd, message_id."
+        "- id, timestamp, operation, model, input_tokens, image_count, output_tokens,\n"
+        "  estimated_cost_usd, message_id."
     ),
     "term_aliases": (
         "Spell correction + personal-abbreviation expansion dictionary.\n"

@@ -97,12 +97,11 @@ def record_agent_cost(
     writer so spend reporting (total, breakdown, budget check)
     picks this up automatically.
 
-    The base `costs` schema doesn't distinguish input vs output
-    tokens; we pack both into the `input_tokens` field and encode
-    output tokens in `image_count` — that column is otherwise unused
-    for text-only calls, and the schema migration to add a real
-    `output_tokens` column isn't worth it until someone needs the
-    split for analytics.
+    Output tokens land in the dedicated `output_tokens` column (added
+    to the `costs` table specifically so we don't have to overload
+    `image_count`, which means "images processed" for the embed
+    pipeline). `image_count` stays 0 for deep-mode rows since text-only
+    LLM calls produce no images.
     """
     usd = estimate_agent_cost_usd(model, input_tokens, output_tokens)
     # session_id is threaded through `message_id` — the column is
@@ -114,7 +113,8 @@ def record_agent_cost(
         operation=f"deep_{agent_name}",
         model=model,
         input_tokens=input_tokens,
-        image_count=output_tokens,
+        image_count=0,
+        output_tokens=output_tokens,
         estimated_cost_usd=usd,
         message_id=f"deep:{session_id}",
     )

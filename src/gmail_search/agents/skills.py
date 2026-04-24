@@ -49,6 +49,23 @@ logger = logging.getLogger(__name__)
 # (the default) injects everywhere.
 KNOWN_AGENTS = frozenset({"planner", "retriever", "analyst", "writer", "critic", "all"})
 
+# Per-body cap: any single SKILL.md body longer than this gets clipped.
+# A 200KB SKILL.md could otherwise blow Gemini's 1M-token cap by itself.
+# orchestration.STAGE_FIELD_CHAR_CAP clips evidence/analysis but not
+# the instruction, so we enforce a separate budget here.
+SKILL_BODY_CHAR_CAP = 8_000
+
+# Sum cap across ALL matched skill bodies in a single injection.
+# Even if individual bodies are under the per-body cap, three or four
+# verbose skills could still dominate the prompt — this is the
+# total-injection ceiling.
+SKILL_BODIES_TOTAL_CHAR_CAP = 24_000
+
+# Marker appended after a clipped body so the LLM knows content was
+# cut. Explicit text rather than a silent "..." so the agent can
+# decide whether to ask the user for the missing detail.
+_TRUNCATION_MARKER = "\n\n[...truncated by skill loader; see SKILL.md for full content]"
+
 
 @dataclass
 class Skill:
@@ -207,18 +224,54 @@ def match_skills(
     return [s for s, _ in scored[:top_k]]
 
 
+def _clip_skill_body(body: str, cap: int) -> str:
+    """Clip a single skill body to `cap` chars, appending the
+    truncation marker so the LLM sees content was cut. Bodies
+    already within budget pass through unchanged."""
+    if len(body) <= cap:
+        return body
+    return body[:cap].rstrip() + _TRUNCATION_MARKER
+
+
+def _budget_skill_body(body: str, remaining: int) -> str | None:
+    """Trim a skill body so it fits in the remaining sum-budget.
+    Returns None if there's no room left at all (caller should stop
+    appending further skills)."""
+    if remaining <= 0:
+        return None
+    if len(body) <= remaining:
+        return body
+    return body[:remaining].rstrip() + _TRUNCATION_MARKER
+
+
 def inject_skill_instructions(base_prompt: str, matched: list[Skill]) -> str:
     """Append matched skill bodies to a sub-agent's base prompt under
     a dedicated section the LLM can reference. Returns the base prompt
     unchanged when no skills match — keeps the no-skills path free
-    of noise."""
+    of noise.
+
+    Bodies are capped per-skill (`SKILL_BODY_CHAR_CAP`) and across all
+    skills (`SKILL_BODIES_TOTAL_CHAR_CAP`) so a runaway SKILL.md cannot
+    blow Gemini's context budget — `orchestration.STAGE_FIELD_CHAR_CAP`
+    only protects evidence and analysis, not the instruction itself.
+    Truncated bodies carry an explicit marker so the agent knows
+    content was cut.
+    """
     if not matched:
         return base_prompt
     parts = [base_prompt.rstrip(), "", "<skills>"]
+    remaining_budget = SKILL_BODIES_TOTAL_CHAR_CAP
     for skill in matched:
+        clipped = _clip_skill_body(skill.body, SKILL_BODY_CHAR_CAP)
+        budgeted = _budget_skill_body(clipped, remaining_budget)
+        if budgeted is None:
+            # Out of room across the whole injection — stop adding
+            # more skills rather than emit half-empty headers.
+            break
         header = f"## Skill: {skill.name}"
         if skill.description:
             header += f" — {skill.description}"
-        parts.extend([header, skill.body, ""])
+        parts.extend([header, budgeted, ""])
+        remaining_budget -= len(budgeted)
     parts.append("</skills>")
     return "\n".join(parts)

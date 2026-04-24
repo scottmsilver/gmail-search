@@ -18,17 +18,27 @@ def record_cost(
     image_count: int,
     estimated_cost_usd: float,
     message_id: str,
+    output_tokens: int = 0,
 ) -> None:
+    """Append one row to the shared `costs` table.
+
+    `output_tokens` defaults to 0 so existing callers (embed pipeline,
+    chat summarizer) keep working unchanged — they don't have output
+    tokens to record. Deep-analysis agents pass the real count so
+    analytics can split input vs output without overloading the
+    `image_count` column (which means "images processed" elsewhere).
+    """
     conn.execute(
         """INSERT INTO costs (timestamp, operation, model, input_tokens,
-           image_count, estimated_cost_usd, message_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+           image_count, output_tokens, estimated_cost_usd, message_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
         (
             datetime.now(timezone.utc).isoformat(),
             operation,
             model,
             input_tokens,
             image_count,
+            output_tokens,
             estimated_cost_usd,
             message_id,
         ),

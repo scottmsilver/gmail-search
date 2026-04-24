@@ -69,18 +69,52 @@ def test_record_agent_cost_writes_deep_operation_row(db_backend):
     assert usd > 0
 
     row = conn.execute(
-        """SELECT operation, model, input_tokens, image_count, estimated_cost_usd, message_id
+        """SELECT operation, model, input_tokens, image_count, output_tokens,
+                  estimated_cost_usd, message_id
              FROM costs WHERE message_id = %s""",
         (f"deep:{sid}",),
     ).fetchone()
     assert row["operation"] == "deep_planner"
     assert row["model"] == "gemini-2.5-flash"
     assert row["input_tokens"] == 500
-    # Output tokens packed into image_count (see record_agent_cost
-    # docstring for why).
-    assert row["image_count"] == 200
+    # Output tokens land in the dedicated `output_tokens` column;
+    # `image_count` stays 0 because deep-mode never produces images.
+    assert row["output_tokens"] == 200
+    assert row["image_count"] == 0
     # Cost math: 500/1M * $0.075 + 200/1M * $0.30 ≈ $0.0000975
     assert row["estimated_cost_usd"] > 0
+    conn.close()
+
+
+def test_record_cost_writes_output_tokens_column(db_backend):
+    """The shared `record_cost` writer accepts an `output_tokens`
+    kwarg (default 0 for back-compat) and stores it in the dedicated
+    column — without overloading `image_count`."""
+    from gmail_search.store.cost import record_cost
+
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+
+    record_cost(
+        conn,
+        operation="some_llm_op",
+        model="gemini-2.5-flash",
+        input_tokens=1234,
+        image_count=0,
+        output_tokens=567,
+        estimated_cost_usd=0.01,
+        message_id="msg-out-tokens",
+    )
+
+    row = conn.execute(
+        """SELECT input_tokens, image_count, output_tokens
+             FROM costs WHERE message_id = %s""",
+        ("msg-out-tokens",),
+    ).fetchone()
+    assert row["input_tokens"] == 1234
+    assert row["image_count"] == 0
+    assert row["output_tokens"] == 567
     conn.close()
 
 
