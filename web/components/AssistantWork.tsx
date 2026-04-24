@@ -18,10 +18,20 @@ type ToolPart = {
 
 type ReasoningPart = { type: "reasoning"; text: string };
 
-type WorkPart = ToolPart | ReasoningPart;
+// Deep-mode stage events travel as `data-deep-stage` parts. We treat
+// them as a third kind of "work" so they collect into the same
+// disclosure as tool calls / reasoning — same gray mono styling, no
+// colors or emoji, same expand-to-see-JSON behavior.
+type DeepStagePart = {
+  type: "data-deep-stage";
+  data: { kind: string; payload?: unknown };
+};
+
+type WorkPart = ToolPart | ReasoningPart | DeepStagePart;
 
 const isToolPart = (p: { type: string }): p is ToolPart => p.type === "tool-call";
 const isReasoningPart = (p: { type: string }): p is ReasoningPart => p.type === "reasoning";
+const isDeepStagePart = (p: { type: string }): p is DeepStagePart => p.type === "data-deep-stage";
 
 const Caret = ({ open }: { open: boolean }) => (
   <svg
@@ -177,6 +187,104 @@ const ToolBlock = ({ part }: { part: ToolPart }) => {
   );
 };
 
+// Deep-mode stage summaries. Matched shape to ToolBlock so the whole
+// disclosure reads uniformly: gray text, monospace, caret, expand to
+// see the raw JSON. No colors, no emoji — stages look like "tool
+// calls from the orchestrator" because effectively they are.
+const STAGE_LABELS: Record<string, string> = {
+  plan: "planner",
+  evidence: "retriever",
+  tool_call: "tool",
+  analysis: "analyst",
+  skipped: "analyst (skipped)",
+  code_run: "analyst.code",
+  draft: "writer",
+  critique: "critic",
+  revision: "writer (revision)",
+  cost: "cost",
+};
+
+const summarizeDeepStage = (kind: string, payload: unknown): string => {
+  if (!payload || typeof payload !== "object") return "";
+  const p = payload as Record<string, unknown>;
+  if (kind === "plan") {
+    const plan = p.plan as Record<string, unknown> | undefined;
+    if (plan) {
+      const qt = plan.question_type as string | undefined;
+      const r = Array.isArray(plan.retrieval) ? (plan.retrieval as unknown[]).length : 0;
+      const a = Array.isArray(plan.analysis) ? (plan.analysis as unknown[]).length : 0;
+      return `${qt ?? ""}${qt ? " · " : ""}${r}r ${a}a`;
+    }
+  }
+  if (kind === "evidence") {
+    const s = p.summary as string | undefined;
+    return s ? s.split("\n")[0].slice(0, 100) : "";
+  }
+  if (kind === "tool_call") {
+    const name = p.name as string | undefined;
+    const args = p.args as Record<string, unknown> | undefined;
+    if (args) {
+      const argStr = Object.entries(args)
+        .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 40)}`)
+        .join(", ");
+      return `${name ?? ""}(${argStr})`.slice(0, 140);
+    }
+    return name ?? "";
+  }
+  if (kind === "critique") {
+    const accepted = p.accepted as boolean | undefined;
+    const n = Array.isArray(p.violations) ? (p.violations as unknown[]).length : 0;
+    return accepted ? "accepted" : `rejected · ${n} violation${n === 1 ? "" : "s"}`;
+  }
+  if (kind === "cost") {
+    const usd = p.usd as number | undefined;
+    const total = p.turn_total_usd as number | undefined;
+    const agent = typeof (p as { agent?: unknown }).agent === "string" ? (p.agent as string) : "";
+    const suffix = usd !== undefined ? `$${usd.toFixed(5)} (turn $${(total ?? 0).toFixed(5)})` : "";
+    return agent ? `${agent} · ${suffix}` : suffix;
+  }
+  if (kind === "skipped") {
+    return (p.reason as string) ?? "";
+  }
+  if (kind === "draft" || kind === "revision") {
+    const t = p.text as string | undefined;
+    return t ? t.slice(0, 80) + (t.length > 80 ? "…" : "") : "";
+  }
+  return "";
+};
+
+const DeepStageBlock = ({ part }: { part: DeepStagePart }) => {
+  const [open, setOpen] = useState(false);
+  const kind = part.data.kind;
+  const label = STAGE_LABELS[kind] ?? kind;
+  const summary = summarizeDeepStage(kind, part.data.payload);
+  return (
+    <div className="text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left flex items-start gap-1.5 text-neutral-500 font-mono hover:text-neutral-800"
+      >
+        <Caret open={open} />
+        <span className="truncate flex-1">
+          <span className="text-neutral-700">{label}</span>
+          {summary && <span className="text-neutral-400"> → {summary}</span>}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1 ml-4 border-l-2 border-neutral-200 pl-3 space-y-2">
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Payload</div>
+            <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+              {formatJson(part.data.payload)}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ReasoningBlock = ({ part }: { part: ReasoningPart }) => (
   <div className="text-xs text-neutral-500">
     <div className="flex items-center gap-1.5 italic">
@@ -198,17 +306,25 @@ export const AssistantWork = () => {
 
   const work: WorkPart[] = [];
   for (const p of parts) {
-    if (isToolPart(p) || isReasoningPart(p)) work.push(p);
+    if (isToolPart(p) || isReasoningPart(p) || isDeepStagePart(p)) work.push(p);
   }
   if (work.length === 0) return null;
 
   const tools = work.filter(isToolPart);
   const reasoning = work.filter(isReasoningPart);
+  const stages = work.filter(isDeepStagePart);
   const lastReasoning = reasoning[reasoning.length - 1];
   const anyPending = isRunning && tools.some((t) => t.result === undefined);
+  const isDeepTurn = stages.length > 0;
 
   let label: string;
-  if (anyPending) {
+  if (isDeepTurn) {
+    // Deep-mode turns get their own header so the user can tell at a
+    // glance this was the multi-agent path (vs. regular chat).
+    label = anyPending
+      ? `Deep analysis running (${stages.length} step${stages.length === 1 ? "" : "s"})`
+      : `Deep analysis (${stages.length} step${stages.length === 1 ? "" : "s"})`;
+  } else if (anyPending) {
     label = `Working (${tools.length} tool call${tools.length === 1 ? "" : "s"}${reasoning.length ? ", thinking" : ""})`;
   } else if (tools.length === 0) {
     label = "Thoughts";
@@ -240,8 +356,10 @@ export const AssistantWork = () => {
           {work.map((p, i) =>
             isToolPart(p) ? (
               <ToolBlock key={`t-${i}`} part={p} />
-            ) : (
+            ) : isReasoningPart(p) ? (
               <ReasoningBlock key={`r-${i}`} part={p} />
+            ) : (
+              <DeepStageBlock key={`d-${i}`} part={p} />
             ),
           )}
         </div>

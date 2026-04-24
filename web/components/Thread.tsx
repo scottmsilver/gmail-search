@@ -10,7 +10,6 @@ import { AssistantWork } from "./AssistantWork";
 import { BattleMessage } from "./BattleMessage";
 import { CorpusStatus } from "./CorpusStatus";
 import { DebugIdBadge } from "./DebugIdBadge";
-import { DeepStagePart } from "./DeepStagePart";
 import { MarkdownText } from "./MarkdownText";
 import { ModelPicker } from "./ModelPicker";
 
@@ -80,7 +79,9 @@ const AssistantMessage = () => (
             "debug-id": DebugIdPart as never,
             "citation-warning": CitationWarningPart as never,
             battle: BattleMessage as never,
-            "deep-stage": DeepStagePart as never,
+            // data-deep-stage is intentionally NOT mapped here — the
+            // AssistantWork disclosure handles those parts inline so
+            // deep-mode stages look the same as regular tool calls.
           },
         },
       }}
