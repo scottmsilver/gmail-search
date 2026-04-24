@@ -90,7 +90,23 @@ def _is_final_response(event) -> bool:
     return False
 
 
-async def adk_invoke(agent, prompt: str) -> StageResult:
+def _sum_usage(events: list) -> tuple[int, int]:
+    """Add up prompt + output token counts across every event in the
+    run. ADK attaches `usage_metadata` to events that wrap an LLM
+    response; defensive attr reads so a future ADK version that
+    renames fields just reports zero instead of crashing the turn."""
+    prompt_total = 0
+    output_total = 0
+    for ev in events:
+        usage = getattr(ev, "usage_metadata", None)
+        if usage is None:
+            continue
+        prompt_total += int(getattr(usage, "prompt_token_count", 0) or 0)
+        output_total += int(getattr(usage, "candidates_token_count", 0) or getattr(usage, "output_token_count", 0) or 0)
+    return prompt_total, output_total
+
+
+async def adk_invoke(agent, prompt: str, *, cost_sink=None) -> StageResult:
     """Real `invoke` for the orchestrator. Creates a fresh ADK
     session per call, feeds the prompt as the user message, drains
     the event stream, and returns the collapsed StageResult.
@@ -100,6 +116,12 @@ async def adk_invoke(agent, prompt: str) -> StageResult:
     prompts, so we don't need ADK's session memory to carry state
     across stages. Each sub-agent's "world" is whatever the
     orchestrator handed it.
+
+    If `cost_sink` is provided, we call it with
+    `(agent_name, model, input_tokens, output_tokens)` after the
+    run so the orchestrator can record a `costs` row. The sink is
+    called BEFORE we return so the event stream the UI sees already
+    has a cost figure attached.
     """
     from google.adk import Runner
     from google.adk.sessions import InMemorySessionService
@@ -125,4 +147,16 @@ async def adk_invoke(agent, prompt: str) -> StageResult:
     ):
         events.append(ev)
 
-    return _extract_text_and_tool_calls(events)
+    result = _extract_text_and_tool_calls(events)
+    if cost_sink is not None:
+        input_tokens, output_tokens = _sum_usage(events)
+        try:
+            cost_sink(
+                agent_name=getattr(agent, "name", "agent"),
+                model=getattr(agent, "model", ""),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"cost_sink failed (non-fatal): {e}")
+    return result

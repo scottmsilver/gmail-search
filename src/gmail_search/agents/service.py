@@ -167,17 +167,57 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
     import asyncio
 
     from gmail_search.agents.analyst import ANALYST_INSTRUCTION, build_analyst_agent, instruction_with_skills
+    from gmail_search.agents.cost import record_agent_cost
     from gmail_search.agents.critic import build_critic_agent
     from gmail_search.agents.orchestration import Orchestrator
     from gmail_search.agents.planner import build_planner_agent
     from gmail_search.agents.retriever import build_retriever_agent
     from gmail_search.agents.runtime import adk_invoke
+    from gmail_search.agents.session import append_event
     from gmail_search.agents.writer import build_writer_agent
 
     # Shared DB connection for the whole turn. The orchestrator does
     # one event append per stage, not a hot loop, so serialising on
     # one connection is fine.
     conn = get_connection(db_path)
+
+    # Cost sink: every ADK call lands one row in `costs` with
+    # operation='deep_<agent_name>' so the existing spend breakdown
+    # automatically segments deep-mode per stage. We ALSO emit a
+    # `cost` event on the session transcript so the UI can surface
+    # per-turn spend inline.
+    turn_cost_usd = 0.0
+
+    def _record_cost(*, agent_name: str, model: str, input_tokens: int, output_tokens: int) -> None:
+        nonlocal turn_cost_usd
+        usd = record_agent_cost(
+            conn,
+            session_id=session_id,
+            agent_name=agent_name,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        turn_cost_usd += usd
+        append_event(
+            conn,
+            session_id=session_id,
+            agent_name=agent_name,
+            kind="cost",
+            payload={
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "usd": round(usd, 5),
+                "turn_total_usd": round(turn_cost_usd, 5),
+            },
+        )
+
+    # Wrap adk_invoke so the orchestrator's InvokeFn contract
+    # (two-arg) is preserved while the cost sink gets threaded in
+    # via closure — no signature change to the Orchestrator class.
+    async def _invoke(agent, prompt):
+        return await adk_invoke(agent, prompt, cost_sink=_record_cost)
 
     # Analyst factory: closure-bound so run_code persists to THIS
     # session's artifacts. Instruction gets skill-matched text
@@ -200,7 +240,7 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         writer=build_writer_agent(),
         critic=build_critic_agent(),
         analyst_factory=_analyst_factory,
-        invoke=adk_invoke,
+        invoke=_invoke,
     )
 
     # Kick off the orchestration; a parallel poller drains events as

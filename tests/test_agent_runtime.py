@@ -39,12 +39,16 @@ def test_use_real_pipeline_flag_parsing(monkeypatch):
 @pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
 def test_adk_invoke_is_an_async_callable_matching_invoke_fn_shape():
     """The orchestrator's `invoke: InvokeFn` contract expects
-    `async (agent, prompt: str) -> StageResult`. Lock the shape
-    here so a signature drift breaks CI, not a production request."""
+    `async (agent, prompt: str) -> StageResult`. `cost_sink` is an
+    optional kwarg (threaded in by service.py via closure); the
+    first two positional args must stay `agent` + `prompt` so the
+    orchestrator's call site doesn't break."""
     from gmail_search.agents.runtime import adk_invoke
 
     sig = inspect.signature(adk_invoke)
-    assert list(sig.parameters.keys()) == ["agent", "prompt"]
+    params = list(sig.parameters.keys())
+    assert params[:2] == ["agent", "prompt"]
+    assert "cost_sink" in params  # optional kwarg, but must exist
     assert asyncio.iscoroutinefunction(adk_invoke)
 
 
