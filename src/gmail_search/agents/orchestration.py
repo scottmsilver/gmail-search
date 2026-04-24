@@ -51,7 +51,23 @@ STAGE_FIELD_CHAR_CAP = 80_000
 def _clip_for_prompt(text: str | None, *, cap: int = STAGE_FIELD_CHAR_CAP) -> str:
     """Truncate a stage-to-stage field to `cap` chars with an explicit
     "[truncated: N chars dropped]" marker. None is passed through as
-    empty string so callers don't have to guard."""
+    empty string so callers don't have to guard.
+
+    NOTE on the head-bias (cap chars from the FRONT, tail dropped):
+    this is only safe because Writer + Critic both consume citations
+    from the explicit "Allowed citations" block we render in
+    `_format_allowed_citations` — that allow-list is built from
+    `_cite_refs_from_tool_calls` / `_artifact_ids_from_tool_calls`,
+    NOT by scraping `[ref:...]` / `[art:N]` tokens out of the
+    evidence/analysis text we clip here. So a `[ref:...]` that
+    happens to live in the truncated tail of evidence is still in the
+    allow-list and the Writer can still cite it.
+    If anyone ever rips out the allow-list mechanism and goes back to
+    "Writer scrapes citations from the evidence text directly", this
+    head-only truncation will silently drop tail citations and the
+    Writer will produce uncited claims (or worse, invent ids). Keep
+    those two pieces in lockstep — either both or neither.
+    """
     if not text:
         return ""
     if len(text) <= cap:
@@ -232,7 +248,20 @@ class Orchestrator:
         for attempt in range(MAX_CRITIC_ROUNDS):
             prompt = _critic_input(draft, evidence, analysis_text, cite_refs, artifact_ids)
             verdict_result = await self.invoke(self.critic, prompt)
-            verdict = _parse_json_or_empty(verdict_result.text)
+            verdict, parse_failed = _parse_json_or_empty_with_status(verdict_result.text)
+            # Surface parse failures explicitly so a consistently-broken
+            # Critic doesn't silently burn the full revision budget on
+            # garbage. The orchestrator still treats the round as
+            # rejected (accepted=False), but the UI now sees WHY.
+            if parse_failed:
+                self._emit(
+                    "critic",
+                    "critique_parse_error",
+                    {
+                        "round": attempt + 1,
+                        "raw": verdict_result.text,
+                    },
+                )
             accepted = bool(verdict.get("accepted"))
             self._emit(
                 "critic",
@@ -407,8 +436,19 @@ def _parse_json_or_empty(text: str) -> dict:
     """Agents are instructed to emit pure JSON, but LLMs occasionally
     wrap in code fences or prose. Try the cleanest-looking slice
     first, fall back to {}."""
+    parsed, _failed = _parse_json_or_empty_with_status(text)
+    return parsed
+
+
+def _parse_json_or_empty_with_status(text: str) -> tuple[dict, bool]:
+    """Same as `_parse_json_or_empty` but ALSO returns whether parsing
+    failed. Empty input is treated as "nothing to parse" (failed=False)
+    so we don't spam parse-error events when an agent legitimately
+    returned no text. Non-empty input that we couldn't coerce into a
+    dict comes back as ({}, True) — caller surfaces a parse-error
+    event."""
     if not text:
-        return {}
+        return {}, False
     s = text.strip()
     if s.startswith("```"):
         # Strip code fence.
@@ -416,17 +456,19 @@ def _parse_json_or_empty(text: str) -> dict:
         if s.endswith("```"):
             s = s.rsplit("```", 1)[0]
     try:
-        return json.loads(s)
+        result = json.loads(s)
+        return (result, False) if isinstance(result, dict) else ({}, True)
     except json.JSONDecodeError:
         # Last resort: find the first { and last }.
         start = s.find("{")
         end = s.rfind("}")
         if start >= 0 and end > start:
             try:
-                return json.loads(s[start : end + 1])
+                result = json.loads(s[start : end + 1])
+                return (result, False) if isinstance(result, dict) else ({}, True)
             except json.JSONDecodeError:
                 pass
-        return {}
+        return {}, True
 
 
 def _evidence_to_records(evidence_text: str) -> list[dict] | None:

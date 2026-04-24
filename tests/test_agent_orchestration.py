@@ -345,6 +345,56 @@ def test_format_allowed_citations_shows_none_markers():
 
 
 @pytest.mark.asyncio
+async def test_unparseable_critic_emits_critique_parse_error(db_backend):
+    """When the Critic's verdict can't be coerced into JSON we emit a
+    `critique_parse_error` event carrying the raw text alongside the
+    normal `critique` event (which still fires with accepted=False so
+    the existing reject-loop logic is unchanged). Without this, a
+    chronically-broken Critic silently burns the whole revision
+    budget on garbage and the UI has no way to surface why."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    sid = new_session_id()
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+
+    # Critic returns prose, not JSON. Both rounds: same garbage so the
+    # revision loop trips its cap and we observe TWO parse_error events.
+    invoke = _invoke_with_scripted_outputs(
+        {
+            "planner": [json.dumps({"analysis": []})],
+            "retriever": ["found: 1\n- [ref:cafebabe] x"],
+            "writer": ["draft-1", "draft-2"],
+            "critic": [
+                "I think the draft is mostly fine but could be tighter.",
+                "Honestly looks okay.",
+            ],
+        }
+    )
+    orch = _make_orchestrator(conn, sid=sid, invoke=invoke)
+    final = await orch.run("q")
+    assert final in {"draft-1", "draft-2"}
+
+    events = list(fetch_events_after(conn, sid))
+    parse_errors = [e for e in events if e.kind == "critique_parse_error"]
+    # One per round the Critic returned junk.
+    assert len(parse_errors) == MAX_CRITIC_ROUNDS, (
+        f"expected {MAX_CRITIC_ROUNDS} parse-error events, got {len(parse_errors)}: "
+        f"{[(e.kind, e.payload) for e in events]}"
+    )
+    # Raw text is preserved so the UI can show the operator what the
+    # Critic actually said.
+    assert parse_errors[0].payload["raw"].startswith("I think the draft")
+    assert parse_errors[0].agent_name == "critic"
+    # The normal `critique` events still fire (with accepted=False);
+    # the parse-error event is additive, not a replacement.
+    critiques = [e for e in events if e.kind == "critique"]
+    assert len(critiques) == MAX_CRITIC_ROUNDS
+    assert all(c.payload["accepted"] is False for c in critiques)
+    conn.close()
+
+
+@pytest.mark.asyncio
 async def test_handles_malformed_planner_json_gracefully(db_backend):
     """Planner occasionally wraps in a code fence or adds prose.
     Orchestrator should parse what it can, skip Analyst (empty
