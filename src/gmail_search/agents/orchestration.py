@@ -96,10 +96,11 @@ class Orchestrator:
         event before we re-raise."""
         try:
             plan = await self._run_planner(question)
-            evidence = await self._run_retriever(question, plan)
+            evidence, cite_refs = await self._run_retriever(question, plan)
             analysis = await self._run_analyst_if_needed(question, plan, evidence)
-            draft = await self._run_writer(question, plan, evidence, analysis)
-            draft = await self._run_critic_loop(draft, evidence, analysis)
+            artifact_ids = list(analysis["artifact_ids"]) if analysis else []
+            draft = await self._run_writer(question, plan, evidence, analysis, cite_refs, artifact_ids)
+            draft = await self._run_critic_loop(draft, evidence, analysis, cite_refs, artifact_ids)
             self._emit("root", "final", {"text": draft})
             finalize_session(self.conn, self.session_id, status="done", final_answer=draft)
             return draft
@@ -120,22 +121,36 @@ class Orchestrator:
         self._emit("planner", "plan", {"plan": plan, "raw": result.text})
         return plan
 
-    async def _run_retriever(self, question: str, plan: dict) -> str:
+    async def _run_retriever(self, question: str, plan: dict) -> tuple[str, list[str]]:
         """Retriever returns a short summary of what it found +
-        cite_refs. We pass it downstream as free text, not
-        structured, because the Writer+Critic prompts were written
-        to consume that shape."""
+        cite_refs. We pass it downstream as free text (the
+        summary) AND as a structured list of cite_refs extracted
+        from the retrieval tool results — the Writer and Critic both
+        need the explicit list so they can ground citations instead
+        of inventing them.
+        """
         prompt = _retriever_input(question, plan)
         result = await self.invoke(self.retriever, prompt)
         for tc in result.tool_calls:
             self._emit("retriever", "tool_call", tc)
-        self._emit("retriever", "evidence", {"summary": result.text})
-        return result.text
+        cite_refs = _cite_refs_from_tool_calls(result.tool_calls)
+        self._emit(
+            "retriever",
+            "evidence",
+            {"summary": result.text, "cite_refs": cite_refs},
+        )
+        return result.text, cite_refs
 
-    async def _run_analyst_if_needed(self, question: str, plan: dict, evidence: str) -> str | None:
-        """Skip the Analyst entirely when the plan has zero analysis
-        steps — factual questions don't need code execution, and the
-        skip makes the turn faster + cheaper + less error-prone."""
+    async def _run_analyst_if_needed(self, question: str, plan: dict, evidence: str) -> dict | None:
+        """Run the Analyst when the plan has analysis steps. Skip
+        entirely on empty plans (factual questions don't need code).
+
+        Returns a dict carrying the analyst's summary text AND the
+        list of `artifact_ids` the run_code tool actually persisted
+        (empty if the analyst decided code wasn't needed). The
+        Writer + Critic both consume artifact_ids from this dict so
+        they can't invent `[art:N]` citations.
+        """
         steps = plan.get("analysis") or []
         if not steps:
             self._emit("analyst", "skipped", {"reason": "no analysis steps in plan"})
@@ -144,28 +159,56 @@ class Orchestrator:
         analyst = self.analyst_factory(evidence_records)
         prompt = _analyst_input(question, plan, evidence)
         result = await self.invoke(analyst, prompt)
+        artifact_ids = _artifact_ids_from_tool_calls(result.tool_calls)
         for tc in result.tool_calls:
             self._emit("analyst", "code_run", tc)
-        self._emit("analyst", "analysis", {"summary": result.text})
-        return result.text
+        self._emit(
+            "analyst",
+            "analysis",
+            {
+                "summary": result.text,
+                "artifact_ids": artifact_ids,
+                "called_run_code": bool(result.tool_calls),
+            },
+        )
+        return {"summary": result.text, "artifact_ids": artifact_ids}
 
-    async def _run_writer(self, question: str, plan: dict, evidence: str, analysis: str | None) -> str:
+    async def _run_writer(
+        self,
+        question: str,
+        plan: dict,
+        evidence: str,
+        analysis: dict | None,
+        cite_refs: list[str],
+        artifact_ids: list[int],
+    ) -> str:
         """Writer composes the draft. Feed it question + all upstream
-        outputs — it's the agent that has to ground citations, so it
-        needs everything."""
-        prompt = _writer_input(question, plan, evidence, analysis)
+        outputs AND the explicit allowed-citation lists so it can't
+        invent [ref:X] or [art:N] tokens that don't exist.
+        """
+        analysis_text = analysis["summary"] if analysis else None
+        prompt = _writer_input(question, plan, evidence, analysis_text, cite_refs, artifact_ids)
         result = await self.invoke(self.writer, prompt)
         self._emit("writer", "draft", {"text": result.text})
         return result.text
 
-    async def _run_critic_loop(self, draft: str, evidence: str, analysis: str | None) -> str:
+    async def _run_critic_loop(
+        self,
+        draft: str,
+        evidence: str,
+        analysis: dict | None,
+        cite_refs: list[str],
+        artifact_ids: list[int],
+    ) -> str:
         """Critic → Writer revision loop, capped at MAX_CRITIC_ROUNDS.
         Each pass: critic emits a JSON verdict; if rejected, writer
         produces one revision; next round critic reviews again. We
         stop on accept OR when the cap trips — whichever comes
-        first."""
+        first.
+        """
+        analysis_text = analysis["summary"] if analysis else None
         for attempt in range(MAX_CRITIC_ROUNDS):
-            prompt = _critic_input(draft, evidence, analysis)
+            prompt = _critic_input(draft, evidence, analysis_text, cite_refs, artifact_ids)
             verdict_result = await self.invoke(self.critic, prompt)
             verdict = _parse_json_or_empty(verdict_result.text)
             accepted = bool(verdict.get("accepted"))
@@ -221,11 +264,37 @@ def _analyst_input(question: str, plan: dict, evidence: str) -> str:
     )
 
 
-def _writer_input(question: str, plan: dict, evidence: str, analysis: str | None) -> str:
+def _format_allowed_citations(cite_refs: list[str], artifact_ids: list[int]) -> str:
+    """Render the grounded-citation allow-list both Writer + Critic
+    consume. If a list is empty we still emit the header so the
+    agent knows that class of citation is off-limits rather than
+    missing."""
+    ref_line = ", ".join(f"[ref:{r}]" for r in cite_refs) if cite_refs else "(none)"
+    art_line = ", ".join(f"[art:{a}]" for a in artifact_ids) if artifact_ids else "(none)"
+    return (
+        "Allowed citations (these are the ONLY values you may use):\n"
+        f"  threads: {ref_line}\n"
+        f"  artifacts: {art_line}"
+    )
+
+
+def _writer_input(
+    question: str,
+    plan: dict,
+    evidence: str,
+    analysis: str | None,
+    cite_refs: list[str],
+    artifact_ids: list[int],
+) -> str:
     analysis_section = f"\n\nAnalyst output:\n{analysis}" if analysis else ""
+    allowed = _format_allowed_citations(cite_refs, artifact_ids)
     return (
         f"Question: {question}\n\nEvidence:\n{evidence}{analysis_section}\n\n"
-        "Compose the final markdown answer. Cite every factual claim."
+        f"{allowed}\n\n"
+        "Compose the final markdown answer. Cite every factual claim you make, "
+        "using ONLY the citations from the allowed list above. If a claim has no "
+        "matching citation available, state the claim without one rather than "
+        "inventing a ref/artifact id."
     )
 
 
@@ -238,12 +307,68 @@ def _writer_revision_input(draft: str, verdict: dict) -> str:
     )
 
 
-def _critic_input(draft: str, evidence: str, analysis: str | None) -> str:
+def _critic_input(
+    draft: str,
+    evidence: str,
+    analysis: str | None,
+    cite_refs: list[str],
+    artifact_ids: list[int],
+) -> str:
     analysis_section = f"\n\nAnalyst output:\n{analysis}" if analysis else ""
+    allowed = _format_allowed_citations(cite_refs, artifact_ids)
     return (
         f"Draft answer:\n{draft}\n\nRetrieved evidence:\n{evidence}{analysis_section}\n\n"
-        "Review and emit your JSON verdict."
+        f"{allowed}\n\n"
+        "Review and emit your JSON verdict. ANY [ref:*] or [art:*] in the draft "
+        "that is NOT in the allowed list above is an `invented_citation` violation. "
+        "Cross-check every citation token in the draft against the allowed list."
     )
+
+
+# ── Tool-call inspectors ───────────────────────────────────────────
+
+
+def _has_run_code_invocation(tool_calls: list[dict]) -> bool:
+    """True if the Analyst's tool_calls contain at least one
+    invocation of `run_code`. Used for telemetry only — we do NOT
+    force the Analyst to call the tool; prose-only is a legitimate
+    outcome when the evidence already answers the question."""
+    return any(tc.get("name") == "run_code" for tc in tool_calls)
+
+
+def _artifact_ids_from_tool_calls(tool_calls: list[dict]) -> list[int]:
+    """Walk Analyst tool_results (both function_call and
+    function_response shapes ADK produces) and collect the artifact
+    ids that `run_code` persisted. These are the ONLY ids the Writer
+    may cite as `[art:N]`."""
+    ids: list[int] = []
+    for tc in tool_calls:
+        resp = tc.get("response")
+        if not isinstance(resp, dict):
+            continue
+        for art in resp.get("artifacts") or []:
+            if isinstance(art, dict) and isinstance(art.get("id"), int):
+                ids.append(int(art["id"]))
+    return ids
+
+
+def _cite_refs_from_tool_calls(tool_calls: list[dict]) -> list[str]:
+    """Walk Retriever tool_results and collect the `cite_ref` tokens
+    returned by search_emails / query_emails. These are the ONLY
+    tokens the Writer may cite as `[ref:CITE_REF]`."""
+    refs: list[str] = []
+    seen: set[str] = set()
+    for tc in tool_calls:
+        resp = tc.get("response")
+        if not isinstance(resp, dict):
+            continue
+        # search_emails + query_emails both return {results: [...]}
+        for row in resp.get("results") or []:
+            cr = row.get("cite_ref") if isinstance(row, dict) else None
+            if isinstance(cr, str) and cr not in seen:
+                seen.add(cr)
+                refs.append(cr)
+    return refs
 
 
 # ── Helpers ─────────────────────────────────────────────────────

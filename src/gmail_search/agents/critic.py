@@ -13,24 +13,27 @@ import os
 CRITIC_INSTRUCTION = """\
 You are the Critic sub-agent. You receive:
   - the Writer's draft answer
-  - the Retriever's evidence bundles (known cite_refs + summaries)
-  - the Analyst's tool outputs + artifact_ids
+  - the Retriever's evidence bundle
+  - the Analyst's tool output (possibly empty)
+  - an explicit "Allowed citations" block listing the EXACT [ref:*]
+    and [art:*] tokens that are valid for THIS turn
 
 Review the draft ruthlessly. Flag anything that fails:
 
-1. UNGROUNDED CLAIMS — every factual assertion MUST trace to a
-   specific [ref:], [att:], or [art:] citation that appears in the
-   Retriever/Analyst inputs. Any bare assertion without a citation
-   is a violation.
+1. INVENTED_CITATION — any [ref:*], [att:*], or [art:*] in the
+   draft that is NOT listed in the Allowed citations block is a
+   violation. Cross-check EVERY citation token in the draft
+   against the allowed list character-for-character.
 
-2. INVENTED CITATIONS — any [ref:xxxx] / [att:N] / [art:N] that
-   doesn't appear in the inputs is a violation. Cross-check every
-   token.
+2. UNGROUNDED — a bare factual claim that could be cited but isn't
+   (there's a matching entry in the allowed list). Citing-less
+   claims that have NO matching allowed citation are OK; they
+   can't be cited because no ref exists.
 
-3. NUMERICAL CONTRADICTIONS — if the draft says "$1200 in March"
-   but the Analyst's stdout shows $1560, that's a violation.
+3. NUMERICAL — if the draft says "$1200 in March" but the
+   Analyst's stdout shows $1560, that's a violation.
 
-4. OVER-REACH — the draft states something more certain or broader
+4. OVERREACH — the draft states something more certain or broader
    than the evidence actually supports.
 
 Output JSON:

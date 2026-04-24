@@ -254,6 +254,76 @@ async def test_planner_output_is_parsed_and_persisted(db_backend):
     conn.close()
 
 
+def test_cite_refs_extractor_pulls_from_search_results():
+    """`_cite_refs_from_tool_calls` must surface the cite_ref values
+    from search/query tool results so the Writer/Critic grounding
+    lists are populated. Dedupe by string so the same thread
+    returned by two tool calls doesn't inflate the list."""
+    from gmail_search.agents.orchestration import _cite_refs_from_tool_calls
+
+    tool_calls = [
+        {
+            "name": "search_emails",
+            "response": {
+                "results": [
+                    {"thread_id": "aaabbbcc", "cite_ref": "aaabbbcc"},
+                    {"thread_id": "11112222", "cite_ref": "11112222"},
+                ]
+            },
+        },
+        {
+            "name": "query_emails",
+            "response": {
+                "results": [
+                    # dupe of the first search result
+                    {"thread_id": "aaabbbcc", "cite_ref": "aaabbbcc"},
+                    {"thread_id": "33334444", "cite_ref": "33334444"},
+                ]
+            },
+        },
+    ]
+    refs = _cite_refs_from_tool_calls(tool_calls)
+    assert refs == ["aaabbbcc", "11112222", "33334444"]
+
+
+def test_artifact_ids_extractor_pulls_only_integer_ids():
+    """`_artifact_ids_from_tool_calls` collects artifact ids
+    `run_code` returned via its tool_result. Non-integer entries
+    are skipped so a garbled tool response doesn't poison the
+    allowed list."""
+    from gmail_search.agents.orchestration import _artifact_ids_from_tool_calls
+
+    tool_calls = [
+        {
+            "name": "run_code",
+            "response": {
+                "artifacts": [
+                    {"id": 42, "name": "a.png"},
+                    {"id": 99, "name": "b.csv"},
+                    {"id": "not-an-int", "name": "c"},
+                    {"name": "no-id"},
+                ]
+            },
+        }
+    ]
+    assert _artifact_ids_from_tool_calls(tool_calls) == [42, 99]
+
+
+def test_format_allowed_citations_shows_none_markers():
+    """Empty lists must still render so the agent sees (none) and
+    knows that citation category is explicitly off-limits, rather
+    than interpreting a missing header as 'not constrained'."""
+    from gmail_search.agents.orchestration import _format_allowed_citations
+
+    out = _format_allowed_citations([], [])
+    assert "threads: (none)" in out
+    assert "artifacts: (none)" in out
+
+    out = _format_allowed_citations(["aaabbbcc"], [42])
+    assert "[ref:aaabbbcc]" in out
+    assert "[art:42]" in out
+
+
 @pytest.mark.asyncio
 async def test_handles_malformed_planner_json_gracefully(db_backend):
     """Planner occasionally wraps in a code fence or adds prose.
