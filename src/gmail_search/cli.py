@@ -337,6 +337,49 @@ def reindex(ctx):
     click.echo("Index rebuilt (ScaNN + FTS + thread summary + contacts + spell + topics + aliases).")
 
 
+def _extract_pending_attachments(conn, att_config: dict) -> int:
+    """Run the extractor against every attachment still awaiting text —
+    in frontfill-first order so today's arrivals drain before the
+    multi-year backfill. Returns the number of rows updated.
+
+    Split out of the `update` command loop so it's unit-testable and so
+    the ordering guarantee (fresh < 24h first, then date DESC) lives
+    next to the query that enforces it (`get_pending_extraction_message_ids`).
+    """
+    from gmail_search.extract import dispatch
+    from gmail_search.store.queries import get_attachments_for_message, get_pending_extraction_message_ids
+
+    message_ids = get_pending_extraction_message_ids(conn)
+    extracted = 0
+    for message_id in message_ids:
+        for att in get_attachments_for_message(conn, message_id):
+            if att.extracted_text or att.image_path:
+                continue
+            if not att.raw_path or not Path(att.raw_path).exists():
+                continue
+            try:
+                result = dispatch(att.mime_type, Path(att.raw_path), att_config)
+            except Exception as e:
+                logger.warning(f"Failed to extract {att.filename}: {e}")
+                continue
+            if result is None:
+                continue
+            updates: dict = {}
+            if result.text:
+                updates["extracted_text"] = result.text
+            if result.images:
+                updates["image_path"] = str(result.images[0].parent if len(result.images) > 1 else result.images[0])
+            if updates:
+                set_clause = ", ".join(f"{k} = %s" for k in updates)
+                conn.execute(
+                    f"UPDATE attachments SET {set_clause} WHERE id = %s",
+                    (*updates.values(), att.id),
+                )
+                conn.commit()
+                extracted += 1
+    return extracted
+
+
 @main.command(help="Run full pipeline in rolling batches: download → extract → embed → reindex")
 @click.option("--max-messages", type=int, default=None, help="Max messages to download")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
@@ -366,13 +409,11 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
     import time as _time
 
     from gmail_search.embed.pipeline import run_embedding_pipeline
-    from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
     from gmail_search.locks import write_lock
     from gmail_search.pipeline import reindex as _reindex
     from gmail_search.store.db import JobProgress
-    from gmail_search.store.queries import get_attachments_for_message
 
     cfg = ctx.obj["config"]
     db_path = ctx.obj["db_path"]
@@ -449,51 +490,32 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
                 )
                 total_downloaded += dl_count
 
-                if dl_count == 0:
-                    click.echo("No new messages to download this cycle.")
-                    break
+                # Even when this cycle's download yielded zero new rows,
+                # the `watch` daemon runs in parallel and may have
+                # written fresh message+attachment rows straight to the
+                # DB between our cycles. Don't short-circuit extract/
+                # embed/reindex on dl_count==0 — the pending queues
+                # might be non-empty from that out-of-band ingest.
+                # (We still break out of the inner batching loop at the
+                # end of this iteration so we don't spin forever.)
+                drain_only = dl_count == 0
+                if drain_only:
+                    click.echo(
+                        "No new messages to download this cycle — draining any pending "
+                        "extract/embed/reindex from out-of-band (watch daemon) ingest."
+                    )
+                else:
+                    click.echo(f"Downloaded {dl_count} messages.")
 
-                click.echo(f"Downloaded {dl_count} messages.")
+                # Extract pending attachments. Ordered so fresh arrivals
+                # from the `watch` daemon (< 24h old) are drained before
+                # the multi-year backfill — otherwise today's PDFs sit
+                # unextracted for days while older rows grind through.
 
-                # Extract new attachments
                 progress.update("extract", start_count + total_downloaded, progress_total, f"+{dl_count} downloaded")
                 click.echo("Extracting attachments...")
                 conn = get_connection(db_path)
-                rows = conn.execute(
-                    "SELECT DISTINCT m.id FROM messages m "
-                    "JOIN attachments a ON a.message_id = m.id "
-                    "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
-                ).fetchall()
-                extracted = 0
-                for row in rows:
-                    attachments = get_attachments_for_message(conn, row["id"])
-                    for att in attachments:
-                        if att.extracted_text or att.image_path:
-                            continue
-                        if not att.raw_path or not Path(att.raw_path).exists():
-                            continue
-                        try:
-                            result = dispatch(att.mime_type, Path(att.raw_path), att_config)
-                        except Exception as e:
-                            logger.warning(f"Failed to extract {att.filename}: {e}")
-                            continue
-                        if result is None:
-                            continue
-                        updates = {}
-                        if result.text:
-                            updates["extracted_text"] = result.text
-                        if result.images:
-                            updates["image_path"] = str(
-                                result.images[0].parent if len(result.images) > 1 else result.images[0]
-                            )
-                        if updates:
-                            set_clause = ", ".join(f"{k} = %s" for k in updates)
-                            conn.execute(
-                                f"UPDATE attachments SET {set_clause} WHERE id = %s",
-                                (*updates.values(), att.id),
-                            )
-                            conn.commit()
-                            extracted += 1
+                extracted = _extract_pending_attachments(conn, att_config)
                 conn.close()
                 total_extracted += extracted
                 click.echo(f"Extracted {extracted} attachments.")
@@ -552,6 +574,13 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
 
                 if max_msg and msg_count >= max_msg:
                     click.echo("Reached max message limit.")
+                    break
+
+                # Single-pass drain when nothing new arrived from our
+                # download. We already ran extract/embed/reindex against
+                # whatever `watch` had written; no reason to spin
+                # through another iteration of the inner loop.
+                if drain_only:
                     break
 
         progress.finish(
