@@ -5,14 +5,20 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
+import { ATT_PREFIX, linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
 
+import { AttachmentChip, type AttachmentHint } from "./AttachmentChip";
 import { CitationChip, type ThreadHint } from "./CitationChip";
 import { useThreadDrawer } from "./ThreadDrawerContext";
 
 type Props = {
   text: string;
   hints: ThreadHint[];
+  // Optional attachment hints — tool results that list attachments
+  // pre-populate this so `[att:<id>]` citations render a fully-labeled
+  // chip without an extra fetch. Missing hint → chip falls back to the
+  // lazy /api/attachment/<id>/meta lookup.
+  attHints?: AttachmentHint[];
   // "prose" wraps the output in a Tailwind prose container capped at
   // max-w-4xl — right for chat messages. "inline" drops the wrapper
   // so the parent controls width (used by search result rows where
@@ -24,9 +30,10 @@ type Props = {
 // (context-based hints) and BattleSide (prop-based hints from its own
 // tool results) delegate to this so the rendering logic lives in one
 // place.
-export const CitableMarkdown = ({ text, hints, variant = "prose" }: Props) => {
+export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Props) => {
   const { setOpenThreadId } = useThreadDrawer();
   const knownIds = hints.map((h) => h.thread_id);
+  const attList = attHints ?? [];
 
   const components: Components = {
     a: ({ href, children, ...rest }) => {
@@ -38,6 +45,15 @@ export const CitableMarkdown = ({ text, hints, variant = "prose" }: Props) => {
             onOpen={setOpenThreadId}
           />
         );
+      }
+      if (href?.startsWith(ATT_PREFIX)) {
+        const idStr = href.slice(ATT_PREFIX.length);
+        const id = parseInt(idStr, 10);
+        if (Number.isFinite(id)) {
+          return (
+            <AttachmentChip attachmentId={id} hints={attList} onOpenThread={setOpenThreadId} />
+          );
+        }
       }
       // In "inline" (summary) mode, suppress mailto autolinks — the
       // LLM frequently mentions the sender's email in its output, and
@@ -88,7 +104,7 @@ export const CitableMarkdown = ({ text, hints, variant = "prose" }: Props) => {
 // only. ReactMarkdown's default urlTransform strips most XSS schemes, but we
 // were overriding it with `(url) => url` to keep ref:// links from being
 // mangled — that opened javascript:/data:/vbscript: as side effects.
-const SAFE_SCHEMES = /^(?:https?|mailto|ref):/i;
+const SAFE_SCHEMES = /^(?:https?|mailto|ref|att):/i;
 const safeUrl = (url: string): string => {
   if (!url) return "";
   // Relative URLs (no scheme) are fine.

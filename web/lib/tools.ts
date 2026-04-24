@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   getAttachmentBytesBackend,
+  getAttachmentRenderedPagesBackend,
   getAttachmentTextBackend,
   getMessageBackend,
   getThreadBackend,
@@ -14,12 +15,14 @@ import {
 
 const MAX_INLINE_BYTES = 15 * 1024 * 1024;
 // Aggregate cap across an entire batch of binaries. Without this, the
-// model can call get_attachment_pdf with 10 attachment_ids × 15 MB each
-// and we ship 150 MB of base64 to Gemini in one request — which fails
-// noisily if it doesn't OOM Node first.
+// model can call get_attachment with 10 inline_pdf requests × 15 MB
+// each and we ship 150 MB of base64 to Gemini in one request — which
+// fails noisily if it doesn't OOM Node first.
+// NOTE: counted in BASE64 CHARS below (not decoded bytes), so this is
+// roughly a 25 MB wire-format budget. Keep in sync with the Python
+// `_INLINE_BYTES_CAP` in src/gmail_search/server.py (its unit is
+// decoded bytes so effective thresholds differ by ~1.33×).
 const MAX_BATCH_INLINE_BYTES = 25 * 1024 * 1024;
-// Binary tools cap their batch tighter than text tools.
-const MAX_BINARY_BATCH = 4;
 // Enrich the first ENRICH_TOP_N hits with the matching message's body
 // text up to ENRICHED_BODY_CHARS. Tail results keep their summary +
 // short snippet. Gemini's 1M-token window means we can afford
@@ -118,55 +121,6 @@ const runBatch = async <I, O extends Record<string, unknown>>(
     const err = s.reason instanceof Error ? s.reason.message : String(s.reason);
     console.error(`[tool:${name}] item ${idx} failed:`, s.reason);
     return { ...key, error: err };
-  });
-  return { results };
-};
-
-// Run a batch of binary attachment fetches with both per-item and
-// aggregate-byte caps. Anything past the aggregate cap is returned as
-// an error result so the model knows to retry with fewer items.
-const runBatchedBinary = async (
-  name: string,
-  attachmentIds: number[],
-  mimeOk: (att: Awaited<ReturnType<typeof getAttachmentBytesBackend>>) => boolean,
-  expectedMime: string,
-): Promise<{ results: Array<Record<string, unknown>> }> => {
-  const settled = await Promise.allSettled(attachmentIds.map(getAttachmentBytesBackend));
-  let bytesUsed = 0;
-  const results: Array<Record<string, unknown>> = settled.map((s, idx) => {
-    const id = attachmentIds[idx];
-    if (s.status === "rejected") {
-      const err = s.reason instanceof Error ? s.reason.message : String(s.reason);
-      console.error(`[tool:${name}] item ${idx} failed:`, s.reason);
-      return { attachment_id: id, error: err };
-    }
-    const att = s.value;
-    if (!mimeOk(att)) {
-      return {
-        attachment_id: id,
-        error: `Attachment is ${att.mimeType}, not ${expectedMime}.`,
-      };
-    }
-    if (att.sizeBytes > MAX_INLINE_BYTES) {
-      return {
-        attachment_id: id,
-        error: `Attachment is ${(att.sizeBytes / 1024 / 1024).toFixed(1)}MB — exceeds per-item cap (${(MAX_INLINE_BYTES / 1024 / 1024).toFixed(0)}MB).`,
-      };
-    }
-    if (bytesUsed + att.sizeBytes > MAX_BATCH_INLINE_BYTES) {
-      return {
-        attachment_id: id,
-        error: `Skipped to stay under ${(MAX_BATCH_INLINE_BYTES / 1024 / 1024).toFixed(0)}MB batch cap. Call again with fewer items.`,
-      };
-    }
-    bytesUsed += att.sizeBytes;
-    return {
-      attachment_id: id,
-      filename: att.filename,
-      mimeType: att.mimeType,
-      sizeBytes: att.sizeBytes,
-      base64: att.base64,
-    };
   });
   return { results };
 };
@@ -505,111 +459,231 @@ Results come back as {columns: string[], rows: unknown[][], row_count, truncated
       ),
   }),
 
-  get_attachment_text: tool({
+  // Single attachment executor. The model reads the manifest on each
+  // attachment row (text_chars, can_inline_pdf, can_inline_image,
+  // can_render_pages, suggested_as) from get_thread / get_message /
+  // query_emails results and tells us what representation it wants for
+  // each one. Server is a dumb executor — no "auto" mode.
+  get_attachment: dynamicTool({
     description:
-      "Return text already extracted from one or more attachments (PDFs, docx, csv, calendar invites, etc.). BATCH: pass one OR many `attachment_ids` — prefer ONE call with all the attachments you want over multiple sequential calls. Cheap — use first when you only need the words.",
+      "Fetch one or more attachments in the representation the model picks. Input is a batched array of `{attachment_id, as, pages?}` requests. Choices:\n" +
+      "  - \"text\": already-extracted text (PDF/docx/csv/txt/calendar). Cheapest. Use when `text_chars` on the manifest is non-trivial (>= a few hundred).\n" +
+      "  - \"inline_pdf\": raw PDF bytes inlined. Use when `can_inline_pdf` is true AND layout/scans matter or text is empty. Reads natively; no OCR step needed by the model.\n" +
+      "  - \"inline_image\": raw image bytes inlined. Use when `can_inline_image` is true. Always pick this for image/* attachments when visual content matters.\n" +
+      "  - \"rendered_pages\": server rasterizes PDF pages to PNG and inlines them as images. Fallback for PDFs where `inline_pdf` fails or when you want SPECIFIC pages (pass `pages: [1,2,3]`). Useful for scans.\n" +
+      "BATCH: send every attachment you need in one call; per-item mode lets you mix representations in a single request (e.g. one PDF as text, another as inline_pdf). Max 6 requests per call.",
+    // Discriminated on `as` so each representation gets a proper schema
+    // (only `rendered_pages` carries `pages`). Without this the model
+    // could pass `{as: "text", pages: [1,2,3]}` and we'd silently
+    // ignore it — bug-hiding, better to reject at the schema level.
     inputSchema: z.object({
-      attachment_ids: z
-        .array(z.number().int())
+      requests: z
+        .array(
+          z.discriminatedUnion("as", [
+            z.object({
+              attachment_id: z.number().int(),
+              as: z.literal("text"),
+            }),
+            z.object({
+              attachment_id: z.number().int(),
+              as: z.literal("inline_pdf"),
+            }),
+            z.object({
+              attachment_id: z.number().int(),
+              as: z.literal("inline_image"),
+            }),
+            z.object({
+              attachment_id: z.number().int(),
+              as: z.literal("rendered_pages"),
+              pages: z
+                .array(z.number().int().min(1))
+                .optional()
+                .describe("1-based page numbers. Omit for first N pages."),
+            }),
+          ]),
+        )
         .min(1)
-        .max(MAX_BATCH)
-        .describe("Attachment IDs from get_thread."),
+        .max(6)
+        .describe("One directive per attachment."),
     }),
-    execute: async ({ attachment_ids }) =>
-      safely("get_attachment_text", () =>
-        runBatch(
-          "get_attachment_text",
-          attachment_ids,
-          (id) => ({ attachment_id: id }),
-          async (id) => {
-            const att = await getAttachmentTextBackend(id);
-            if (!att.extracted_text || att.extracted_text.length < 20) {
+    execute: async (input) =>
+      safely("get_attachment", async () => {
+        const { requests } = input as {
+          requests: Array<
+            | { attachment_id: number; as: "text" }
+            | { attachment_id: number; as: "inline_pdf" }
+            | { attachment_id: number; as: "inline_image" }
+            | { attachment_id: number; as: "rendered_pages"; pages?: number[] }
+          >;
+        };
+        // Byte accounting is in base64 CHARACTERS because that's what we
+        // actually ship to the model. Decoded-byte counting undercounts
+        // by 33% (base64 expands 4/3). MAX_BATCH_INLINE_BYTES is thus a
+        // cap on aggregate base64 length — comparing `sizeBytes` (raw
+        // binary) against it undercounted; comparing `b64.length * 0.75`
+        // undercounted twice. Count `.base64.length` everywhere.
+        let bytesUsed = 0;
+        const results = await Promise.all(
+          requests.map(async (req) => {
+            try {
+              if (req.as === "text") {
+                const t = await getAttachmentTextBackend(req.attachment_id);
+                const text = sanitizeBodyExcerpt(t.extracted_text ?? "");
+                return {
+                  attachment_id: req.attachment_id,
+                  as: "text" as const,
+                  filename: t.filename,
+                  mime_type: t.mime_type,
+                  text,
+                  text_chars: text.length,
+                  quality_note:
+                    text.length < 20
+                      ? `Only ${text.length} chars extracted. If more content is needed, retry this attachment as "inline_pdf" or "rendered_pages".`
+                      : undefined,
+                };
+              }
+              if (req.as === "inline_pdf" || req.as === "inline_image") {
+                const att = await getAttachmentBytesBackend(req.attachment_id);
+                const expectPdf = req.as === "inline_pdf";
+                const mimeOk = expectPdf
+                  ? att.mimeType === "application/pdf"
+                  : att.mimeType.startsWith("image/");
+                if (!mimeOk) {
+                  return {
+                    attachment_id: req.attachment_id,
+                    as: req.as,
+                    error: `mime mismatch: ${att.mimeType}, expected ${expectPdf ? "application/pdf" : "image/*"}`,
+                  };
+                }
+                const b64Bytes = att.base64.length;
+                if (b64Bytes > MAX_INLINE_BYTES) {
+                  return {
+                    attachment_id: req.attachment_id,
+                    as: req.as,
+                    error: `Too big to inline (~${(b64Bytes / 1024 / 1024).toFixed(1)}MB base64 > ${MAX_INLINE_BYTES / 1024 / 1024}MB). Retry as "rendered_pages" or "text".`,
+                  };
+                }
+                if (bytesUsed + b64Bytes > MAX_BATCH_INLINE_BYTES) {
+                  return {
+                    attachment_id: req.attachment_id,
+                    as: req.as,
+                    error: `Batch byte cap hit — call again with fewer inline items.`,
+                  };
+                }
+                bytesUsed += b64Bytes;
+                return {
+                  attachment_id: req.attachment_id,
+                  as: req.as,
+                  filename: att.filename,
+                  mime_type: att.mimeType,
+                  size_bytes: att.sizeBytes,
+                  base64: att.base64,
+                };
+              }
+              if (req.as === "rendered_pages") {
+                const r = await getAttachmentRenderedPagesBackend(req.attachment_id, req.pages);
+                // Same cap as inline_* paths, counted in base64 chars.
+                const batchBytes = r.pages.reduce((n, p) => n + p.base64.length, 0);
+                if (bytesUsed + batchBytes > MAX_BATCH_INLINE_BYTES) {
+                  return {
+                    attachment_id: req.attachment_id,
+                    as: req.as,
+                    error: `Batch byte cap hit (${r.pages.length} pages would overflow). Retry with fewer pages.`,
+                  };
+                }
+                bytesUsed += batchBytes;
+                return {
+                  attachment_id: req.attachment_id,
+                  as: req.as,
+                  total_pages: r.total_pages,
+                  pages: r.pages, // [{page, base64, mime_type}]
+                };
+              }
+              return { attachment_id: (req as { attachment_id: number }).attachment_id, as: "unknown", error: `unknown as` };
+            } catch (e) {
               return {
-                ...att,
-                quality_note: `Attachment ${id} (${att.filename}) has ${att.extracted_text?.length ?? 0} chars of extracted text — likely an image, scan, or a format we can't extract. Try get_attachment_image or get_attachment_pdf, or tell the user this attachment isn't searchable.`,
+                attachment_id: req.attachment_id,
+                as: req.as,
+                error: e instanceof Error ? e.message : String(e),
               };
             }
-            return att;
-          },
-        ),
-      ),
-  }),
-
-  get_attachment_image: dynamicTool({
-    description:
-      "Inline one or more image attachments directly so you can see them. BATCH: pass `attachment_ids` array — prefer ONE call with all images you need to see over multiple sequential calls. Only use for image/* attachments and only when visual content matters. Limit ~4 per batch.",
-    inputSchema: z.object({
-      attachment_ids: z.array(z.number().int()).min(1).max(MAX_BINARY_BATCH),
-    }),
-    execute: async (input) =>
-      safely("get_attachment_image", async () => {
-        const { attachment_ids } = input as { attachment_ids: number[] };
-        return runBatchedBinary(
-          "get_attachment_image",
-          attachment_ids,
-          (att) => att.mimeType.startsWith("image/"),
-          "image/*",
+          }),
         );
+        return { results };
       }),
+    // Flatten the batched result into the interleaved content parts the
+    // model actually consumes: a text header for each item, then the
+    // binary where applicable. Keeps one result in one logical spot
+    // (no "all headers, then all bytes" confusion).
     toModelOutput: ({ output }) => {
       const o = output as { results?: Array<Record<string, unknown>> } | { error?: string };
       if (!o || typeof o !== "object" || "error" in o) {
         return { type: "json", value: { error: String((o as { error?: string })?.error ?? "unknown") } };
       }
       const results = (o as { results: Array<Record<string, unknown>> }).results;
-      const value: Array<{ type: "text"; text: string } | { type: "image-data"; data: string; mediaType: string }> = [];
-      for (const r of results) {
-        if (r.error || !r.base64) {
-          value.push({ type: "text", text: `Image attachment ${r.attachment_id} skipped: ${String(r.error ?? "no data")}` });
-          continue;
-        }
-        value.push({ type: "text", text: `Inlined image: ${String(r.filename)}` });
-        value.push({ type: "image-data", data: String(r.base64), mediaType: String(r.mimeType) });
-      }
-      return { type: "content", value };
-    },
-  }),
-
-  get_attachment_pdf: dynamicTool({
-    description:
-      "Inline one or more PDF attachments directly for layout-aware reading. BATCH: pass `attachment_ids` array — prefer ONE call with all PDFs you need to see over multiple sequential calls. Prefer get_attachment_text first; only escalate to PDF when layout matters. Limit ~4 per batch.",
-    inputSchema: z.object({
-      attachment_ids: z.array(z.number().int()).min(1).max(MAX_BINARY_BATCH),
-    }),
-    execute: async (input) =>
-      safely("get_attachment_pdf", async () => {
-        const { attachment_ids } = input as { attachment_ids: number[] };
-        return runBatchedBinary(
-          "get_attachment_pdf",
-          attachment_ids,
-          (att) => att.mimeType === "application/pdf",
-          "application/pdf",
-        );
-      }),
-    toModelOutput: ({ output }) => {
-      const o = output as { results?: Array<Record<string, unknown>> } | { error?: string };
-      if (!o || typeof o !== "object" || "error" in o) {
-        return { type: "json", value: { error: String((o as { error?: string })?.error ?? "unknown") } };
-      }
-      const results = (o as { results: Array<Record<string, unknown>> }).results;
-      const value: Array<
+      type Part =
         | { type: "text"; text: string }
-        | { type: "file-data"; data: string; mediaType: string; filename: string }
-      > = [];
+        | { type: "image-data"; data: string; mediaType: string }
+        | { type: "file-data"; data: string; mediaType: string; filename: string };
+      const parts: Part[] = [];
       for (const r of results) {
-        if (r.error || !r.base64) {
-          value.push({ type: "text", text: `PDF attachment ${r.attachment_id} skipped: ${String(r.error ?? "no data")}` });
+        const id = r.attachment_id;
+        const as = String(r.as ?? "");
+        if (r.error) {
+          parts.push({ type: "text", text: `attachment ${id} (${as}) error: ${String(r.error)}` });
           continue;
         }
-        value.push({ type: "text", text: `Inlined PDF: ${String(r.filename)}` });
-        value.push({
-          type: "file-data",
-          data: String(r.base64),
-          mediaType: String(r.mimeType),
-          filename: String(r.filename),
-        });
+        if (as === "text") {
+          const text = String(r.text ?? "");
+          const note = r.quality_note ? ` [${String(r.quality_note)}]` : "";
+          parts.push({
+            type: "text",
+            text: `--- attachment ${id} (${String(r.filename ?? "")}, text, ${r.text_chars} chars)${note} ---\n${text}`,
+          });
+          continue;
+        }
+        if (as === "inline_pdf") {
+          if (!r.base64) {
+            parts.push({ type: "text", text: `attachment ${id} (inline_pdf) no data` });
+            continue;
+          }
+          parts.push({ type: "text", text: `--- attachment ${id} (${String(r.filename ?? "")}, inline_pdf) ---` });
+          parts.push({
+            type: "file-data",
+            data: String(r.base64),
+            mediaType: String(r.mime_type ?? "application/pdf"),
+            filename: String(r.filename ?? `attachment-${id}.pdf`),
+          });
+          continue;
+        }
+        if (as === "inline_image") {
+          if (!r.base64) {
+            parts.push({ type: "text", text: `attachment ${id} (inline_image) no data` });
+            continue;
+          }
+          parts.push({ type: "text", text: `--- attachment ${id} (${String(r.filename ?? "")}, inline_image) ---` });
+          parts.push({
+            type: "image-data",
+            data: String(r.base64),
+            mediaType: String(r.mime_type ?? "image/png"),
+          });
+          continue;
+        }
+        if (as === "rendered_pages") {
+          const pages = (r.pages as Array<{ page: number; base64: string; mime_type: string }>) ?? [];
+          parts.push({
+            type: "text",
+            text: `--- attachment ${id} (rendered_pages, ${pages.length}/${r.total_pages} pages) ---`,
+          });
+          for (const p of pages) {
+            parts.push({ type: "text", text: `[page ${p.page}]` });
+            parts.push({ type: "image-data", data: p.base64, mediaType: p.mime_type });
+          }
+          continue;
+        }
+        parts.push({ type: "text", text: `attachment ${id} (${as}) unknown representation` });
       }
-      return { type: "content", value };
+      return { type: "content", value: parts };
     },
   }),
 });

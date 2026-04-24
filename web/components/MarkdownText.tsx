@@ -2,7 +2,7 @@
 
 import { useMessage } from "@assistant-ui/react";
 
-import { extractThreadHints } from "@/lib/extractThreadHints";
+import { extractCitationHints } from "@/lib/extractThreadHints";
 
 import { CitableMarkdown } from "./CitableMarkdown";
 
@@ -12,6 +12,6 @@ import { CitableMarkdown } from "./CitableMarkdown";
 // results live in a data-battle part, not message-level tool-calls.
 export const MarkdownText = ({ text }: { text: string }) => {
   const parts = useMessage((m) => m.content) as readonly { type: string; result?: unknown }[];
-  const hints = extractThreadHints(parts);
-  return <CitableMarkdown text={text} hints={hints} />;
+  const { threads, attachments } = extractCitationHints(parts);
+  return <CitableMarkdown text={text} hints={threads} attHints={attachments} />;
 };

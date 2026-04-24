@@ -150,11 +150,20 @@ export const getPriorityInboxBackend = async (args: {
   return (await res.json()) as PriorityInboxResponse;
 };
 
+// Manifest row carried on every attachment the API returns — the model
+// uses it to pick a representation without guessing. Keep the field
+// names in lockstep with `_attachment_manifest_dict` in
+// src/gmail_search/server.py.
 export type AttachmentMeta = {
   id: number;
   filename: string;
   mime_type: string;
   size_bytes: number;
+  text_chars: number;
+  can_inline_pdf: boolean;
+  can_inline_image: boolean;
+  can_render_pages: boolean;
+  suggested_as: "text" | "inline_pdf" | "inline_image" | "rendered_pages";
 };
 
 export type ThreadMessage = {
@@ -271,6 +280,58 @@ export const getAttachmentTextBackend = async (attachmentId: number): Promise<At
     throw new Error(`get_attachment_text backend failed: ${res.status}`);
   }
   return (await res.json()) as AttachmentText;
+};
+
+// Cheap metadata-only lookup used by the AttachmentChip in chat
+// citations — enough to render the chip and wire its click to the
+// thread drawer without fetching bytes or text.
+export type AttachmentMetaFull = {
+  attachment_id: number;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  message_id: string;
+  thread_id: string;
+};
+
+export const getAttachmentMetaBackend = async (attachmentId: number): Promise<AttachmentMetaFull> => {
+  const res = await fetch(`${pythonApiUrl()}/api/attachment/${attachmentId}/meta`);
+  if (!res.ok) {
+    throw new Error(`get_attachment_meta backend failed: ${res.status}`);
+  }
+  return (await res.json()) as AttachmentMetaFull;
+};
+
+// Rasterized PDF pages — used by `get_attachment({as: "rendered_pages"})`.
+export type RenderedPage = {
+  page: number;
+  base64: string;
+  mime_type: string;
+};
+
+export type RenderedPagesResponse = {
+  pages: RenderedPage[];
+  total_pages: number;
+  requested: number[];
+};
+
+export const getAttachmentRenderedPagesBackend = async (
+  attachmentId: number,
+  pages?: number[],
+  maxPages?: number,
+): Promise<RenderedPagesResponse> => {
+  const url = new URL(`${pythonApiUrl()}/api/attachment/${attachmentId}/render_pages`);
+  if (pages && pages.length > 0) {
+    url.searchParams.set("pages", pages.join(","));
+  }
+  if (maxPages !== undefined) {
+    url.searchParams.set("max_pages", String(maxPages));
+  }
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    throw new Error(`render_pages backend failed: ${res.status}`);
+  }
+  return (await res.json()) as RenderedPagesResponse;
 };
 
 export type AttachmentBytes = {

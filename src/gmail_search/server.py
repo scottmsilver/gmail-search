@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import _pg_dsn, get_connection
-from gmail_search.store.queries import get_attachments_for_message, get_message
+from gmail_search.store.queries import extract_attachment_on_demand, get_attachments_for_message, get_message
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,66 @@ def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
         thread_ids,
     ).fetchall()
     return {r["thread_id"]: (r["body_text"] or "")[:500] for r in rows}
+
+
+# Manifest inline-eligibility threshold in DECODED BYTES. The tool
+# layer's cap is in BASE64 CHARS (see MAX_INLINE_BYTES in
+# web/lib/tools.ts) which is ~1.33× bigger than the decoded payload,
+# so using the same numeric value here gives a slightly conservative
+# manifest (true "can_inline" only when comfortably under the wire
+# budget). Bump both together if the cap ever changes.
+_INLINE_BYTES_CAP = 15 * 1024 * 1024
+
+
+def _attachment_manifest_dict(a) -> dict:
+    """Build the attachment row the model (and the UI) sees.
+
+    Adds a capability manifest on top of the raw DB columns so the agent
+    can choose a representation without guessing: `text_chars` advertises
+    how much extracted text we already have, `can_inline_pdf` /
+    `can_inline_image` reflect the ship-bytes size budget, and
+    `suggested_as` is a server recommendation — still the model's choice.
+
+    Input is an `Attachment` dataclass (every current call site constructs
+    one via `get_attachments_for_message`); kept narrow on purpose so a
+    future dict-shaped row doesn't silently mis-render.
+    """
+    mime = getattr(a, "mime_type", "") or ""
+    size = int(getattr(a, "size_bytes", 0) or 0)
+    text = getattr(a, "extracted_text", "") or ""
+    text_chars = len(text)
+    is_pdf = mime == "application/pdf"
+    is_image = mime.startswith("image/")
+    fits_inline = size > 0 and size <= _INLINE_BYTES_CAP
+    can_inline_pdf = is_pdf and fits_inline
+    can_inline_image = is_image and fits_inline
+    can_render_pages = is_pdf  # page rasterization path works regardless of size
+    # Decision tree: if we already have "enough" text (500 chars ≈ a short
+    # paragraph is roughly the threshold where text is usually useful),
+    # prefer text. Otherwise prefer the binary path appropriate to the
+    # mime type. Fall back to "text" so the agent at least tries
+    # on-demand extraction.
+    if text_chars >= 500:
+        suggested = "text"
+    elif can_inline_image:
+        suggested = "inline_image"
+    elif can_inline_pdf:
+        suggested = "inline_pdf"
+    elif can_render_pages:
+        suggested = "rendered_pages"
+    else:
+        suggested = "text"
+    return {
+        "id": getattr(a, "id", None),
+        "filename": getattr(a, "filename", None),
+        "mime_type": mime,
+        "size_bytes": size,
+        "text_chars": text_chars,
+        "can_inline_pdf": can_inline_pdf,
+        "can_inline_image": can_inline_image,
+        "can_render_pages": can_render_pages,
+        "suggested_as": suggested,
+    }
 
 
 def _run_structured_query(
@@ -801,15 +862,7 @@ def create_app(
                     "body_html": msg.body_html,
                     "date": msg.date.isoformat(),
                     "labels": msg.labels,
-                    "attachments": [
-                        {
-                            "id": a.id,
-                            "filename": a.filename,
-                            "mime_type": a.mime_type,
-                            "size_bytes": a.size_bytes,
-                        }
-                        for a in attachments
-                    ],
+                    "attachments": [_attachment_manifest_dict(a) for a in attachments],
                 }
             )
         conn.close()
@@ -854,15 +907,7 @@ def create_app(
             "body_text": msg.body_text,
             "date": msg.date.isoformat(),
             "labels": msg.labels,
-            "attachments": [
-                {
-                    "id": a.id,
-                    "filename": a.filename,
-                    "mime_type": a.mime_type,
-                    "size_bytes": a.size_bytes,
-                }
-                for a in attachments
-            ],
+            "attachments": [_attachment_manifest_dict(a) for a in attachments],
         }
 
     @app.get("/api/thread_lookup")
@@ -1124,22 +1169,188 @@ def create_app(
         conn.close()
         return {"ok": True}
 
+    @app.get("/api/attachment/{attachment_id}/meta")
+    async def api_attachment_meta(attachment_id: int):
+        """Cheap metadata-only lookup for attachment citation chips.
+        Returns enough to render a chip (filename, mime, size) and to
+        wire its click to the thread drawer (thread_id, message_id).
+        No text / bytes — those have their own endpoints.
+        """
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                """SELECT a.id, a.filename, a.mime_type, a.size_bytes,
+                          a.message_id, m.thread_id
+                   FROM attachments a
+                   JOIN messages m ON m.id = a.message_id
+                   WHERE a.id = %s""",
+                (attachment_id,),
+            ).fetchone()
+            if row is None:
+                return JSONResponse({"error": "Attachment not found"}, status_code=404)
+            return {
+                "attachment_id": row["id"],
+                "filename": row["filename"],
+                "mime_type": row["mime_type"],
+                "size_bytes": row["size_bytes"],
+                "message_id": row["message_id"],
+                "thread_id": row["thread_id"],
+            }
+        finally:
+            conn.close()
+
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(attachment_id: int):
         conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = %s",
+                (attachment_id,),
+            ).fetchone()
+            if row is None:
+                return JSONResponse({"error": "Attachment not found"}, status_code=404)
+
+            text = row["extracted_text"] or ""
+            # Fallback: if no extracted_text is stored but the file exists
+            # on disk, run the extractor on the fly and persist the result.
+            # Bounded by a 20s wall-clock budget so a pathological PDF /
+            # OCR run can't hang the endpoint. Any failure degrades
+            # silently to the legacy empty-text behaviour.
+            if not text.strip():
+                text = await _extract_attachment_text_on_demand(conn, attachment_id) or ""
+
+            return {
+                "attachment_id": attachment_id,
+                "filename": row["filename"],
+                "mime_type": row["mime_type"],
+                "extracted_text": text,
+            }
+        finally:
+            conn.close()
+
+    async def _extract_attachment_text_on_demand(conn, attachment_id: int) -> str | None:
+        """Run on-demand extraction for a single attachment under a 20s
+        wall-clock budget. Returns the extracted text or None on any
+        failure / timeout / no-op. Side effect: persists the extracted
+        text (and image_path) back to the attachments row on success so
+        subsequent calls are instant.
+
+        Note: asyncio can't cancel the spawned thread on timeout, so the
+        underlying extractor may still run (and commit) after we've
+        returned None. That's benign — the persist path is idempotent,
+        so at worst the next call sees the now-populated row.
+        """
+
+        def _run() -> str | None:
+            try:
+                result = extract_attachment_on_demand(conn, attachment_id, config=config)
+            except Exception:
+                logger.exception(f"on-demand extract failed for attachment {attachment_id}")
+                return None
+            if result is None:
+                return None
+            return result.text or None
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_run), timeout=20.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"on-demand extract timed out for attachment {attachment_id}")
+            return None
+
+    @app.get("/api/attachment/{attachment_id}/render_pages")
+    async def api_attachment_render_pages(
+        attachment_id: int,
+        pages: str = Query(
+            "", description="Comma-separated 1-based page numbers, e.g. '1,2,3'. Empty = all pages up to max_pages."
+        ),
+        max_pages: int = Query(8, ge=1, le=40),
+        dpi: int = Query(150, ge=72, le=300),
+    ):
+        """Rasterize PDF pages to PNG so the model can inline them as
+        images. Used by the `get_attachment({as: "rendered_pages"})`
+        tool path — the visual option when extracted text isn't rich
+        enough and the raw PDF isn't useful to the model (bad parse,
+        scan, complex layout).
+
+        Returns `{pages: [{page, base64, mime_type}]}` — base64 PNG
+        per page, ordered as requested (or page 1..N if `pages` blank).
+
+        Bounded by a 30s wall-clock budget. Adversarial PDFs
+        (decompression bombs, malformed xref) can wedge pymupdf for a
+        long time; the timeout protects the request loop.
+        """
+        # Parse `pages` up-front so a malformed value returns 400 before
+        # we touch the DB / filesystem / fitz.
+        if pages.strip():
+            try:
+                requested_raw = [int(p) for p in pages.split(",") if p.strip()]
+            except ValueError:
+                return JSONResponse({"error": "pages must be comma-separated integers"}, status_code=400)
+        else:
+            requested_raw = None  # means "first N"
+
+        conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = %s",
+            "SELECT raw_path, mime_type FROM attachments WHERE id = %s",
             (attachment_id,),
         ).fetchone()
         conn.close()
-        if row is None:
+        if row is None or not row["raw_path"]:
             return JSONResponse({"error": "Attachment not found"}, status_code=404)
-        return {
-            "attachment_id": attachment_id,
-            "filename": row["filename"],
-            "mime_type": row["mime_type"],
-            "extracted_text": row["extracted_text"] or "",
-        }
+        if row["mime_type"] != "application/pdf":
+            return JSONResponse({"error": "render_pages only supports PDFs"}, status_code=400)
+        pdf_path = Path(row["raw_path"]).resolve()
+        # `is_relative_to` (Py3.9+) compares path components instead of
+        # a string prefix, so `/data-evil/x.pdf` can't sneak past when
+        # `data_dir == /data`.
+        if not pdf_path.is_relative_to(data_dir.resolve()):
+            return JSONResponse({"error": "Invalid attachment path"}, status_code=403)
+        if not pdf_path.exists():
+            return JSONResponse({"error": "Attachment file missing"}, status_code=404)
+
+        try:
+            import fitz  # pymupdf
+        except ImportError:
+            return JSONResponse({"error": "pymupdf not installed"}, status_code=500)
+
+        def _render() -> dict:
+            import base64 as _b64
+
+            doc = fitz.open(str(pdf_path))
+            try:
+                total = len(doc)
+                if requested_raw is None:
+                    requested = list(range(1, min(total, max_pages) + 1))
+                else:
+                    requested = [p for p in requested_raw if 1 <= p <= total][:max_pages]
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                out = []
+                for page_num in requested:
+                    try:
+                        page = doc[page_num - 1]
+                        pix = page.get_pixmap(matrix=mat)
+                        png_bytes = pix.tobytes("png")
+                        out.append(
+                            {
+                                "page": page_num,
+                                "base64": _b64.b64encode(png_bytes).decode("ascii"),
+                                "mime_type": "image/png",
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"render_pages: page {page_num} failed: {e}")
+                return {"pages": out, "total_pages": total, "requested": requested}
+            finally:
+                doc.close()
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_render), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"render_pages timed out for attachment {attachment_id}")
+            return JSONResponse({"error": "render timed out"}, status_code=504)
+        except Exception as e:
+            logger.exception(f"render_pages failed for attachment {attachment_id}: {e}")
+            return JSONResponse({"error": f"render failed: {e}"}, status_code=500)
 
     @app.get("/api/attachment/{attachment_id}")
     async def api_attachment(attachment_id: int):
@@ -1151,9 +1362,11 @@ def create_app(
         conn.close()
         if row is None or not row["raw_path"]:
             return JSONResponse({"error": "Attachment not found"}, status_code=404)
-        # Validate path is under data_dir to prevent path traversal
+        # Validate path is under data_dir to prevent path traversal.
+        # `is_relative_to` checks path components, not string prefix, so
+        # a poisoned raw_path of `/data-evil/...` can't sneak past.
         resolved = Path(row["raw_path"]).resolve()
-        if not str(resolved).startswith(str(data_dir.resolve())):
+        if not resolved.is_relative_to(data_dir.resolve()):
             return JSONResponse({"error": "Invalid attachment path"}, status_code=403)
         if not resolved.exists():
             return JSONResponse({"error": "Attachment file missing"}, status_code=404)

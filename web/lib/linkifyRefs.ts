@@ -1,6 +1,13 @@
 export const REF_PREFIX = "ref://";
+export const ATT_PREFIX = "att://";
 
-const BRACKET_OR_BARE = /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\b([a-f0-9]{8,20})\b/g;
+// Matches either:
+//   [ref:ID]         — bracketed thread citation (hex cite_ref)
+//   [att:123]        — bracketed attachment citation (numeric attachment_id)
+//   <bare hex 8-20>  — bare hex token that's only linkified if it resolves
+//                      against a known thread id (to avoid false positives)
+const BRACKET_OR_BARE =
+  /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\[\s*att:\s*(\d+)\s*\]|\b([a-f0-9]{8,20})\b/g;
 
 const resolveAgainstKnown = (id: string, known: readonly string[]): string | null => {
   if (known.includes(id)) return id;
@@ -9,17 +16,23 @@ const resolveAgainstKnown = (id: string, known: readonly string[]): string | nul
 };
 
 /**
- * Replace [ref:ID] markers AND bare known thread IDs with markdown links to
- * `ref://ID`. The model sometimes emits a truncated prefix of the real ID
- * (Gemini Flash Lite is sloppy with long hex strings); we prefix-match against
- * the known set when the exact ID isn't found.
- *
- * Bare IDs are only linkified when they resolve to a known thread, to avoid
- * turning unrelated hex strings into citations.
+ * Replace citation markers with markdown links that CitableMarkdown can
+ * turn into clickable chips:
+ *   [ref:ID]   → `[ID](ref://ID)`   — thread citation, resolves short
+ *                  prefixes against the `knownIds` set because Gemini
+ *                  sometimes truncates long hex strings.
+ *   [att:123]  → `[123](att://123)` — attachment citation; numeric, no
+ *                  resolution needed.
+ *   bare hex   → linkified only when it exactly (or prefix-)matches a
+ *                  known thread id, to avoid turning unrelated hex
+ *                  tokens into citations.
  */
 export const linkifyRefs = (text: string, knownIds: Iterable<string>): string => {
   const known = Array.from(new Set(knownIds));
-  return text.replace(BRACKET_OR_BARE, (match, refId, bareId) => {
+  return text.replace(BRACKET_OR_BARE, (match, refId, attId, bareId) => {
+    if (attId) {
+      return `[${attId}](${ATT_PREFIX}${attId})`;
+    }
     const raw = (refId ?? bareId) as string;
     const resolved = resolveAgainstKnown(raw, known);
     if (resolved) {

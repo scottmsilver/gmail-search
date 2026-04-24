@@ -192,6 +192,105 @@ def get_attachments_for_message(conn, message_id: str) -> list[Attachment]:
     ]
 
 
+def get_pending_extraction_message_ids(conn) -> list[str]:
+    """Return distinct message ids that have at least one local-file
+    attachment still awaiting extraction (`extracted_text IS NULL`,
+    `image_path IS NULL`, `raw_path IS NOT NULL`), ordered so that
+    frontfill wins over backfill — same ordering idiom the summarizer
+    uses (see `summarize._fetch_messages_needing_summary`): messages
+    received in the last 24h go first, then everything else by date
+    DESC.
+
+    This prevents the `update --loop` daemon from perpetually grinding
+    through the multi-year backfill while fresh arrivals from the
+    `watch` daemon sit unextracted. Callers iterate the list and pass
+    each id through `get_attachments_for_message` to dispatch the
+    actual extractor.
+    """
+    # GROUP BY (not DISTINCT) so we can reference MAX(m.date) in ORDER
+    # BY — Postgres forbids `SELECT DISTINCT … ORDER BY <expr not in
+    # select list>`. A given m.id has exactly one m.date, so MAX is a
+    # no-op aggregation, just a syntactic bridge.
+    rows = conn.execute(
+        """
+        SELECT m.id
+        FROM messages m
+        JOIN attachments a ON a.message_id = m.id
+        WHERE a.extracted_text IS NULL
+          AND a.image_path IS NULL
+          AND a.raw_path IS NOT NULL
+        GROUP BY m.id
+        ORDER BY
+          -- Frontfill wins over backfill: anything received in the
+          -- last 24h (i.e. what `watch` / `sync_new_messages` just
+          -- pulled) goes to the top of the queue, ahead of any
+          -- older unextracted backlog.
+          (MAX(m.date::timestamptz) > NOW() - INTERVAL '1 day') DESC,
+          MAX(m.date) DESC
+        """
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def extract_attachment_on_demand(conn, attachment_id: int, *, config: dict):
+    """Run the extractor for a single attachment that has NULL/empty
+    `extracted_text`, write the result back to the row, and return the
+    fresh `ExtractResult`.
+
+    Return semantics:
+      * `None` when there is nothing to do / nothing we can do — the row
+        doesn't exist, extracted_text is already populated, raw_path is
+        missing from disk, or no extractor matches the mime type.
+      * `ExtractResult` on success (text and/or image paths).
+
+    Fallback for the `/api/attachment/<id>/text` endpoint so freshly
+    arrived attachments don't have to wait for the `update --loop`
+    daemon's extract pass. The happy path for anything already
+    extracted stays zero-cost — the early return on non-empty
+    `extracted_text` means we never re-run the extractor for rows the
+    daemon has already processed.
+    """
+    from pathlib import Path as _Path
+
+    from gmail_search.extract import dispatch
+
+    row = conn.execute(
+        "SELECT id, mime_type, extracted_text, image_path, raw_path " "FROM attachments WHERE id = %s",
+        (attachment_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if (row["extracted_text"] or "").strip():
+        return None
+    if not row["raw_path"]:
+        return None
+    raw_path = _Path(row["raw_path"])
+    if not raw_path.exists():
+        return None
+
+    att_config = (config or {}).get("attachments", {})
+    result = dispatch(row["mime_type"], raw_path, att_config)
+    if result is None:
+        return None
+
+    updates: dict = {}
+    if result.text:
+        updates["extracted_text"] = result.text
+    if result.images:
+        first = result.images[0]
+        updates["image_path"] = str(first.parent if len(result.images) > 1 else first)
+    if not updates:
+        return result
+
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    conn.execute(
+        f"UPDATE attachments SET {set_clause} WHERE id = %s",
+        (*updates.values(), attachment_id),
+    )
+    conn.commit()
+    return result
+
+
 # ─── Drive stubs ───────────────────────────────────────────────────────────
 # Drive-linked docs don't come from Gmail attachments; they're referenced
 # by URL from the message body. We represent them as attachment rows with

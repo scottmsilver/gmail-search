@@ -5,6 +5,8 @@ import { useMessage } from "@assistant-ui/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { AttachmentInlineViewer } from "./AttachmentInlineViewer";
+
 type ToolPart = {
   type: "tool-call";
   toolCallId: string;
@@ -81,13 +83,27 @@ const summarizeResult = (toolName: string, result: unknown): string => {
   if (Array.isArray(o.results)) {
     const items = o.results as Record<string, unknown>[];
     const errs = items.filter((r) => "error" in r).length;
+    // Attachment-specific summary: show "file.pdf (as=text, 5.4k chars)"
+    // etc. so the collapsed header conveys what the model actually got.
+    if (toolName === "get_attachment") {
+      const parts = items.map((it) => {
+        if (it.error) return `${String(it.attachment_id)} err`;
+        const as = String(it.as ?? "?");
+        const name = String(it.filename ?? `#${it.attachment_id}`);
+        if (as === "text") return `${name} (text, ${String(it.text_chars ?? 0)} chars)`;
+        if (as === "rendered_pages") {
+          const pages = Array.isArray(it.pages) ? it.pages.length : 0;
+          return `${name} (${pages} pages)`;
+        }
+        const kb = it.size_bytes ? ` ${((Number(it.size_bytes) || 0) / 1024).toFixed(0)}KB` : "";
+        return `${name} (${as}${kb})`;
+      });
+      return parts.join(" · ");
+    }
     return `${items.length} items${errs ? ` (${errs} failed)` : ""}`;
   }
   if (Array.isArray(o.threads)) return `${o.threads.length} threads`;
   if (Array.isArray(o.messages)) return `${o.messages.length} msgs`;
-  if (toolName === "get_attachment_text" && typeof o.extracted_text === "string") {
-    return `${String(o.filename ?? "attachment")} (${o.extracted_text.length} chars)`;
-  }
   if ("valid" in o) return o.valid ? "✓ valid" : `✗ ${String(o.error ?? "invalid")}`;
   return "done";
 };
@@ -138,8 +154,19 @@ const ToolBlock = ({ part }: { part: ToolPart }) => {
               {formatJson(part.args)}
             </pre>
           </div>
+          {/* For get_attachment, show the model's exact view (text block,
+              PDF iframe, image, or page rasters) BEFORE the raw JSON so
+              the human user can see what the agent saw without mentally
+              decoding a base64 payload. Raw JSON stays below as a
+              debug fallback but has binary fields stripped. */}
+          {part.toolName === "get_attachment" && part.result !== undefined && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">What the model saw</div>
+              <AttachmentInlineViewer result={part.result} />
+            </div>
+          )}
           <div>
-            <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Result</div>
+            <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Result (raw)</div>
             <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
               {part.result === undefined ? "(running…)" : formatJson(part.result)}
             </pre>
