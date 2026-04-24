@@ -58,18 +58,24 @@ def _clip(text: str, cap: int) -> str:
     return text[: cap - 32] + f"… [truncated: original {len(text)} chars]"
 
 
-def _get(path: str, *, params: dict | None = None, base_url: str | None = None) -> dict:
+async def _get(path: str, *, params: dict | None = None, base_url: str | None = None) -> dict:
+    """ASYNC httpx call. Critical: the retrieval tools run INSIDE the
+    same FastAPI process that serves /api/search + friends. A sync
+    client call from an async request handler deadlocks the event
+    loop (tool waits on the socket, uvicorn can't accept the new
+    inbound request because its event loop is blocked). Async
+    yields while waiting, so the inbound handler runs and replies."""
     url = (base_url or _default_base_url()) + path
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.get(url, params=params or {})
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        resp = await client.get(url, params=params or {})
         resp.raise_for_status()
         return resp.json()
 
 
-def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
+async def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
     url = (base_url or _default_base_url()) + path
-    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = client.post(url, json=json)
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        resp = await client.post(url, json=json)
         resp.raise_for_status()
         return resp.json()
 
@@ -77,7 +83,7 @@ def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
 # ── search_emails ──────────────────────────────────────────────────
 
 
-def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int = 10) -> dict:
+async def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int = 10) -> dict:
     """Search for messages by relevance (semantic + BM25 blend).
 
     Use this for "what did we decide about X" / "find messages
@@ -94,7 +100,7 @@ def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int
         params["date_from"] = date_from
     if date_to:
         params["date_to"] = date_to
-    data = _get("/api/search", params=params)
+    data = await _get("/api/search", params=params)
     # Add an 8-char cite_ref (prefix of thread_id) alongside each row
     # so the Writer has the same shorthand the chat-mode path uses.
     for row in data.get("results", []):
@@ -105,7 +111,7 @@ def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int
 # ── query_emails ───────────────────────────────────────────────────
 
 
-def query_emails(
+async def query_emails(
     sender: str = "",
     subject_contains: str = "",
     date_from: str = "",
@@ -115,10 +121,19 @@ def query_emails(
     order_by: str = "date_desc",
     limit: int = 20,
 ) -> dict:
-    """Filter messages by structured metadata (from, subject,
-    date-range, label, has-attachment). Use when you know WHAT fields
-    to filter on — no relevance ranking. Returns a list of threads
-    in the requested order (`date_desc` default)."""
+    """Filter messages by structured metadata. Use when you know WHAT
+    fields to filter on — no relevance ranking. Returns a list of
+    threads in the requested order (`date_desc` default).
+
+    Parameters:
+      sender: substring match on From: (e.g. `@dartmouth.edu`)
+      subject_contains: substring match on Subject:
+      date_from / date_to: ISO dates `YYYY-MM-DD` (inclusive)
+      label: Gmail label to filter on (e.g. `INBOX`, `IMPORTANT`)
+      has_attachment: true/false to filter on presence of attachments
+      order_by: `date_desc` or `date_asc`
+      limit: max threads returned
+    """
     params: dict[str, Any] = {"order_by": order_by, "limit": limit}
     if sender:
         params["sender"] = sender
@@ -132,7 +147,7 @@ def query_emails(
         params["label"] = label
     if has_attachment is not None:
         params["has_attachment"] = str(has_attachment).lower()
-    data = _get("/api/query", params=params)
+    data = await _get("/api/query", params=params)
     for row in data.get("results", []):
         row.setdefault("cite_ref", (row.get("thread_id") or "")[:8])
     return data
@@ -141,12 +156,12 @@ def query_emails(
 # ── get_thread ─────────────────────────────────────────────────────
 
 
-def get_thread(thread_id: str) -> dict:
+async def get_thread(thread_id: str) -> dict:
     """Fetch every message in a thread with body text + attachment
     manifest. Bodies clipped to 20k chars (an `original_chars` field
     tells you how much was dropped). Use AFTER search/query when you
     need the actual words a message contained."""
-    data = _get(f"/api/thread/{thread_id}")
+    data = await _get(f"/api/thread/{thread_id}")
     for msg in data.get("messages", []):
         original = msg.get("body_text") or ""
         clipped = _clip(original, THREAD_BODY_CHAR_CAP)
@@ -160,7 +175,7 @@ def get_thread(thread_id: str) -> dict:
 # ── sql_query ──────────────────────────────────────────────────────
 
 
-def sql_query(query: str) -> dict:
+async def sql_query(query: str) -> dict:
     """Run a read-only SELECT. The server's same safety gate used by
     chat mode applies: only SELECT/WITH, no DDL / DML, no introspection
     of pg_catalog / information_schema, 500-row + 10s timeout.
@@ -168,7 +183,7 @@ def sql_query(query: str) -> dict:
     Use for aggregations, multi-field OR, JOINs, NOT EXISTS, relative-
     date arithmetic — anything search_emails / query_emails can't
     express. Cells longer than 8000 chars are clipped."""
-    data = _post("/api/sql", json={"query": query})
+    data = await _post("/api/sql", json={"query": query})
     # Clip huge cells so one row with a mega body_text doesn't blow
     # the model's context. Match the TS-side cap for consistency.
     clipped_rows: list[list] = []
