@@ -309,6 +309,26 @@ def test_artifact_ids_extractor_pulls_only_integer_ids():
     assert _artifact_ids_from_tool_calls(tool_calls) == [42, 99]
 
 
+def test_clip_for_prompt_caps_and_marks_truncation():
+    """Fields fed into Writer/Critic are clipped so one huge stage
+    output can't blow Gemini's 1M input-token cap. The truncation
+    marker makes the drop explicit to the model."""
+    from gmail_search.agents.orchestration import STAGE_FIELD_CHAR_CAP, _clip_for_prompt
+
+    under = "x" * 100
+    assert _clip_for_prompt(under) == under
+
+    over = "y" * (STAGE_FIELD_CHAR_CAP + 5000)
+    clipped = _clip_for_prompt(over)
+    assert len(clipped) < len(over)
+    assert clipped.startswith("y" * 100)
+    assert "truncated:" in clipped
+    assert "5,000 chars dropped" in clipped or "5000 chars dropped" in clipped
+
+    assert _clip_for_prompt(None) == ""
+    assert _clip_for_prompt("") == ""
+
+
 def test_format_allowed_citations_shows_none_markers():
     """Empty lists must still render so the agent sees (none) and
     knows that citation category is explicitly off-limits, rather

@@ -37,6 +37,28 @@ logger = logging.getLogger(__name__)
 MAX_CRITIC_ROUNDS = 2
 MAX_RETRIEVER_ROUNDS = 1  # retriever is already tool-bounded; 1 outer pass is plenty
 
+# Input-prompt budget per downstream stage. Writer + Critic both
+# receive evidence + analysis + draft concatenated; without clipping,
+# a chatty Retriever or a noisy Analyst stdout can push the combined
+# prompt past Gemini's 1M-token input cap and the whole turn fails
+# with 400 INVALID_ARGUMENT. 80k chars ≈ ~20k tokens per field, well
+# under the cap even if all fields are full. The clip keeps the HEAD
+# (where the model usually put the important summary) plus a short
+# tail hint so truncation is obvious.
+STAGE_FIELD_CHAR_CAP = 80_000
+
+
+def _clip_for_prompt(text: str | None, *, cap: int = STAGE_FIELD_CHAR_CAP) -> str:
+    """Truncate a stage-to-stage field to `cap` chars with an explicit
+    "[truncated: N chars dropped]" marker. None is passed through as
+    empty string so callers don't have to guard."""
+    if not text:
+        return ""
+    if len(text) <= cap:
+        return text
+    dropped = len(text) - cap
+    return text[:cap] + f"\n\n[truncated: {dropped:,} chars dropped]"
+
 
 class AgentLike(Protocol):
     """Minimal shape we rely on from both real ADK agents and test
@@ -260,7 +282,7 @@ def _retriever_input(question: str, plan: dict) -> str:
 def _analyst_input(question: str, plan: dict, evidence: str) -> str:
     return (
         f"Question: {question}\n\nPlan: {json.dumps(plan, indent=2)}\n\n"
-        f"Retrieved evidence:\n{evidence}\n\nRun analysis per the plan."
+        f"Retrieved evidence:\n{_clip_for_prompt(evidence)}\n\nRun analysis per the plan."
     )
 
 
@@ -286,10 +308,15 @@ def _writer_input(
     cite_refs: list[str],
     artifact_ids: list[int],
 ) -> str:
-    analysis_section = f"\n\nAnalyst output:\n{analysis}" if analysis else ""
+    # Both evidence + analysis can be arbitrarily long (Retriever
+    # narrative, Analyst stdout). Clip each field independently so
+    # one huge field doesn't starve the other.
+    evidence_clipped = _clip_for_prompt(evidence)
+    analysis_clipped = _clip_for_prompt(analysis) if analysis else ""
+    analysis_section = f"\n\nAnalyst output:\n{analysis_clipped}" if analysis else ""
     allowed = _format_allowed_citations(cite_refs, artifact_ids)
     return (
-        f"Question: {question}\n\nEvidence:\n{evidence}{analysis_section}\n\n"
+        f"Question: {question}\n\nEvidence:\n{evidence_clipped}{analysis_section}\n\n"
         f"{allowed}\n\n"
         "Compose the final markdown answer. Cite every factual claim you make, "
         "using ONLY the citations from the allowed list above. If a claim has no "
@@ -314,10 +341,12 @@ def _critic_input(
     cite_refs: list[str],
     artifact_ids: list[int],
 ) -> str:
-    analysis_section = f"\n\nAnalyst output:\n{analysis}" if analysis else ""
+    evidence_clipped = _clip_for_prompt(evidence)
+    analysis_clipped = _clip_for_prompt(analysis) if analysis else ""
+    analysis_section = f"\n\nAnalyst output:\n{analysis_clipped}" if analysis else ""
     allowed = _format_allowed_citations(cite_refs, artifact_ids)
     return (
-        f"Draft answer:\n{draft}\n\nRetrieved evidence:\n{evidence}{analysis_section}\n\n"
+        f"Draft answer:\n{draft}\n\nRetrieved evidence:\n{evidence_clipped}{analysis_section}\n\n"
         f"{allowed}\n\n"
         "Review and emit your JSON verdict. ANY [ref:*] or [art:*] in the draft "
         "that is NOT in the allowed list above is an `invented_citation` violation. "
