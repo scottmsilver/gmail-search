@@ -79,9 +79,13 @@ const AssistantMessage = () => (
             "debug-id": DebugIdPart as never,
             "citation-warning": CitationWarningPart as never,
             battle: BattleMessage as never,
-            // data-deep-stage is intentionally NOT mapped here — the
-            // AssistantWork disclosure handles those parts inline so
-            // deep-mode stages look the same as regular tool calls.
+            // Register `deep-stage` with a Hidden renderer so assistant-ui
+            // surfaces the parts through `useMessage()`. AssistantWork
+            // picks them up there and renders them inside its disclosure.
+            // Without this explicit registration the parts never reach the
+            // hook — assistant-ui filters data-* parts to the ones named
+            // here.
+            "deep-stage": HiddenPart as never,
           },
         },
       }}
