@@ -1,0 +1,202 @@
+"""ADK FunctionTool wrappers for the existing HTTP retrieval surface.
+
+The Retriever agent reuses our live `/api/search`, `/api/query`,
+`/api/thread/<id>`, `/api/sql` endpoints rather than calling Python
+helpers directly. Two wins:
+  1. Same security gate as the chat agent sees — `/api/sql`'s
+     read-only + forbidden-keyword check runs on every query, no
+     matter which client made it.
+  2. One pattern both for Python deep-mode and TypeScript chat-mode
+     paths; bugs discovered in one get fixed in the other.
+
+All tool functions return JSON-safe dicts (not pydantic models)
+because that's what ADK's LlmAgent feeds back to the model as tool
+results. Strings are clipped where it matters so a chatty endpoint
+(long SQL result sets, huge thread bodies) can't blow the model's
+context window on a single call.
+
+Tools are bound to a base URL so tests can redirect at a different
+port if needed.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# Match the caps the TS-side tools use so both sides' Writer sees
+# similarly-shaped evidence. If this drifts, retrieval quality
+# between chat mode and deep mode diverges.
+SEARCH_ENRICH_BODY_CHARS = 4000
+QUERY_ENRICH_BODY_CHARS = 2000
+THREAD_BODY_CHAR_CAP = 20_000
+SQL_CELL_CHAR_CAP = 8_000
+DEFAULT_TIMEOUT_SECONDS = 30
+
+
+def _default_base_url() -> str:
+    """Our Python HTTP surface. Defaults to the serve command's local
+    bind; env override is kept because the ADK tools can run in a
+    container-per-request future where the host/port differ."""
+    return os.environ.get("GMAIL_SEARCH_API_URL", "http://127.0.0.1:8090").rstrip("/")
+
+
+def _clip(text: str, cap: int) -> str:
+    """Truncate with an explicit "truncated: N chars" marker so the
+    downstream model knows content was cut. Unchanged content passes
+    through unaltered."""
+    if text is None:
+        return ""
+    if len(text) <= cap:
+        return text
+    return text[: cap - 32] + f"… [truncated: original {len(text)} chars]"
+
+
+def _get(path: str, *, params: dict | None = None, base_url: str | None = None) -> dict:
+    url = (base_url or _default_base_url()) + path
+    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        resp = client.get(url, params=params or {})
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
+    url = (base_url or _default_base_url()) + path
+    with httpx.Client(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        resp = client.post(url, json=json)
+        resp.raise_for_status()
+        return resp.json()
+
+
+# ── search_emails ──────────────────────────────────────────────────
+
+
+def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int = 10) -> dict:
+    """Search for messages by relevance (semantic + BM25 blend).
+
+    Use this for "what did we decide about X" / "find messages
+    mentioning Y" questions. Empty `date_from` / `date_to` skip the
+    date filter. `top_k` caps the number of threads returned; default
+    10 is a sensible middle ground.
+
+    Returns {"results": [{thread_id, cite_ref, subject, participants,
+    score, matches: [...]}]}. Each match carries the top-hit message
+    id + a short snippet; call `get_thread` for full bodies.
+    """
+    params: dict[str, Any] = {"q": query, "k": top_k}
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+    data = _get("/api/search", params=params)
+    # Add an 8-char cite_ref (prefix of thread_id) alongside each row
+    # so the Writer has the same shorthand the chat-mode path uses.
+    for row in data.get("results", []):
+        row.setdefault("cite_ref", (row.get("thread_id") or "")[:8])
+    return data
+
+
+# ── query_emails ───────────────────────────────────────────────────
+
+
+def query_emails(
+    sender: str = "",
+    subject_contains: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    label: str = "",
+    has_attachment: bool | None = None,
+    order_by: str = "date_desc",
+    limit: int = 20,
+) -> dict:
+    """Filter messages by structured metadata (from, subject,
+    date-range, label, has-attachment). Use when you know WHAT fields
+    to filter on — no relevance ranking. Returns a list of threads
+    in the requested order (`date_desc` default)."""
+    params: dict[str, Any] = {"order_by": order_by, "limit": limit}
+    if sender:
+        params["sender"] = sender
+    if subject_contains:
+        params["subject_contains"] = subject_contains
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+    if label:
+        params["label"] = label
+    if has_attachment is not None:
+        params["has_attachment"] = str(has_attachment).lower()
+    data = _get("/api/query", params=params)
+    for row in data.get("results", []):
+        row.setdefault("cite_ref", (row.get("thread_id") or "")[:8])
+    return data
+
+
+# ── get_thread ─────────────────────────────────────────────────────
+
+
+def get_thread(thread_id: str) -> dict:
+    """Fetch every message in a thread with body text + attachment
+    manifest. Bodies clipped to 20k chars (an `original_chars` field
+    tells you how much was dropped). Use AFTER search/query when you
+    need the actual words a message contained."""
+    data = _get(f"/api/thread/{thread_id}")
+    for msg in data.get("messages", []):
+        original = msg.get("body_text") or ""
+        clipped = _clip(original, THREAD_BODY_CHAR_CAP)
+        if clipped != original:
+            msg["body_text"] = clipped
+            msg["original_chars"] = len(original)
+            msg["body_text_truncated"] = True
+    return data
+
+
+# ── sql_query ──────────────────────────────────────────────────────
+
+
+def sql_query(query: str) -> dict:
+    """Run a read-only SELECT. The server's same safety gate used by
+    chat mode applies: only SELECT/WITH, no DDL / DML, no introspection
+    of pg_catalog / information_schema, 500-row + 10s timeout.
+
+    Use for aggregations, multi-field OR, JOINs, NOT EXISTS, relative-
+    date arithmetic — anything search_emails / query_emails can't
+    express. Cells longer than 8000 chars are clipped."""
+    data = _post("/api/sql", json={"query": query})
+    # Clip huge cells so one row with a mega body_text doesn't blow
+    # the model's context. Match the TS-side cap for consistency.
+    clipped_rows: list[list] = []
+    for row in data.get("rows", []):
+        clipped = []
+        for cell in row:
+            if isinstance(cell, str) and len(cell) > SQL_CELL_CHAR_CAP:
+                clipped.append(_clip(cell, SQL_CELL_CHAR_CAP))
+            else:
+                clipped.append(cell)
+        clipped_rows.append(clipped)
+    data["rows"] = clipped_rows
+    return data
+
+
+# ── ADK tool factory ───────────────────────────────────────────────
+
+
+def build_retrieval_tools() -> list:
+    """Wrap each retrieval function as an ADK FunctionTool and return
+    the list the Retriever / root agent consumes via `tools=[...]`.
+    Imported lazily so non-ADK test contexts don't pay the ADK
+    import cost just to call the functions directly."""
+    from google.adk.tools import FunctionTool
+
+    return [
+        FunctionTool(search_emails),
+        FunctionTool(query_emails),
+        FunctionTool(get_thread),
+        FunctionTool(sql_query),
+    ]

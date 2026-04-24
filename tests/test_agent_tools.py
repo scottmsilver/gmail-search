@@ -1,0 +1,150 @@
+"""Tests for the deep-analysis agent's retrieval tools.
+
+These tools wrap our existing HTTP endpoints (/api/search, /api/query,
+/api/thread/<id>, /api/sql). We test the WRAPPER behavior — clip
+logic, cite_ref backfill, build_retrieval_tools assembly — by
+stubbing httpx at the client level. No live server needed for these.
+
+Full integration (hitting the real server) is covered later in the
+end-to-end Phase-6 harness.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+try:
+    import google.adk  # noqa: F401
+
+    ADK_AVAILABLE = True
+except ImportError:
+    ADK_AVAILABLE = False
+
+
+def _stub_httpx_get(monkeypatch, response_json: dict):
+    """Patch the module-scope httpx.Client so every `.get()` returns
+    a synthetic response. Covers the _get helper without touching a
+    real network."""
+    import httpx
+
+    from gmail_search.agents import tools
+
+    class _R:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _C:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def get(self, url, params=None):  # noqa: ARG002
+            return _R(response_json)
+
+        def post(self, url, json=None):  # noqa: ARG002
+            return _R(response_json)
+
+    monkeypatch.setattr(tools.httpx, "Client", _C)
+    # Also make sure httpx's real Client isn't reached via the import.
+    monkeypatch.setattr(httpx, "Client", _C)
+
+
+def test_search_emails_backfills_cite_ref(monkeypatch):
+    from gmail_search.agents.tools import search_emails
+
+    _stub_httpx_get(
+        monkeypatch,
+        {
+            "results": [
+                {"thread_id": "abcdef0123456789", "subject": "s", "score": 0.9},
+                {"thread_id": "1111111122222222", "subject": "t", "score": 0.8, "cite_ref": "preset"},
+            ]
+        },
+    )
+    data = search_emails("how much did we spend?")
+    assert data["results"][0]["cite_ref"] == "abcdef01"
+    assert data["results"][1]["cite_ref"] == "preset"  # existing value preserved
+
+
+def test_query_emails_backfills_cite_ref(monkeypatch):
+    from gmail_search.agents.tools import query_emails
+
+    _stub_httpx_get(
+        monkeypatch,
+        {"results": [{"thread_id": "aaabbbcccdddeeee", "subject": "x"}]},
+    )
+    data = query_emails(sender="alice@example.com")
+    assert data["results"][0]["cite_ref"] == "aaabbbcc"
+
+
+def test_get_thread_clips_long_bodies(monkeypatch):
+    """Bodies longer than 20k chars should come back clipped with
+    `body_text_truncated=True` + `original_chars` set. The chat-mode
+    TS tool does the same — keep the wrapper contracts aligned."""
+    from gmail_search.agents.tools import THREAD_BODY_CHAR_CAP, get_thread
+
+    long_body = "x" * (THREAD_BODY_CHAR_CAP + 5000)
+    _stub_httpx_get(
+        monkeypatch,
+        {
+            "thread_id": "t1",
+            "messages": [
+                {"id": "m1", "body_text": long_body, "subject": "s"},
+                {"id": "m2", "body_text": "short", "subject": "s2"},
+            ],
+        },
+    )
+    data = get_thread("t1")
+    first = data["messages"][0]
+    assert first.get("body_text_truncated") is True
+    assert first["original_chars"] == len(long_body)
+    assert len(first["body_text"]) <= THREAD_BODY_CHAR_CAP + 40  # + marker chars
+
+    # Short body is unchanged: no truncated flag, no original_chars.
+    second = data["messages"][1]
+    assert "body_text_truncated" not in second
+    assert "original_chars" not in second
+
+
+def test_sql_query_clips_oversized_cells(monkeypatch):
+    """Long string cells get clipped to 8000 chars so a 500-row
+    SELECT body_text can't ship 10MB back to the model."""
+    from gmail_search.agents.tools import SQL_CELL_CHAR_CAP, sql_query
+
+    long_cell = "z" * (SQL_CELL_CHAR_CAP + 4000)
+    _stub_httpx_get(
+        monkeypatch,
+        {
+            "columns": ["id", "body"],
+            "rows": [["m1", long_cell], ["m2", "short"]],
+            "row_count": 2,
+            "truncated": False,
+        },
+    )
+    data = sql_query("SELECT id, body FROM messages LIMIT 2")
+    assert "truncated: original" in data["rows"][0][1]
+    assert len(data["rows"][0][1]) <= SQL_CELL_CHAR_CAP + 80
+    assert data["rows"][1][1] == "short"
+
+
+@pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
+def test_build_retrieval_tools_assembles_expected_set():
+    """The four retrieval tools must always be present — the Retriever
+    agent relies on this exact set. A missing tool silently degrades
+    retrieval quality."""
+    from gmail_search.agents.tools import build_retrieval_tools
+
+    tools = build_retrieval_tools()
+    names = sorted(t.name for t in tools)
+    assert names == ["get_thread", "query_emails", "search_emails", "sql_query"]
