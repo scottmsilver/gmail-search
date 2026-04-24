@@ -168,33 +168,34 @@ CREATE TABLE agent_artifacts (
 
 ## Phases (build order)
 
-- [ ] **Phase 1 — Foundation** *(this session)*
-  - Design doc (this file)
-  - Docker sandbox image + `sandbox/requirements.txt`
-  - Read-only DB role + migration
-  - Schema tables (agent_sessions, agent_events, agent_artifacts)
-  - Python service skeleton (FastAPI) with `POST /api/agent/analyze`
-    returning a hardcoded fake event stream
-  - Next.js `mode: "deep"` flag + SSE proxy — end-to-end smoke test
-- [ ] **Phase 2 — Sandbox executor**
-  - `agents/sandbox.py`: `execute(code, inputs) -> ExecResult`
-  - Container lifecycle, resource caps, artifact sweep
-  - Unit tests for execute paths: happy, timeout, OOM, bad code
-- [ ] **Phase 3 — Single Analyst agent (no others yet)**
-  - Pre-seed evidence DataFrame from a one-shot search_emails call
-  - Iteration loop capped at 3
-  - Artifacts saved + returned in the event stream
-- [ ] **Phase 4 — Planner + Retriever + Writer**
-  - ADK FunctionTool wrappers for our existing endpoints
-  - Root agent orchestration
-- [ ] **Phase 5 — Critic**
-  - Post-Writer adversarial pass + one revision loop
-- [ ] **Phase 6 — UI**
-  - Deep toggle, progress panel, inline artifact rendering
+- [x] **Phase 1 — Foundation** — design doc, sandbox skeleton,
+      schema, SKILL.md loader, stub SSE service. Commit `8d5de76`.
+- [x] **Phase 2 — Sandbox executor** — `agents/sandbox.py` with
+      `docker run` caps + artifact sweep. 7 tests. Commit `81f9ac4`.
+- [x] **Phase 3 — Analyst sub-agent** — closure-bound run_code tool
+      persisting artifacts to the DB. Commit `9d7a62f`.
+- [x] **Phase 4 — Planner + Retriever + Writer + Critic factories**
+      plus ADK FunctionTool wrappers for search/query/thread/sql.
+      Commit `64650cc`.
+- [x] **Phase 5 — Orchestration state machine** — critic revision
+      loop, event emission, mock-driven tests. Commit `0dbfb8f`.
+- [x] **Phase 6a — ADK runtime adapter + service wiring** —
+      `GMAIL_DEEP_REAL=1` flag flips the stub to the live pipeline.
+      Commit `a4c8204`.
+- [x] **Phase 6b — SSE proxies** — Next.js routes for
+      `/api/agent/analyze` and `/api/artifact/<id>`. Commit
+      `52ac1e0`.
+- [x] **Phase 6c — UI** — `/deep` page, streaming stage cards,
+      `[art:<id>]` chip. Commit `0b17319`.
 - [ ] **Phase 7 — Hardening**
-  - E2E tests with mocked Gemini
-  - Artifact GC (drop > 30 days after session finished)
-  - Cost logging (ADK usage goes through `costs` table)
+  - [x] Artifact GC — `agents/gc.py` + `gmail-search prune-artifacts`
+        CLI + 4 tests. Retention default 30 days.
+  - [ ] Live e2e test — record one deep-mode turn against Gemini
+        with a golden transcript assertion.
+  - [ ] Cost logging — plumb ADK event token counts into the `costs`
+        table, plus surface per-turn spend in the UI.
+  - [ ] TopNav placement — decide whether deep mode is a separate
+        tab or a toggle inside chat.
 
 ## SKILL.md support
 

@@ -1512,3 +1512,31 @@ def serve(ctx, host, port):
     app = create_app(ctx.obj["db_path"], ctx.obj["data_dir"], cfg)
     click.echo(f"Starting server at http://{h}:{p}")
     uvicorn.run(app, host=h, port=p)
+
+
+@main.command(help="Delete deep-analysis artifacts older than the retention window")
+@click.option(
+    "--retention-days",
+    type=int,
+    default=30,
+    help="Delete artifacts for sessions finished more than this many days ago. Default 30.",
+)
+@common_options
+@click.pass_context
+def prune_artifacts(ctx, retention_days):
+    """Nightly GC for `agent_artifacts`. Intended to be run from a
+    systemd timer or cron. Session + event rows are kept regardless
+    — only the artifact bytes get dropped.
+    """
+    from gmail_search.agents.gc import prune_artifacts as _prune
+
+    conn = get_connection(ctx.obj["db_path"])
+    try:
+        result = _prune(conn, retention_days=retention_days)
+    finally:
+        conn.close()
+    click.echo(
+        f"pruned {result.artifacts_deleted} artifacts "
+        f"(~{result.bytes_freed_estimate:,} bytes) across {result.sessions_considered} sessions "
+        f"older than {retention_days}d"
+    )
