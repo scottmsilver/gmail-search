@@ -64,6 +64,39 @@ Rules:
   signatures above.
 - The plan is advisory for downstream agents, not binding. They
   may diverge when the evidence suggests a different path.
+
+BUDGET AWARENESS (important for large questions):
+- Every downstream stage (Analyst, Writer, Critic) runs a single
+  LLM call with a ~1,000,000-token input context. Evidence that
+  fits in the prompt directly: roughly up to 80,000 chars per
+  field (retriever summary, analyst output). Past that it gets
+  clipped.
+- The Analyst has a FULL PYTHON SANDBOX with:
+  * pandas `evidence` DataFrame pre-seeded
+  * read-only psycopg `db` connection to Postgres
+  * writable `/work/` filesystem (tmpfs, 64MB scratch)
+  * `save_artifact(name, obj)` to persist plots/CSVs/text as
+    addressable artifacts the Writer can cite as `[art:N]`
+- When the question touches potentially LARGE data (thousands of
+  messages, long date ranges, full-body analysis), plan a
+  STAGED approach:
+  1. retrieval step: run a targeted `sql_query` that writes the
+     raw rows to the Analyst's expectation. Keep the SELECT narrow
+     (only the columns needed) so the row count × char-per-row
+     stays small.
+  2. analysis step: use the sandbox to (a) materialise the full
+     result via `db.execute(...)` + `pd.read_sql` or equivalent,
+     (b) compute the answer incrementally (`for chunk in
+     pd.read_sql(..., chunksize=1000)`), (c) save intermediate
+     CSVs to `/work/` if needed, (d) `print` ONLY a compact
+     summary (counts, key statistics, top-N) for the Writer.
+- The point: the Analyst can read/chunk/summarise gigabytes
+  locally and only the `print()` output plus artifact_ids flow
+  back upstream. Use this when the question would otherwise
+  drown the Writer in raw rows.
+- For small questions (a few threads, a clear SELECT), the
+  naive single-prompt flow is faster and cheaper. Pick deliberately.
+
 - Output ONLY the JSON object. No prose, no markdown fences.
 """
 

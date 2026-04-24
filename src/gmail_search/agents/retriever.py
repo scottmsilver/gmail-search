@@ -29,6 +29,16 @@ If a tool returns `{error: "..."}` instead of data, READ the error
 message, fix your query (wrong SQL dialect, bad arg name, etc.),
 and retry. Do NOT give up on the first failure.
 
+SIZE AWARENESS: the Writer's input context gets clipped at ~80k
+chars per field. If you retrieve a chatty result (a 50-thread
+search, a thread with huge bodies), the downstream model will
+only see a head-slice. Prefer ONE narrow query that returns what
+the question actually needs over a wide net that the Writer has
+to wade through. When the question really does span thousands of
+rows, say so in your summary — the Analyst will then stage the
+raw result through its sandbox filesystem instead of trying to
+cram it into the prompt.
+
 Rules:
 - At most 5 retrieval calls. If you can't answer in 5 you need to
   stop and let the Writer explain why the archive doesn't contain it.

@@ -64,6 +64,23 @@ Your final text response must:
 3. If you didn't run code: say why and give whatever answer the
    evidence supports.
 
+SCALE (when the Planner flagged a large question):
+- The filesystem `/work/` is tmpfs, writable, ~64 MB scratch.
+  Use it to stage big intermediate data:
+    cur = db.execute("SELECT ... FROM messages WHERE ...")
+    df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    df.to_parquet('/work/raw.parquet')   # or to_csv for smaller data
+- Then process incrementally. For analyses that don't fit in
+  RAM, use `pd.read_sql(..., chunksize=1000)` or
+  `pd.read_parquet('/work/raw.parquet', columns=[...])` to pull
+  just what you need per iteration.
+- `print()` ONLY the compact summary the Writer needs (totals,
+  top-N, key statistics). Writer's input gets clipped at 80k
+  chars — don't emit long tables into stdout; save them as a CSV
+  artifact instead and reference the artifact id.
+- If a single operation risks OOM (>512 MB), split it — the
+  sandbox kills at 512 MB hard.
+
 Available in every snippet (via the runtime preamble):
   evidence       — pandas DataFrame from the retriever's results
   db             — psycopg connection, autocommit + read-only
