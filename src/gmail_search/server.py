@@ -440,6 +440,13 @@ def create_app(
 
     app = FastAPI(title="Gmail Search")
 
+    # Mount the opt-in deep-analysis agent surface. See
+    # docs/DEEP_ANALYSIS_AGENT.md. Chat mode is unaffected; the agent
+    # endpoints sit under /api/agent/* and /api/artifact/*.
+    from gmail_search.agents.service import register_agent_routes
+
+    register_agent_routes(app, db_path)
+
     templates_dir = Path(__file__).parent.parent.parent / "templates"
     # Index dir is resolved on-demand in `get_engine` / `_prewarm_engine`
     # / `_engine_swap_watcher` so a mid-reindex pointer flip is picked

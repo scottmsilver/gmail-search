@@ -137,6 +137,12 @@ _INTERNAL_TABLES = {
     # scann_index_pointer is a single-row KV tracking the active ScaNN
     # index directory. Infrastructure, not something an LLM should query.
     "scann_index_pointer",
+    # Deep-analysis agent state. The chat LLM has no business querying
+    # its own session log; if anything it'd invite recursive confusion.
+    # See docs/DEEP_ANALYSIS_AGENT.md.
+    "agent_sessions",
+    "agent_events",
+    "agent_artifacts",
 }
 
 _SCHEMA_TABLE_RE = re.compile(

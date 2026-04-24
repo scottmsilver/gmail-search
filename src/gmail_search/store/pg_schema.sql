@@ -236,6 +236,81 @@ CREATE TABLE IF NOT EXISTS scann_index_pointer (
 );
 
 -- ─────────────────────────────────────────────────────────────────────
+-- Deep-analysis agent state. See docs/DEEP_ANALYSIS_AGENT.md for the
+-- architecture. One `agent_sessions` row per deep-mode turn; events
+-- are a time-ordered log of what each sub-agent (planner, retriever,
+-- analyst, writer, critic) did; artifacts hold Analyst outputs
+-- (plots, CSVs, tables) the Writer cites as [art:<id>].
+-- ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    mode TEXT NOT NULL,
+    question TEXT NOT NULL,
+    plan JSONB,
+    final_answer TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS agent_events (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    seq INT NOT NULL,
+    agent_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS agent_artifacts (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    data BYTEA NOT NULL,
+    meta JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_session_seq
+    ON agent_events (session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_conv
+    ON agent_sessions (conversation_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_artifacts_session
+    ON agent_artifacts (session_id, created_at DESC);
+
+-- Read-only role used by the Analyst sandbox. DO block lets us re-run
+-- the schema file idempotently without erroring on duplicate-role
+-- create. GRANTs are cumulative — re-running them is a no-op.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gmail_analyst') THEN
+        -- Password is generated at role creation; the sandbox executor
+        -- reads it from the main server's env + rotates it if needed.
+        -- For v1 we use a fixed password matching the dev-only DSN so
+        -- the analyst can connect from Docker without extra plumbing.
+        CREATE ROLE gmail_analyst LOGIN PASSWORD 'analyst_readonly';
+    END IF;
+END
+$$;
+
+GRANT CONNECT ON DATABASE gmail_search TO gmail_analyst;
+GRANT USAGE ON SCHEMA public TO gmail_analyst;
+GRANT SELECT ON messages, attachments, message_summaries, thread_summary,
+    topics, message_topics, contact_frequency, term_aliases
+    TO gmail_analyst;
+-- Embeddings exposed for vector-similarity analysis; the vector
+-- column itself is opaque to the analyst but useful with sklearn.
+GRANT SELECT ON embeddings TO gmail_analyst;
+-- Everything else (costs, sync_state, conversations, agent_*, etc.)
+-- stays OUT of the analyst's view by omission.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM gmail_analyst;
+
+-- ─────────────────────────────────────────────────────────────────────
 -- FTS (pg_search / paradedb BM25 indexes)
 --
 -- SQLite had:

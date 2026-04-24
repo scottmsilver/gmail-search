@@ -1,0 +1,11 @@
+# Pinned Python stack for the deep-analysis sandbox. Kept narrow on
+# purpose — every package here is code the Analyst agent can import
+# inside the sandbox, so additions increase both install time and
+# attack surface. If the Analyst needs something else, add it here
+# and rebuild the image.
+psycopg[binary]==3.2.3
+pandas==2.2.3
+numpy==2.1.3
+matplotlib==3.9.2
+seaborn==0.13.2
+scikit-learn==1.5.2
