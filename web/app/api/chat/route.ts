@@ -245,6 +245,11 @@ type DeepStreamArgs = {
   conversationId: string | null;
   loggerId: string;
   loggerPath: string;
+  // Full inbound messages so we can persist the user turn alongside
+  // the assistant's deep-mode reply on conversation save. Without
+  // this the user reloads the conversation and sees only the half
+  // they typed (or worse, nothing).
+  messages: UIMessage[];
 };
 
 const createDeepModeStream = (args: DeepStreamArgs) =>
@@ -256,6 +261,25 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         data: { id: args.loggerId, log_path: args.loggerPath },
       });
 
+      // Persist the (user message(s) + assistant text) tuple so a
+      // refresh shows the deep-mode answer. Mirrors what chat-mode +
+      // battle-mode already do; without this, deep answers vanish on
+      // reload. Called from every terminating branch — final text,
+      // upstream-failed text, error-event text, stream-exception text,
+      // and the empty-text case — so the user always sees what
+      // happened on reload.
+      const persistAssistantText = async (assistantText: string): Promise<void> => {
+        if (!args.conversationId) return;
+        const persisted: Array<{ role: string; parts: unknown[] }> = args.messages.map(
+          (m) => ({ role: m.role, parts: m.parts as unknown[] }),
+        );
+        persisted.push({
+          role: "assistant",
+          parts: [{ type: "text", text: assistantText }],
+        });
+        await saveConversation(args.conversationId, persisted, deriveTitle(args.messages));
+      };
+
       const upstream = await fetch(`${pythonApiUrl()}/api/agent/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -265,14 +289,38 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         }),
       });
       if (!upstream.ok || !upstream.body) {
+        // Pull as much detail as the upstream gave us — the body
+        // usually has the FastAPI error reason. Clip to 500 chars so
+        // a giant HTML error page doesn't drown the bubble.
+        let detail = "";
+        try {
+          detail = (await upstream.text()).slice(0, 500);
+        } catch {
+          /* body read can fail if the connection is already torn; fall
+             back to status code only */
+        }
+        const detailLine = detail.trim() ? ` ${detail.trim()}` : "";
+        const errMsg =
+          `Deep-mode upstream failed (HTTP ${upstream.status}).${detailLine}`;
+        // Surface it as a citation-warning-shaped data part so the UI
+        // renders an explicit error block (red/amber border) rather
+        // than an italic one-liner that looks like model output. The
+        // Thread already has a CitationWarningPart handler.
+        writer.write({
+          type: "data-citation-warning",
+          id: `deep-upstream-${args.loggerId}`,
+          data: {
+            broken: [],
+            message: errMsg,
+          },
+        });
+        // ALSO emit a text part so the assistant bubble isn't empty
+        // (and so persistence has something readable to save).
         const textId = "deep-error";
         writer.write({ type: "text-start", id: textId });
-        writer.write({
-          type: "text-delta",
-          id: textId,
-          delta: `_Deep-mode upstream failed (HTTP ${upstream.status})._`,
-        });
+        writer.write({ type: "text-delta", id: textId, delta: `_${errMsg}_` });
         writer.write({ type: "text-end", id: textId });
+        await persistAssistantText(`_${errMsg}_`);
         return;
       }
 
@@ -280,6 +328,10 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       let buffer = "";
       let finalText = "";
       let finalStartedId: string | null = null;
+      // What we'll persist as the assistant turn. Updated on each
+      // terminating branch so the saved version matches what the
+      // user saw, including error fallbacks.
+      let persistedAssistantText = "";
 
       const emitStage = (kind: string, payload: unknown) => {
         writer.write({
@@ -322,15 +374,15 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
               writer.write({ type: "text-start", id: finalStartedId });
               writer.write({ type: "text-delta", id: finalStartedId, delta: finalText });
               writer.write({ type: "text-end", id: finalStartedId });
+              persistedAssistantText = finalText;
             } else if (kind === "error") {
               finalStartedId = `deep-error-${args.loggerId}`;
+              const reason = String((data.payload as { message?: string })?.message ?? "unknown");
+              const msg = `_Deep-mode error: ${reason}_`;
               writer.write({ type: "text-start", id: finalStartedId });
-              writer.write({
-                type: "text-delta",
-                id: finalStartedId,
-                delta: `_Deep-mode error: ${String((data.payload as { message?: string })?.message ?? "unknown")}_`,
-              });
+              writer.write({ type: "text-delta", id: finalStartedId, delta: msg });
               writer.write({ type: "text-end", id: finalStartedId });
+              persistedAssistantText = msg;
             } else if (kind === "session") {
               /* session id frame — don't surface in the UI */
             } else {
@@ -342,9 +394,11 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         const err = e instanceof Error ? e.message : String(e);
         if (!finalStartedId) {
           const id = `deep-streamerr-${args.loggerId}`;
+          const msg = `_Deep-mode stream error: ${err}_`;
           writer.write({ type: "text-start", id });
-          writer.write({ type: "text-delta", id, delta: `_Deep-mode stream error: ${err}_` });
+          writer.write({ type: "text-delta", id, delta: msg });
           writer.write({ type: "text-end", id });
+          persistedAssistantText = msg;
         }
       } finally {
         try {
@@ -352,6 +406,18 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         } catch {
           /* ignore */
         }
+        // If we never produced ANY text (e.g. upstream closed mid-frame
+        // before sending `final` or `error`) still persist a marker so
+        // the conversation reload doesn't dead-end on a silent bubble.
+        if (!persistedAssistantText) {
+          persistedAssistantText =
+            "_Deep-mode produced no answer — the upstream stream closed without a final frame._";
+          const id = `deep-empty-${args.loggerId}`;
+          writer.write({ type: "text-start", id });
+          writer.write({ type: "text-delta", id, delta: persistedAssistantText });
+          writer.write({ type: "text-end", id });
+        }
+        await persistAssistantText(persistedAssistantText);
       }
     },
   });
@@ -394,6 +460,7 @@ export async function POST(req: NextRequest) {
       conversationId,
       loggerId: logger.id,
       loggerPath: logger.path,
+      messages,
     });
     return createUIMessageStreamResponse({ stream });
   }
