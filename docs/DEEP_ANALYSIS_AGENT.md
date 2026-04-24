@@ -196,6 +196,27 @@ CREATE TABLE agent_artifacts (
   - Artifact GC (drop > 30 days after session finished)
   - Cost logging (ADK usage goes through `costs` table)
 
+## SKILL.md support
+
+Honors the Claude Code / Agent-Skills spec: `.claude/skills/<name>/SKILL.md`
+(project-scoped) or `~/.claude/skills/<name>/SKILL.md` (personal), YAML
+frontmatter + markdown body. Per-agent scoping via the `agent:` frontmatter
+field (`planner` / `retriever` / `analyst` / `writer` / `critic` / `all`).
+
+**Phase 1 implementation (current):** custom loader in
+`src/gmail_search/agents/skills.py` parses SKILL.md files and injects
+matched bodies into each sub-agent's system prompt. Deterministic
+keyword-overlap matching; no ML.
+
+**Phase 4 swap (when ADK agents land):** replace the prompt-injection
+path with ADK's native `google.adk.skills.load_skill_from_dir` +
+`SkillToolset`, which exposes skills to agents as discoverable tools
+with progressive loading (L1 metadata always visible, L2 body + L3
+resources fetched on trigger). Same file format — the existing
+SKILL.md dirs work in both paths. ADK Skills is flagged experimental
+in v1.25, so the custom loader stays as a fallback until the API
+stabilises.
+
 ## Non-goals (v1)
 
 - Multi-turn analyst sessions (each turn is its own session)
