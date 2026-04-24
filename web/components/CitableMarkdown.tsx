@@ -5,8 +5,9 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { ATT_PREFIX, linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
+import { ART_PREFIX, ATT_PREFIX, linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
 
+import { ArtifactChip } from "./ArtifactChip";
 import { AttachmentChip, type AttachmentHint } from "./AttachmentChip";
 import { CitationChip, type ThreadHint } from "./CitationChip";
 import { useThreadDrawer } from "./ThreadDrawerContext";
@@ -53,6 +54,13 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
           return (
             <AttachmentChip attachmentId={id} hints={attList} onOpenThread={setOpenThreadId} />
           );
+        }
+      }
+      if (href?.startsWith(ART_PREFIX)) {
+        const idStr = href.slice(ART_PREFIX.length);
+        const id = parseInt(idStr, 10);
+        if (Number.isFinite(id)) {
+          return <ArtifactChip artifactId={id} />;
         }
       }
       // In "inline" (summary) mode, suppress mailto autolinks — the
@@ -104,7 +112,7 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
 // only. ReactMarkdown's default urlTransform strips most XSS schemes, but we
 // were overriding it with `(url) => url` to keep ref:// links from being
 // mangled — that opened javascript:/data:/vbscript: as side effects.
-const SAFE_SCHEMES = /^(?:https?|mailto|ref|att):/i;
+const SAFE_SCHEMES = /^(?:https?|mailto|ref|att|art):/i;
 const safeUrl = (url: string): string => {
   if (!url) return "";
   // Relative URLs (no scheme) are fine.

@@ -1,13 +1,16 @@
 export const REF_PREFIX = "ref://";
 export const ATT_PREFIX = "att://";
+export const ART_PREFIX = "art://";
 
 // Matches either:
 //   [ref:ID]         — bracketed thread citation (hex cite_ref)
 //   [att:123]        — bracketed attachment citation (numeric attachment_id)
+//   [art:123]        — bracketed analyst-artifact citation (numeric id from
+//                      /api/artifact/<id> — plot PNG, CSV, etc.)
 //   <bare hex 8-20>  — bare hex token that's only linkified if it resolves
 //                      against a known thread id (to avoid false positives)
 const BRACKET_OR_BARE =
-  /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\[\s*att:\s*(\d+)\s*\]|\b([a-f0-9]{8,20})\b/g;
+  /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\[\s*att:\s*(\d+)\s*\]|\[\s*art:\s*(\d+)\s*\]|\b([a-f0-9]{8,20})\b/g;
 
 const resolveAgainstKnown = (id: string, known: readonly string[]): string | null => {
   if (known.includes(id)) return id;
@@ -29,9 +32,12 @@ const resolveAgainstKnown = (id: string, known: readonly string[]): string | nul
  */
 export const linkifyRefs = (text: string, knownIds: Iterable<string>): string => {
   const known = Array.from(new Set(knownIds));
-  return text.replace(BRACKET_OR_BARE, (match, refId, attId, bareId) => {
+  return text.replace(BRACKET_OR_BARE, (match, refId, attId, artId, bareId) => {
     if (attId) {
       return `[${attId}](${ATT_PREFIX}${attId})`;
+    }
+    if (artId) {
+      return `[${artId}](${ART_PREFIX}${artId})`;
     }
     const raw = (refId ?? bareId) as string;
     const resolved = resolveAgainstKnown(raw, known);
