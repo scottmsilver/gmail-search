@@ -129,12 +129,21 @@ const googleProviderOptions = (model: string, thinkingLevel: ThinkingLevel, incl
   return { google: { thinkingConfig: { thinkingLevel, includeThoughts } } };
 };
 
+// Compose the full tool catalog: the backend-backed user tools
+// (search_emails, sql_query, get_thread, ...) plus Gemini's built-in
+// grounded web search. The key MUST be `google_search` — the provider
+// tool factory asserts on the name.
+const buildAllTools = (google: ReturnType<typeof createGoogleGenerativeAI>) => ({
+  ...buildTools(),
+  google_search: google.tools.googleSearch({}),
+});
+
 // Run one variant end-to-end (no validation loop, no streaming to client)
 // and return the final text + a compact tool log. Used by battle mode.
 const runVariantOnce = async (
   google: ReturnType<typeof createGoogleGenerativeAI>,
   system: string,
-  tools: ReturnType<typeof buildTools>,
+  tools: ReturnType<typeof buildAllTools>,
   conversation: ModelMessage[],
   model: string,
   thinkingLevel: ThinkingLevel,
@@ -477,7 +486,7 @@ export async function POST(req: NextRequest) {
   );
 
   const google = createGoogleGenerativeAI({ apiKey: geminiApiKey() });
-  const tools = buildTools();
+  const tools = buildAllTools(google);
   const sqlSchema = await getSqlSchemaMarkdown();
   const system = buildSystemPrompt(tools, sqlSchema);
   const initialMessages = sanitizeConversation(await convertToModelMessages(messages));

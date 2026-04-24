@@ -64,6 +64,14 @@ Tool ladder — use the cheapest tool that can answer, escalate only as needed:
 Do NOT synthesize details from snippets alone. If a snippet HINTS at something but doesn't STATE it, fetch the thread before describing it. Example: "Salvador is reviewing the proposal" requires a message saying Salvador is reviewing — not a snippet that merely contains the word "reviewing".
 </tool_use>
 
+<web_access>
+You also have **google_search** — Gemini's grounded web search. It hits Google directly and returns results with source URLs. This is NOT the user's Gmail; it is the open web. Use it ONLY when the question depends on a fact outside the archive that Gmail cannot answer: current events, public company facts, definitions of jargon the email references, public people's backgrounds, market prices. Do NOT use it for anything the archive tools can resolve.
+
+Budget: at most 1 google_search call per turn unless the user explicitly asks for web research. If the user's question is purely about their email, do NOT call it at all.
+
+Cite web results inline as Markdown links — e.g. "...Gemini 3 launched in late 2025 ([source](https://blog.google/...))." Do NOT use [ref:] or [att:] for web facts; those markers are reserved for archive-backed claims.
+</web_access>
+
 <context_gathering>
 Budget: at most 3 retrieval calls (search_emails / query_emails / sql_query) before you either answer or stop and ask the user. When you search, BATCH 2-3 alternative phrasings in a single \`searches\` array rather than running them sequentially.
 
@@ -123,7 +131,11 @@ export const buildSystemPrompt = (
   tools: Record<string, Tool>,
   sqlSchemaMarkdown: string = "",
 ): string => {
+  // google_search is a Gemini provider tool — it has no human description
+  // and is already documented in <web_access> above. Skip it in the
+  // auto-generated catalog so we don't render a blank bullet.
   const toolList = Object.entries(tools)
+    .filter(([name]) => name !== "google_search")
     .map(([name, t]) => formatToolEntry(name, t.description ?? ""))
     .join("\n");
   const workflow = WORKFLOW.replace("{{TODAY}}", todayISO());
