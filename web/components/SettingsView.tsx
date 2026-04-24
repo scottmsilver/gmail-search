@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { JobsRunningResponse, RunningJob } from "@/lib/backend";
+import type { CorpusStatus, JobsRunningResponse, RunningJob } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
 import { useShowSearchDebug } from "@/lib/prefs";
 
@@ -261,6 +261,63 @@ const DisplayPrefsCard = () => {
   );
 };
 
+// Small summary of the v-current summarize backlog, shown inside the
+// Summarize JobControlCard. Data comes from /api/status (same shape
+// used elsewhere). Polls every 10s — this view is already refreshing
+// jobs/running every 3s so one more cheap call is fine.
+const SummaryBacklog = () => {
+  const [status, setStatus] = useState<CorpusStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/status", { cache: "no-store" });
+        if (!res.ok) return;
+        const d = (await res.json()) as CorpusStatus;
+        if (!cancelled) setStatus(d);
+      } catch {
+        // ignore transient failure
+      }
+    };
+    void load();
+    const id = setInterval(load, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  if (!status) return null;
+  const pending = status.summary_pending ?? 0;
+  if (pending <= 0) return <div>Summary queue: empty.</div>;
+  const rate = status.summary_rate_per_sec ?? 0;
+  const etaSec = status.summary_eta_seconds ?? null;
+  const fmtCount = (n: number): string =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`;
+  const fmtEta = (s: number): string => {
+    if (s < 60) return `${Math.round(s)}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.round(s / 3600)}h`;
+    return `${(s / 86400).toFixed(1)}d`;
+  };
+  return (
+    <div title={status.summary_model_key ? `Under ${status.summary_model_key}` : undefined}>
+      Queue: <span className="font-medium text-foreground">{fmtCount(pending)}</span> pending
+      {rate > 0 && (
+        <>
+          {" · "}
+          <span className="font-medium text-foreground">{rate.toFixed(1)}/s</span>
+        </>
+      )}
+      {etaSec !== null && (
+        <>
+          {" · eta "}
+          <span className="font-medium text-foreground">{fmtEta(etaSec)}</span>
+        </>
+      )}
+    </div>
+  );
+};
+
 export const SettingsView = () => {
   const [data, setData] = useState<JobsRunningResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -432,6 +489,7 @@ export const SettingsView = () => {
       <JobControlCard
         title="Summarize"
         description="Generate per-message summaries via local Ollama (gemma4). Live rate + ETA below."
+        extra={<SummaryBacklog />}
         running={summarizeRunning}
         pid={summarizePid}
         starting={busy === "summarize"}
