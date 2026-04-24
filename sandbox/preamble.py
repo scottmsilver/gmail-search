@@ -2,7 +2,7 @@
 
 Responsibilities:
 - Load the retrieval-evidence DataFrame the caller dropped at
-  `/work/inputs.pkl` into the global name `evidence`.
+  `/work/inputs.json` into the global name `evidence`.
 - Open a read-only psycopg connection bound to the `gmail_analyst`
   role, exposed as `db`. Connection is returned autocommit=True +
   default_transaction_read_only=on so even a buggy snippet can't
@@ -22,8 +22,8 @@ whatever it wants the model to see. Return values are NOT captured
 
 from __future__ import annotations
 
+import json
 import os
-import pickle
 from pathlib import Path
 
 import matplotlib
@@ -44,16 +44,40 @@ _ARTIFACTS.mkdir(parents=True, exist_ok=True)
 
 
 def _load_evidence() -> pd.DataFrame:
-    inputs = _WORK / "inputs.pkl"
+    """Read /work/inputs.json (written by the orchestrator) and
+    materialise `evidence` as a DataFrame. We intentionally DO NOT
+    use pickle here — the evidence bytes originate from email bodies
+    and other user-influenced data, so pickle.load would be a remote
+    code execution gadget the moment real retrieval records get
+    plumbed in. JSON is safe and covers the columnar/record shapes
+    the orchestrator produces.
+
+    Accepted shapes (must match `sandbox._serialize_evidence_for_sandbox`):
+      - {"evidence": null}              → empty DataFrame
+      - {"evidence": [...rows...]}      → DataFrame from records
+      - {"evidence": {...columns...}}   → DataFrame from columns
+      - malformed or missing file       → empty DataFrame (best effort)
+    """
+    inputs = _WORK / "inputs.json"
     if not inputs.exists():
         return pd.DataFrame()
-    with inputs.open("rb") as fh:
-        payload = pickle.load(fh)
-    # Caller drops either a DataFrame or a dict with an "evidence" key.
-    if isinstance(payload, pd.DataFrame):
-        return payload
-    if isinstance(payload, dict) and "evidence" in payload:
-        return pd.DataFrame(payload["evidence"])
+    try:
+        with inputs.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        # A corrupt/missing file shouldn't crash the snippet at import
+        # time — give it an empty frame and let the snippet's own
+        # `evidence.empty` check drive the error message.
+        return pd.DataFrame()
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+    evidence = payload.get("evidence")
+    if evidence is None:
+        return pd.DataFrame()
+    if isinstance(evidence, list):
+        return pd.DataFrame(evidence)
+    if isinstance(evidence, dict):
+        return pd.DataFrame(evidence)
     return pd.DataFrame()
 
 

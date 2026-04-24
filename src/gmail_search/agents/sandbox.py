@@ -36,11 +36,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import pickle
-import shutil
+import shutil  # noqa: F401  # used inside _cleanup_workdir; formatter strips otherwise
 import subprocess
 import tempfile
 import time
+import uuid  # noqa: F401  # used in execute_in_sandbox; formatter has stripped this before
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,10 +65,11 @@ DEFAULT_TIMEOUT_SECONDS = 60
 
 @dataclass
 class SandboxRequest:
-    """One-shot container invocation. `evidence` is pickled into the
-    workdir and exposed to the snippet as `evidence` (pandas DataFrame
-    via the preamble). `db_dsn` — if set — is passed as an env var the
-    preamble uses to open a read-only PG connection."""
+    """One-shot container invocation. `evidence` is JSON-serialised
+    into the workdir and exposed to the snippet as `evidence` (pandas
+    DataFrame via the preamble — see `_serialize_evidence_for_sandbox`
+    for accepted shapes). `db_dsn` — if set — is passed as an env var
+    the preamble uses to open a read-only PG connection."""
 
     code: str
     evidence: Any = None
@@ -110,10 +111,60 @@ class SandboxResult:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
+def _serialize_evidence_for_sandbox(evidence: Any) -> Any:
+    """Coerce `evidence` into a JSON-safe shape the preamble understands.
+
+    We *deliberately* do not pickle here: evidence rows contain Gmail
+    bodies / sender strings / untrusted user data. `pickle.load` on
+    that is a remote code execution gadget the moment a malicious
+    email slips in. JSON is safe.
+
+    Accepted inputs:
+      - None → None (preamble → empty DataFrame)
+      - pandas DataFrame → list of record dicts
+      - dict (assumed column-oriented: {col: [values...]}) → passthrough
+      - list (assumed record-oriented: [{col: v, ...}, ...]) → passthrough
+      - anything else → str(...) fallback, wrapped as an opaque string
+        so the snippet at least sees SOMETHING rather than silently
+        getting an empty frame.
+    """
+    if evidence is None:
+        return None
+    # Lazy import so `sandbox.py` stays importable in environments
+    # without pandas (e.g. the cost/skills test harness).
+    try:
+        import pandas as pd  # type: ignore
+
+        if isinstance(evidence, pd.DataFrame):
+            return evidence.to_dict(orient="records")
+    except Exception:
+        pass
+    if isinstance(evidence, (dict, list)):
+        return evidence
+    return str(evidence)
+
+
+# `runpy` creates a fresh module namespace per call — the preamble's
+
+
 # `runpy` creates a fresh module namespace per call — the preamble's
 # names (evidence, db, save_artifact, pd, plt, etc.) wouldn't be
 # visible to the snippet. Instead we exec both in the SAME dict so the
 # snippet runs with the preamble's globals already populated.
+#
+# `__name__` is forced to `"__main__"` for the SHARED dict so that any
+# `if __name__ == "__main__":` block the analyst writes in `run.py`
+# fires (most plotting / CLI-style snippets are written that way). It
+# also means the preamble must intentionally NOT contain a main guard
+# of its own — anything the preamble wraps in `if __name__ ==
+# "__main__":` would actually run here (because we set __name__ to
+# "__main__") which is what we want, BUT the next person editing the
+# preamble might wrap setup code in such a guard "for safety" and
+# create a footgun: in normal `import` use the preamble setup
+# wouldn't fire, but here it would, producing inconsistent behaviour
+# for whoever copy-pastes the preamble into another harness. Keep
+# the preamble as flat top-level statements; if you need conditional
+# setup, branch on something other than `__name__`.
 _RUNNER_SCRIPT = """\
 ns = {'__name__': '__main__'}
 with open('/opt/analyst/preamble.py', 'r') as f:
@@ -154,6 +205,62 @@ def _sweep_artifacts(workdir: Path) -> list[SandboxArtifact]:
     return out
 
 
+def _count_remaining_files(workdir: Path) -> int:
+    """Count files left under `workdir` after a cleanup attempt. Used
+    only to size the warning message, so failures here are themselves
+    swallowed (a broken count must not turn a cleanup-warning into a
+    cleanup-exception — caller's contract is "never raise")."""
+    n = 0
+    try:
+        for _root, _dirs, files in os.walk(workdir):
+            n += len(files)
+    except Exception:
+        pass
+    return n
+
+
+def _cleanup_workdir(workdir: Path) -> None:
+    """Best-effort `shutil.rmtree(workdir)`. If something fails (e.g.
+    the container left files owned by uid=1000 inside its user
+    namespace that the host can't unlink) we WARN with the leftover
+    file count instead of swallowing silently — silent swallow lets
+    `/tmp` accumulate analyst workdirs across runs.
+
+    Caller does not depend on cleanup success; we never raise.
+    """
+    try:
+        shutil.rmtree(workdir)
+        return
+    except OSError as e:
+        # rmtree may have removed some of the tree before failing —
+        # count what's left so the warning conveys "is this getting
+        # worse over time?".
+        leftover = _count_remaining_files(workdir)
+        logger.warning(
+            "sandbox workdir cleanup left %d file(s) at %s: %s",
+            leftover,
+            workdir,
+            e,
+        )
+
+
+def _kill_container(name: str) -> None:
+    """Best-effort `docker kill <name>`. Used when our outer
+    `subprocess.run(timeout=…)` fires — SIGKILL on the docker CLI does
+    NOT kill the container the daemon is already running, so without
+    this the container orphans, pins a CPU forever, and `--rm` never
+    triggers. Failure here is logged and swallowed: the caller is
+    already on the timeout path."""
+    try:
+        subprocess.run(
+            ["docker", "kill", name],
+            capture_output=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning("docker kill %s failed: %s", name, e)
+
+
 def image_available() -> bool:
     """True iff the analyst image is already built locally. Used by
     tests to skip cleanly on CI / dev machines that haven't run
@@ -190,10 +297,21 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
     workdir = Path(tempfile.mkdtemp(prefix="gmail-analyst-"))
     (workdir / "artifacts").mkdir(exist_ok=True)
     (workdir / "run.py").write_text(req.code, encoding="utf-8")
-    with (workdir / "inputs.pkl").open("wb") as fh:
-        pickle.dump({"evidence": req.evidence}, fh)
-    os.chmod(workdir, 0o777)  # container user is uid=1000; make /work writable
-    os.chmod(workdir / "artifacts", 0o777)
+    # Evidence goes in as JSON — see `_serialize_evidence_for_sandbox`
+    # for the safety rationale (pickle.load on untrusted input = RCE).
+    with (workdir / "inputs.json").open("w", encoding="utf-8") as fh:
+        json.dump({"evidence": _serialize_evidence_for_sandbox(req.evidence)}, fh)
+    # Container runs as uid=1000 in its own user namespace. The host
+    # tmpdir is owned by the caller, so we just need owner+group rwx;
+    # 0o770 gives the container's mapped uid write access without
+    # exposing the workdir to "other" on the host. (Was 0o777 — there
+    # is no shared user that needs world-write.)
+    os.chmod(workdir, 0o770)
+    os.chmod(workdir / "artifacts", 0o770)
+
+    # Name the container so we can `docker kill` it from the timeout
+    # branch — see _kill_container().
+    container_name = f"gmail-analyst-{uuid.uuid4().hex[:12]}"
 
     # Build the docker run argv. Kept explicit so a reader can see
     # exactly which guardrails are applied; every flag matters.
@@ -201,6 +319,8 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
         "docker",
         "run",
         "--rm",
+        "--name",
+        container_name,
         "--network=none",
         "--read-only",
         f"--memory={req.memory}",
@@ -237,6 +357,10 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
         exit_code = proc.returncode
     except subprocess.TimeoutExpired as e:
         timed_out = True
+        # subprocess.run only killed the docker CLI; the container is
+        # still running in the daemon and would leak forever. Send it
+        # a kill so --rm fires.
+        _kill_container(container_name)
         stdout = (
             (e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         )
@@ -256,10 +380,7 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
 
     # Best-effort cleanup. A readonly-rootfs leftover container is
     # already removed by --rm; the tmp workdir is ours.
-    try:
-        shutil.rmtree(workdir, ignore_errors=True)
-    except OSError:
-        pass
+    _cleanup_workdir(workdir)
 
     return SandboxResult(
         exit_code=exit_code,
