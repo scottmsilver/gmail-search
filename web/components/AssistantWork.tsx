@@ -18,12 +18,14 @@ type ToolPart = {
 
 type ReasoningPart = { type: "reasoning"; text: string };
 
-// Deep-mode stage events travel as `data-deep-stage` parts. We treat
-// them as a third kind of "work" so they collect into the same
-// disclosure as tool calls / reasoning — same gray mono styling, no
-// colors or emoji, same expand-to-see-JSON behavior.
+// Deep-mode stage events travel as `data-deep-stage` SSE frames,
+// which assistant-ui's client reshapes to `{type: "data", name:
+// "deep-stage", data: {...}}` before they land in m.content. So we
+// filter on `type === "data" && name === "deep-stage"` — NOT on the
+// wire protocol's `type === "data-deep-stage"`. (Cost me an hour.)
 type DeepStagePart = {
-  type: "data-deep-stage";
+  type: "data";
+  name: "deep-stage";
   data: { kind: string; payload?: unknown };
 };
 
@@ -31,7 +33,8 @@ type WorkPart = ToolPart | ReasoningPart | DeepStagePart;
 
 const isToolPart = (p: { type: string }): p is ToolPart => p.type === "tool-call";
 const isReasoningPart = (p: { type: string }): p is ReasoningPart => p.type === "reasoning";
-const isDeepStagePart = (p: { type: string }): p is DeepStagePart => p.type === "data-deep-stage";
+const isDeepStagePart = (p: { type: string; name?: string }): p is DeepStagePart =>
+  p.type === "data" && (p as { name?: string }).name === "deep-stage";
 
 const Caret = ({ open }: { open: boolean }) => (
   <svg
