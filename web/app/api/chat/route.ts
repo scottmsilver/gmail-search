@@ -25,6 +25,7 @@ import { pickTwoRandomVariants } from "@/lib/battleVariants";
 import { ChatLogger } from "@/lib/chatLog";
 import { collectKnownRefs, findBrokenRefs } from "@/lib/citationCheck";
 import { sanitizeConversation } from "@/lib/sanitizeConversation";
+import { estimateCostUsd } from "@/lib/pricing";
 import { getSqlSchemaMarkdown } from "@/lib/sqlSchema";
 import { buildSystemPrompt } from "@/lib/systemPrompt";
 import { buildTools } from "@/lib/tools";
@@ -663,6 +664,24 @@ export async function POST(req: NextRequest) {
       // could otherwise burn another 15 tool calls; cap the whole turn at 25.
       const TURN_TOOL_BUDGET = 25;
       let toolCallsSoFar = 0;
+      // Token totals across every validation retry for this turn — the UI
+      // sees ONE `data-turn-cost` part summing the whole turn so the user
+      // doesn't have to add up three separate "cost of retry #n" blurbs.
+      let totalInputTokens = 0;
+      let totalOutputTokens = 0;
+      const emitTurnCost = () => {
+        const usd = estimateCostUsd(model, totalInputTokens, totalOutputTokens);
+        writer.write({
+          type: "data-turn-cost",
+          id: `tc-${logger.id}`,
+          data: {
+            model,
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            usd,
+          },
+        });
+      };
 
       for (let attempt = 0; attempt <= MAX_VALIDATION_RETRIES; attempt++) {
         await logger.log("attempt", { attempt: attempt + 1 });
@@ -697,11 +716,16 @@ export async function POST(req: NextRequest) {
           writer.merge(uiStream.pipeThrough(suppressTextChunks()));
         }
 
-        const [finalText, steps, reasoning] = await Promise.all([
+        const [finalText, steps, reasoning, usage] = await Promise.all([
           result.text,
           result.steps,
           result.reasoningText,
+          result.totalUsage,
         ]);
+
+        // Accumulate across retries — one row per turn, not per attempt.
+        totalInputTokens += usage.inputTokens ?? 0;
+        totalOutputTokens += usage.outputTokens ?? 0;
 
         if (reasoning) {
           await logger.log("reasoning", { attempt: attempt + 1, text: reasoning });
@@ -790,6 +814,7 @@ export async function POST(req: NextRequest) {
             });
             await saveConversation(conversationId, persisted, deriveTitle(messages));
           }
+          emitTurnCost();
           return;
         }
         await logger.log("validation", {
@@ -832,6 +857,7 @@ export async function POST(req: NextRequest) {
             });
             await saveConversation(conversationId, persisted, deriveTitle(messages));
           }
+          emitTurnCost();
           return;
         }
         if (attempt === MAX_VALIDATION_RETRIES || stuck || overBudget) {
@@ -862,6 +888,7 @@ export async function POST(req: NextRequest) {
             unresolved_broken: broken,
             stopped_for: stuck ? "convergence" : overBudget ? "budget" : "max_attempts",
           });
+          emitTurnCost();
           return;
         }
 

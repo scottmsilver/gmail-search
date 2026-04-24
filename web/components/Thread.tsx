@@ -54,11 +54,43 @@ const UserMessage = () => (
 
 type DebugIdData = { id: string; log_path: string };
 type CitationWarningData = { broken: string[]; message: string };
+type TurnCostData = {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  usd: number;
+};
 
 const DebugIdPart = ({ data }: { data: DebugIdData }) => <DebugIdBadge data={data} />;
 const CitationWarningPart = ({ data }: { data: CitationWarningData }) => (
   <div className="my-2 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-800">
     ⚠ {data.message} ({data.broken.join(", ")})
+  </div>
+);
+
+// Short compact-thousands formatter. 1,243 → "1.2K", 2_400_000 → "2.4M",
+// keeps token counts readable in a one-line footer.
+const compactNum = (n: number): string => {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+};
+
+// USD formatter that shows enough precision to see sub-cent turns.
+// $0.0004 is more useful than rounding to "$0.00" when the model is
+// Flash Lite.
+const fmtUsd = (usd: number): string => {
+  if (usd <= 0) return "$0";
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(3)}`;
+};
+
+const TurnCostPart = ({ data }: { data: TurnCostData }) => (
+  <div
+    className="mt-2 text-[11px] text-neutral-400 select-none"
+    title={`${data.model} · ${data.input_tokens.toLocaleString()} in / ${data.output_tokens.toLocaleString()} out`}
+  >
+    {fmtUsd(data.usd)} · {compactNum(data.input_tokens)} in · {compactNum(data.output_tokens)} out
   </div>
 );
 
@@ -78,6 +110,7 @@ const AssistantMessage = () => (
           by_name: {
             "debug-id": DebugIdPart as never,
             "citation-warning": CitationWarningPart as never,
+            "turn-cost": TurnCostPart as never,
             battle: BattleMessage as never,
             // Register `deep-stage` with a Hidden renderer so assistant-ui
             // surfaces the parts through `useMessage()`. AssistantWork
