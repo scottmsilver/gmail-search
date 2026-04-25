@@ -95,9 +95,41 @@ const ModeToggle = ({
   );
 };
 
+// Read the current theme's surface + primary-text colors from the
+// CSS vars we publish on :root. Re-reads on `data-theme` changes so
+// switching to dark / sepia / slate repaints the email body.
+//
+// Why we touch the DOM at all: the iframe is isolated — CSS custom
+// properties set on the parent document don't propagate into srcDoc.
+// We have to compute them on the host and inline the values.
+const useThemeColors = () => {
+  const [colors, setColors] = useState({ bg: "#ffffff", fg: "#111111", accent: "#2563eb" });
+  useEffect(() => {
+    const read = () => {
+      const cs = getComputedStyle(document.documentElement);
+      setColors({
+        bg: cs.getPropertyValue("--bg-surface").trim() || "#ffffff",
+        fg: cs.getPropertyValue("--fg-primary").trim() || "#111111",
+        accent: cs.getPropertyValue("--accent").trim() || "#2563eb",
+      });
+    };
+    read();
+    // Theme toggle flips the data-theme attribute on <html>; watch for
+    // that and re-read so the email body re-skins immediately.
+    const obs = new MutationObserver(read);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "class"],
+    });
+    return () => obs.disconnect();
+  }, []);
+  return colors;
+};
+
 const SandboxedHtml = ({ html }: { html: string }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(300);
+  const { bg, fg, accent } = useThemeColors();
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -135,12 +167,16 @@ const SandboxedHtml = ({ html }: { html: string }) => {
 
   // Wrap the email's HTML in a minimal doc so its own styles apply and
   // there's a <base target="_blank"> so any link inside the email
-  // opens in a new tab instead of trying to nav the iframe.
+  // opens in a new tab instead of trying to nav the iframe. Theme-aware
+  // defaults — email HTML that doesn't set its own bg/color picks up
+  // the active theme. Emails with inline styles (tables with baked-in
+  // white cells, marketing templates) keep their own look, which is
+  // the right call: rewriting them would break more than it fixes.
   const doc = `<!doctype html><html><head><base target="_blank">
 <style>
-  html, body { margin: 0; padding: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif; color: #111; background: #fff; word-break: break-word; }
+  html, body { margin: 0; padding: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif; color: ${fg}; background: ${bg}; word-break: break-word; }
   img { max-width: 100%; height: auto; }
-  a { color: #2563eb; }
+  a { color: ${accent}; }
   table { max-width: 100%; }
 </style>
 </head><body>${html}</body></html>`;
@@ -155,8 +191,11 @@ const SandboxedHtml = ({ html }: { html: string }) => {
       // / Outlook render untrusted HTML.
       sandbox="allow-same-origin"
       title="Email body"
-      className="w-full rounded border bg-white"
-      style={{ height: `${height}px` }}
+      className="w-full rounded border"
+      // Match the iframe's body bg on the HOST side too — otherwise
+      // there's a split-second white flash before srcDoc paints, which
+      // is visible on dark / sepia / slate themes.
+      style={{ backgroundColor: bg, height: `${height}px` }}
     />
   );
 };
