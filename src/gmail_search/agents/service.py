@@ -29,8 +29,6 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
-
 from gmail_search.agents.session import (
     append_event,
     create_session,
@@ -40,6 +38,7 @@ from gmail_search.agents.session import (
     new_session_id,
 )
 from gmail_search.store.db import get_connection
+from pydantic import BaseModel
 
 
 def _use_real_pipeline() -> bool:
@@ -64,7 +63,12 @@ class AnalyzeRequest(BaseModel):
 
     conversation_id: str | None = None
     question: str
-    model: str = "gemini-2.5-pro"
+    # When None, each sub-agent falls back to its env var
+    # (GMAIL_PLANNER_MODEL etc.) or its hardcoded default. Set this
+    # to override every stage with the same model — the path the
+    # web picker takes when the user picks a non-default model for
+    # deep mode.
+    model: str | None = None
 
 
 def _sse(event_type: str, data: dict) -> str:
@@ -154,7 +158,12 @@ async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         conn.close()
 
 
-async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncIterator[str]:
+async def _real_run(
+    db_path: Path,
+    session_id: str,
+    question: str,
+    default_model: str | None = None,
+) -> AsyncIterator[str]:
     """Live pipeline: fire the Orchestrator as a background task while
     this generator polls the session's event log and streams every
     new row to the client as an SSE frame.
@@ -163,6 +172,12 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
     its durable log); we just watch. This keeps the orchestrator free
     of streaming concerns — it's a pure async function that blocks
     until the turn is done.
+
+    `default_model`, if provided, applies to every sub-agent (Planner,
+    Retriever, Analyst, Writer, Critic). Per-stage GMAIL_*_MODEL env
+    overrides still win — they're the power-user lever for running
+    Writer on Pro and the rest on Flash. When `default_model` is None,
+    each stage falls back to its env var or its hardcoded default.
     """
     import asyncio
 
@@ -236,15 +251,16 @@ async def _real_run(db_path: Path, session_id: str, question: str) -> AsyncItera
             session_id=session_id,
             db_conn=conn,
             instruction=instr,
+            model=default_model,
         )
 
     orch = Orchestrator(
         session_id=session_id,
         conn=conn,
-        planner=build_planner_agent(),
-        retriever=build_retriever_agent(),
-        writer=build_writer_agent(),
-        critic=build_critic_agent(),
+        planner=build_planner_agent(model=default_model),
+        retriever=build_retriever_agent(model=default_model),
+        writer=build_writer_agent(model=default_model),
+        critic=build_critic_agent(model=default_model),
         analyst_factory=_analyst_factory,
         invoke=_invoke,
     )
@@ -354,7 +370,12 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
                 # Real path: run the orchestrator, mirror events into
                 # the SSE stream by polling agent_events (the
                 # orchestrator itself only writes to the DB).
-                async for frame in _real_run(db_path, session_id, req.question):
+                async for frame in _real_run(
+                    db_path,
+                    session_id,
+                    req.question,
+                    default_model=req.model,
+                ):
                     yield frame
             else:
                 async for frame in _stub_run(db_path, session_id, req.question):

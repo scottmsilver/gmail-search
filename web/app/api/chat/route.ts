@@ -260,6 +260,10 @@ type DeepStreamArgs = {
   // this the user reloads the conversation and sees only the half
   // they typed (or worse, nothing).
   messages: UIMessage[];
+  // Picker-selected model — applied to every deep sub-agent
+  // (Planner / Retriever / Analyst / Writer / Critic). When omitted,
+  // Python falls back to per-stage env vars / built-in defaults.
+  model: string;
 };
 
 const createDeepModeStream = (args: DeepStreamArgs) =>
@@ -296,6 +300,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         body: JSON.stringify({
           question: args.question,
           conversation_id: args.conversationId,
+          model: args.model,
         }),
       });
       if (!upstream.ok || !upstream.body) {
@@ -342,6 +347,37 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       // terminating branch so the saved version matches what the
       // user saw, including error fallbacks.
       let persistedAssistantText = "";
+
+      // Roll up every per-stage cost event into a single turn total —
+      // the deep service emits one `cost` SSE per sub-agent invocation
+      // with `{ usd, input_tokens, output_tokens, model }`. We sum,
+      // then emit ONE `data-turn-cost` part at the bottom (matching
+      // what regular chat already does so the UI renderer is shared).
+      let totalInputTokens = 0;
+      let totalOutputTokens = 0;
+      let totalUsd = 0;
+
+      const accumulateCost = (payload: unknown) => {
+        if (!payload || typeof payload !== "object") return;
+        const p = payload as Record<string, unknown>;
+        if (typeof p.input_tokens === "number") totalInputTokens += p.input_tokens;
+        if (typeof p.output_tokens === "number") totalOutputTokens += p.output_tokens;
+        if (typeof p.usd === "number") totalUsd += p.usd;
+      };
+
+      const emitTurnCost = () => {
+        if (totalInputTokens === 0 && totalOutputTokens === 0 && totalUsd === 0) return;
+        writer.write({
+          type: "data-turn-cost",
+          id: `tc-deep-${args.loggerId}`,
+          data: {
+            model: args.model,
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            usd: totalUsd,
+          },
+        });
+      };
 
       const emitStage = (kind: string, payload: unknown) => {
         writer.write({
@@ -396,6 +432,13 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
             } else if (kind === "session") {
               /* session id frame — don't surface in the UI */
             } else {
+              if (kind === "cost") {
+                // Per-stage cost lands inside the AssistantWork
+                // disclosure (still emitted as a deep-stage) AND rolls
+                // up into the bottom-of-bubble total so the user sees
+                // the full turn at a glance.
+                accumulateCost(data.payload ?? data);
+              }
               emitStage(kind, data.payload ?? data);
             }
           }
@@ -427,6 +470,9 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
           writer.write({ type: "text-delta", id, delta: persistedAssistantText });
           writer.write({ type: "text-end", id });
         }
+        // Emit the bottom-of-bubble cost LAST so it sits below the
+        // assistant text, mirroring regular-chat layout.
+        emitTurnCost();
         await persistAssistantText(persistedAssistantText);
       }
     },
@@ -488,6 +534,7 @@ export async function POST(req: NextRequest) {
       loggerId: logger.id,
       loggerPath: logger.path,
       messages,
+      model,
     });
     return createUIMessageStreamResponse({ stream });
   }
