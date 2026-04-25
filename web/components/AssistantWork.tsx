@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { AttachmentInlineViewer } from "./AttachmentInlineViewer";
+import { JsonView } from "./JsonView";
 import {
   type DeepStagePart,
   type ReasoningPart,
@@ -49,14 +50,6 @@ const stripBinary = (value: unknown): unknown => {
     return out;
   }
   return value;
-};
-
-const formatJson = (value: unknown): string => {
-  try {
-    return JSON.stringify(stripBinary(value), null, 2);
-  } catch {
-    return String(value);
-  }
 };
 
 const summarizeArgs = (args: unknown): string => {
@@ -143,9 +136,7 @@ const ToolBlock = ({ part }: { part: ToolPart }) => {
         <div className="mt-1 ml-4 border-l-2 border-neutral-200 pl-3 space-y-2">
           <div>
             <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Arguments</div>
-            <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words">
-              {formatJson(part.args)}
-            </pre>
+            <JsonView value={stripBinary(part.args)} />
           </div>
           {/* For get_attachment, show the model's exact view (text block,
               PDF iframe, image, or page rasters) BEFORE the raw JSON so
@@ -160,9 +151,13 @@ const ToolBlock = ({ part }: { part: ToolPart }) => {
           )}
           <div>
             <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Result (raw)</div>
-            <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
-              {part.result === undefined ? "(running…)" : formatJson(part.result)}
-            </pre>
+            {part.result === undefined ? (
+              <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 text-[11px] leading-relaxed font-mono text-neutral-400">
+                (running…)
+              </pre>
+            ) : (
+              <JsonView value={stripBinary(part.result)} />
+            )}
           </div>
         </div>
       )}
@@ -258,9 +253,7 @@ const DeepStageBlock = ({ part }: { part: DeepStagePart }) => {
         <div className="mt-1 ml-4 border-l-2 border-neutral-200 pl-3 space-y-2">
           <div>
             <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-0.5">Payload</div>
-            <pre className="bg-neutral-50 border border-neutral-200 rounded p-2 overflow-x-auto text-[11px] leading-relaxed font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
-              {formatJson(part.data.payload)}
-            </pre>
+            <JsonView value={stripBinary(part.data.payload)} />
           </div>
         </div>
       )}
