@@ -458,6 +458,23 @@ export async function POST(req: NextRequest) {
   const question = lastUserText(messages);
   const conversationId = body.conversation_id || null;
 
+  // Persist the user-side messages IMMEDIATELY, before any LLM work
+  // starts. Without this, navigating away mid-stream meant the user's
+  // typed message was never saved — saveConversation only ran inside
+  // the post-completion branches, and a client disconnect aborts the
+  // stream before they fire.
+  //
+  // Fire-and-forget on purpose — we don't want a save hiccup to delay
+  // first-token latency. The post-completion save will overwrite this
+  // row with the full transcript on success.
+  if (conversationId) {
+    const initialPersist: Array<{ role: string; parts: unknown[] }> = messages.map((m) => ({
+      role: m.role,
+      parts: m.parts as unknown[],
+    }));
+    void saveConversation(conversationId, initialPersist, deriveTitle(messages));
+  }
+
   // Deep-mode fork: when the picker toggle is on, forward to the
   // Python multi-agent service and translate its SSE event stream
   // into a UIMessageStream the chat runtime already knows how to
