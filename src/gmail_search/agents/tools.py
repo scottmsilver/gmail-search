@@ -196,13 +196,109 @@ async def get_thread(thread_id: str) -> dict:
     return data
 
 
+# Cap on how many items one batch tool call can request. Started at
+# 20; first session with batch tools immediately filled multiple
+# `get_thread_batch` calls to the 20-cap, so the agent clearly wants
+# to go bigger. Bumped to 100. Postgres handles 100 concurrent
+# read-only queries fine; the cap mainly exists to bound a runaway
+# plan from queueing thousands of concurrent requests.
+BATCH_MAX_ITEMS = 100
+
+
+async def search_emails_batch(searches: list[dict]) -> dict:
+    """Run many semantic searches concurrently. Each item is a dict
+    matching `search_emails`'s signature: `{query, date_from?,
+    date_to?, top_k?}`. Use this whenever you have ≥1 search to
+    issue — even one search goes through the batch tool.
+
+    Returns `{"results": [{"input": <input dict>, "result": <search_emails shape>}, ...]}`.
+    Per-search errors land in that entry's `result` as `{"error": ...}`.
+
+    Cap: BATCH_MAX_ITEMS searches per call.
+    """
+    import asyncio as _asyncio
+
+    if not isinstance(searches, list) or not searches:
+        return {"error": "searches must be a non-empty list of dicts"}
+    if len(searches) > BATCH_MAX_ITEMS:
+        return {"error": f"searches cap is {BATCH_MAX_ITEMS}; got {len(searches)}. Split into multiple batches."}
+    results = await _asyncio.gather(*[search_emails(**s) for s in searches])
+    return {"results": [{"input": s, "result": r} for s, r in zip(searches, results)]}
+
+
+async def query_emails_batch(filters: list[dict]) -> dict:
+    """Run many structured filters concurrently. Each item is a dict
+    matching `query_emails`'s signature: any of `{sender,
+    subject_contains, date_from, date_to, label, has_attachment,
+    order_by, limit}`.
+
+    Returns `{"results": [{"input": <input dict>, "result": <query_emails shape>}, ...]}`.
+
+    Cap: BATCH_MAX_ITEMS filters per call.
+    """
+    import asyncio as _asyncio
+
+    if not isinstance(filters, list) or not filters:
+        return {"error": "filters must be a non-empty list of dicts"}
+    if len(filters) > BATCH_MAX_ITEMS:
+        return {"error": f"filters cap is {BATCH_MAX_ITEMS}; got {len(filters)}. Split into multiple batches."}
+    results = await _asyncio.gather(*[query_emails(**f) for f in filters])
+    return {"results": [{"input": f, "result": r} for f, r in zip(filters, results)]}
+
+
+async def get_thread_batch(thread_ids: list[str]) -> dict:
+    """Fetch many threads concurrently in a single tool call. Use
+    this — not N sequential `get_thread` calls — whenever you need
+    multiple threads' bodies. Same per-thread response shape as
+    `get_thread`; ordering matches the input.
+
+    Returns `{"results": [{"thread_id": "...", "result": <get_thread shape>}, ...]}`.
+    Per-thread errors land in that thread's `result` as `{"error": ...}` —
+    the batch as a whole still succeeds so the agent gets every other
+    thread's data without retrying the whole thing.
+
+    Cap: BATCH_MAX_ITEMS thread_ids per call. Beyond that, split.
+    """
+    import asyncio as _asyncio
+
+    if not isinstance(thread_ids, list) or not thread_ids:
+        return {"error": "thread_ids must be a non-empty list of strings"}
+    if len(thread_ids) > BATCH_MAX_ITEMS:
+        return {"error": f"thread_ids cap is {BATCH_MAX_ITEMS}; got {len(thread_ids)}. Split into multiple batches."}
+    results = await _asyncio.gather(*[get_thread(tid) for tid in thread_ids])
+    return {"results": [{"thread_id": tid, "result": r} for tid, r in zip(thread_ids, results)]}
+
+
 # ── sql_query ──────────────────────────────────────────────────────
 
 
 async def sql_query(query: str) -> dict:
-    """Run a read-only SELECT. The server's same safety gate used by
-    chat mode applies: only SELECT/WITH, no DDL / DML, no introspection
-    of pg_catalog / information_schema, 500-row + 10s timeout.
+    """Run a read-only SELECT against the messages DB (Postgres +
+    ParadeDB). Same safety gate as chat mode: only SELECT/WITH, no
+    DDL/DML, no introspection of pg_catalog / information_schema,
+    500-row + 10s timeout.
+
+    Call `describe_schema` first if unsure about column names —
+    common gotchas: `from_addr` (not `sender`), `body_text` (not
+    `body`), `id` (not `message_id`), no `snippet` column.
+
+    REQUIRED — BM25 for free-text. The server REJECTS `LIKE`/`ILIKE`
+    on these columns (forces seq scan, ~50x slower):
+        messages: subject, body_text, from_addr, to_addr
+        attachments: filename, extracted_text
+    Use the `@@@` operator with the row PK (`id`) instead.
+    Translation table:
+        WHERE subject ILIKE '%credit%'
+            →  WHERE id @@@ 'subject:credit'
+        WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'
+            →  WHERE id @@@ 'from_addr:delta AND subject:cancel'
+        WHERE body_text LIKE '%refund issued%'  (phrase)
+            →  WHERE id @@@ 'body_text:"refund issued"'
+    Add `ORDER BY paradedb.score(id) DESC` for relevance.
+
+    Escape hatch: any query containing `@@@` skips the LIKE check —
+    so a BM25 prefilter + LIKE refinement is allowed (use only when
+    BM25 truly can't express the predicate).
 
     Use for aggregations, multi-field OR, JOINs, NOT EXISTS, relative-
     date arithmetic — anything search_emails / query_emails can't
@@ -221,6 +317,45 @@ async def sql_query(query: str) -> dict:
         clipped_rows.append(clipped)
     data["rows"] = clipped_rows
     return data
+
+
+async def sql_query_batch(queries: list[str]) -> dict:
+    """Run many independent SELECT queries concurrently in a single
+    tool call. Use this — not N sequential `sql_query` calls — when
+    you have multiple independent queries (different time windows,
+    senders, year-buckets, ticket numbers).
+
+    Returns `{"results": [{"query": "...", "result": <sql_query shape>}, ...]}`.
+    Per-query errors (validation rejection, runtime error) land in
+    that query's `result` as `{"error": ...}`; the batch as a whole
+    still succeeds so the agent gets every other query's data
+    without retrying the whole batch.
+
+    Each query goes through the same safety gate as `sql_query`
+    (BM25 enforcement, read-only, 500-row + 10s timeout each).
+    Cap: BATCH_MAX_ITEMS queries per call. Beyond that, split.
+    """
+    import asyncio as _asyncio
+
+    if not isinstance(queries, list) or not queries:
+        return {"error": "queries must be a non-empty list of SQL strings"}
+    if len(queries) > BATCH_MAX_ITEMS:
+        return {"error": f"queries cap is {BATCH_MAX_ITEMS}; got {len(queries)}. Split into multiple batches."}
+    results = await _asyncio.gather(*[sql_query(q) for q in queries])
+    return {"results": [{"query": q, "result": r} for q, r in zip(queries, results)]}
+
+
+# ── describe_schema ────────────────────────────────────────────────
+
+
+async def describe_schema() -> dict:
+    """Return the markdown schema documentation for every table the
+    `sql_query` tool can read. Use this BEFORE writing a non-trivial
+    `sql_query` if you're unsure about a column name — the docs include
+    canonical names (e.g. `from_addr` not `sender`, `body_text` not
+    `body`, `id` not `message_id`), per-column notes, and BM25
+    guidance. Cheap call; result is short (~few KB)."""
+    return await _get("/api/sql_schema")
 
 
 # ── get_attachment ─────────────────────────────────────────────────
@@ -252,6 +387,25 @@ async def get_attachment(attachment_id: int, mode: str = "text") -> dict:
     return await _get(f"/api/attachment/{attachment_id}/render_pages")
 
 
+async def get_attachment_batch(items: list[dict]) -> dict:
+    """Fetch many attachments concurrently. Each item is a dict
+    matching `get_attachment`'s signature: `{attachment_id, mode?}`
+    where `mode` defaults to `"text"`.
+
+    Returns `{"results": [{"input": <input dict>, "result": <get_attachment shape>}, ...]}`.
+
+    Cap: BATCH_MAX_ITEMS attachments per call.
+    """
+    import asyncio as _asyncio
+
+    if not isinstance(items, list) or not items:
+        return {"error": "items must be a non-empty list of dicts"}
+    if len(items) > BATCH_MAX_ITEMS:
+        return {"error": f"items cap is {BATCH_MAX_ITEMS}; got {len(items)}. Split into multiple batches."}
+    results = await _asyncio.gather(*[get_attachment(**it) for it in items])
+    return {"results": [{"input": it, "result": r} for it, r in zip(items, results)]}
+
+
 # ── ADK tool factory ───────────────────────────────────────────────
 
 
@@ -264,8 +418,14 @@ def build_retrieval_tools() -> list:
 
     return [
         FunctionTool(search_emails),
+        FunctionTool(search_emails_batch),
         FunctionTool(query_emails),
+        FunctionTool(query_emails_batch),
         FunctionTool(get_thread),
+        FunctionTool(get_thread_batch),
         FunctionTool(sql_query),
+        FunctionTool(sql_query_batch),
+        FunctionTool(describe_schema),
         FunctionTool(get_attachment),
+        FunctionTool(get_attachment_batch),
     ]

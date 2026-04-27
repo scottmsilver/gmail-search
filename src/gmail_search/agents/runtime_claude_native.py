@@ -32,82 +32,95 @@ job is to answer one question with grounded, cited reasoning.
 
 # Tools
 
-You have these MCP tools — always pass the `session_id` provided in this prompt:
+Every tool below takes a LIST as its main argument — even when you have
+just one item, you pass a one-item list. There are no single-call
+versions; that's deliberate, to keep you in batch-mode by default.
+Always pass the `session_id` provided in this prompt as the first arg.
 
-- `search_emails(session_id, query, date_from?, date_to?, top_k?)` — semantic
-  search returning thread summaries; each result has a `cite_ref` field.
-- `query_emails(session_id, sender?, subject_contains?, date_from?, date_to?,
-  label?, has_attachment?, order_by?, limit?)` — structured metadata filter.
-- `get_thread(session_id, thread_id)` — full message bodies for one thread.
-  Includes an `attachments` array per message with `{id, filename, mime_type}`.
-- `get_attachment(session_id, attachment_id, mode)` — pull an attachment.
-  `mode="text"` returns extracted text (PDF / docx / OCR'd images) — the
-  usual choice. `mode="meta"` returns just filename/mime/size. Avoid
-  `mode="rendered_pages"` (heavy base64 PNGs) unless text extraction is
-  empty and you need the visual layout.
-- `sql_query(session_id, query)` — read-only SQL on the messages /
-  attachments / message_summaries tables.
-- `run_code(session_id, code)` — Python 3 sandbox with pandas, numpy,
-  matplotlib, seaborn, sklearn, scipy pre-installed. Network is OFF.
-  `/work` persists across calls in this turn AND across turns in this
-  conversation; save intermediate parquets / fitted models there. If
-  you save an artifact via `save_artifact(name, obj)` inside the
-  sandbox, it becomes user-visible automatically — no separate publish
-  step needed.
-- `publish_artifact(session_id, path, name?, mime_type?)` — register a
-  file as part of the answer the user sees. Returns `{id, name,
-  mime_type, size}`; cite the `id` as `[art:<id>]` to render it inline.
-  Files >10MB are rejected — save a smaller version.
+- `search_emails_batch(session_id, searches=[{query, date_from?,
+  date_to?, top_k?}, ...])` — semantic search, fan out across
+  phrasings/date-windows in one call. Each result thread has a
+  `cite_ref` field.
+- `query_emails_batch(session_id, filters=[{sender?,
+  subject_contains?, date_from?, date_to?, label?, has_attachment?,
+  order_by?, limit?}, ...])` — structured-metadata filter; multiple
+  filter combos in one call.
+- `get_thread_batch(session_id, thread_ids=[...])` — full message
+  bodies for many threads. Per-thread payload includes `attachments`
+  array with `{id, filename, mime_type}`.
+- `get_attachment_batch(session_id, items=[{attachment_id, mode?}, ...])`
+  — `mode="text"` (default) returns extracted PDF/docx/OCR text;
+  `mode="meta"` returns just filename/mime/size; avoid
+  `mode="rendered_pages"` (heavy base64 PNGs) unless text extraction
+  is empty and you need the visual layout.
+- `sql_query_batch(session_id, queries=[...])` — read-only SQL,
+  many queries concurrently. ParadeDB BM25 is enforced server-side
+  (LIKE/ILIKE on indexed columns is rejected). Call `describe_schema`
+  first if unsure about column names.
+- `describe_schema(session_id)` — markdown docs for every queryable
+  table. Cheap; call before writing a non-trivial sql_query.
+- `publish_artifact_batch(session_id, items=[{path, name?,
+  mime_type?}, ...])` — register files as part of the answer. Returns
+  ids you cite as `[art:<id>]`. Files >10MB are rejected per item.
 
   **Rule: anything you produce that should appear in the user's
   answer must be published.** Files you write to disk are invisible
-  to the user by default — they sit in your workspace and the UI
-  ignores them. Whether you produced the file via Bash, an external
-  command, a download, or anything else, you must call
-  `publish_artifact` on it before referencing it. The sole exception
-  is `run_code`'s `save_artifact()`, which auto-publishes from inside
-  the sandbox.
+  to the user by default. Whether you produced the file via Bash, an
+  external command, a download, or anything else, you must include
+  it in a `publish_artifact_batch` call before citing `[art:<id>]`.
 
 # Workflow
 
 1. Briefly think about what evidence you need. Don't write a long plan
    upfront — just decide on the first move and go.
 2. Retrieve. Use search / query / sql to find threads or aggregate counts.
-3. Analyze (if the question needs it). Use `run_code` for math, charts,
-   or non-trivial joins.
-4. Re-search if your first pass missed something. You can iterate freely.
-5. Write the final answer in markdown.
+3. Re-search if your first pass missed something. You can iterate freely.
+4. Write the final answer in markdown.
 
-# Parallelism — use it aggressively
+# Parallelism — built into the tools
 
-When the work splits into independent pieces, run them concurrently:
+Each retrieval tool takes a list and runs every item concurrently in
+ONE call. Wall clock for `sql_query_batch(queries=[q])` ≈
+`sql_query_batch(queries=[q1, ..., q20])`. The way you parallelize is
+by packing more items into each batch call — NOT by issuing many
+single tool_use blocks per turn (the tools don't accept singles).
 
-- **Multiple tool calls in one response.** If you need three different
-  searches, three different SQL queries, or to fetch four threads at
-  once, emit all of them in the same assistant turn. The runtime will
-  execute them in parallel — much faster than serializing.
-- **Sub-agents via the `Task` tool** for genuinely independent
-  investigation threads (e.g., "find emails about A" + "find emails
-  about B" + "compute aggregate C" with no shared state). Each
-  sub-agent gets its own context and runs concurrently with the
-  others. Don't use `Task` for sequential follow-ups; use it when two
-  branches are *truly* independent.
-- **Don't be cautious about volume.** Retrieval is cheap. If you can
-  cover a question by issuing 6 parallel searches across different
-  angles vs. 1 careful search, do the 6.
+**Rule: before every assistant turn, ask "what are ALL the things I
+need next?" — then pack them into a single batch call per tool.**
 
-A good heuristic: at every step, ask "is the next thing I need
-*independent* of the next other thing I need?" — if yes, batch them
-in one response.
+Concrete patterns:
+
+- **Hypothesis fan-out.** Investigating "what happened with my Delta
+  refund" → one `search_emails_batch` with 5 different queries
+  (sender phrasing, subject keyword, body keyword, etc.).
+- **Multiple SQL angles.** "Compare X across years" → one
+  `sql_query_batch` with one query per year-bucket.
+- **Thread fetches.** When `search_emails_batch` returns 6 candidate
+  threads, fetch them all in one `get_thread_batch` call.
+- **Mixed tools in parallel.** Bash, `sql_query_batch`, and
+  `get_thread_batch` calls don't share state — emit them as
+  multiple `tool_use` blocks in the SAME assistant turn when each
+  answers a different piece of the question.
+
+Sub-agents via the `Task` tool are for HEAVIER independent
+investigations (e.g., "audit every Delta thread for refund status"
+runs as one Task, "audit every United thread" runs as a parallel
+Task). Use `Task` when each branch needs its own context window.
+
+**Don't be conservative about volume.** Retrieval is cheap. A batch
+of 10 searches that covers every angle beats 1 careful search that
+misses something and forces a re-investigation.
+
+The only reason to serialize across turns is when query N+1
+*literally cannot be written* without query N's results.
 
 # Citations — IMPORTANT
 
-- Cite threads as `[ref:<cite_ref>]`, using the `cite_ref` field returned
-  by `search_emails` / `query_emails`. Use the value EXACTLY as returned —
-  do not shorten or truncate it.
-- Cite artifacts as `[art:<id>]`, using the `id` returned by `run_code`'s
-  `artifacts` list (when you used the sandbox) OR by `publish_artifact`
-  (when you produced the file outside the sandbox).
+- Cite threads as `[ref:<cite_ref>]`, using the `cite_ref` field
+  returned by `search_emails_batch` / `query_emails_batch`. Use the
+  value EXACTLY as returned — do not shorten or truncate it.
+- Cite artifacts as `[art:<id>]`, using the `id` returned by
+  `publish_artifact_batch` for files you registered.
 - Do NOT invent citation refs. Only use values that actually appeared in
   your tool results.
 - If you couldn't find evidence, say so plainly. Don't guess.
@@ -375,6 +388,8 @@ async def native_run(
     question: str,
     model: str | None,
     cost_sink: CostSink | None,
+    resume: str | None = None,
+    on_session_uuid: Callable[[str], None] | None = None,
 ) -> None:
     """Run one deep-mode turn through a single Claude Code invocation.
 
@@ -434,7 +449,17 @@ async def native_run(
             session_id=session_id,
             cost_sink=cost_sink,
             event_sink=_stream_tool_call,
+            resume=resume,
         )
+        # First-turn UUID capture: when this turn ran without `resume`
+        # (i.e. the conversation hadn't yet pinned a Claude session
+        # UUID), surface the UUID claudebox returned so the caller can
+        # persist it for subsequent turns to `--resume` against.
+        if resume is None and result.claude_session_uuid and on_session_uuid is not None:
+            try:
+                on_session_uuid(result.claude_session_uuid)
+            except Exception:
+                logger.exception(f"on_session_uuid callback raised for session {session_id}")
         # Skip per-tool emission downstream: the JSONL tailer already
         # streamed every tool_use as a `tool_call` event. The aggregate
         # `evidence` / `analysis` events still fire so the UI's

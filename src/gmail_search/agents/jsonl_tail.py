@@ -92,8 +92,16 @@ async def tail_session_events(
     are buffered until the newline arrives. Malformed JSON is logged
     and skipped, never raised.
 
+    Sub-agent fan-out: when the parent run uses the Task tool to spawn
+    sub-agents, each sub-agent gets its own JSONL under
+    `<workspace_dir>/<parent_uuid>/subagents/agent-<id>.jsonl`. We
+    discover those dynamically and tail them concurrently so the
+    idle-watchdog sees progress even when the parent is just waiting
+    on Task results. New sub-agent files appearing mid-run are picked
+    up via periodic rescans of the subagents dir.
+
     Returns when `stop_event` is set (after draining the current
-    poll's batch), OR if no file appears within
+    poll's batch), OR if no parent file appears within
     `file_appearance_timeout`. We never raise — the goal is "best
     effort streaming"; the caller still has the post-hoc message
     parser as a backstop."""
@@ -111,12 +119,90 @@ async def tail_session_events(
             file_appearance_timeout,
         )
         return
-    await _tail_file_until_stop(
-        jsonl_path,
-        on_event,
-        stop_event=stop_event,
-        poll_interval=poll_interval,
+    parent_task = asyncio.create_task(
+        _tail_file_until_stop(
+            jsonl_path,
+            on_event,
+            stop_event=stop_event,
+            poll_interval=poll_interval,
+        )
     )
+    # `<workspace_dir>/<parent_uuid_no_ext>/subagents/` is claudebox's
+    # convention for Task-tool sub-agent transcripts. The dir doesn't
+    # exist until the first Task spawns; the watcher polls for its
+    # appearance and for new sub-agent files added later in the run.
+    subagents_dir = jsonl_path.with_suffix("") / "subagents"
+    subagents_task = asyncio.create_task(
+        _watch_subagents_dir(
+            subagents_dir,
+            on_event,
+            stop_event=stop_event,
+            poll_interval=poll_interval,
+        )
+    )
+    try:
+        await asyncio.gather(parent_task, subagents_task)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tail_session_events: gather raised (non-fatal): %s", exc)
+
+
+async def _watch_subagents_dir(
+    subagents_dir: Path,
+    on_event: Callable[[dict], Awaitable[None]],
+    *,
+    stop_event: asyncio.Event,
+    poll_interval: float,
+) -> None:
+    """Poll `subagents_dir` for new `.jsonl` files; spawn a tailer
+    subtask for each one as it appears. Forever (until `stop_event`),
+    since sub-agents can be spawned at any point during the parent
+    run. The dir itself may not exist initially — that's fine, we
+    keep polling.
+
+    All tailer subtasks share the caller's `on_event` and `stop_event`,
+    so events from sub-agents land in the same handler the parent
+    feeds (which bumps the idle-watchdog timestamp), and a single
+    stop signal cancels everyone."""
+    seen: set[Path] = set()
+    tasks: list[asyncio.Task] = []
+    try:
+        while not stop_event.is_set():
+            try:
+                entries = list(subagents_dir.glob("*.jsonl")) if subagents_dir.is_dir() else []
+            except OSError:
+                entries = []
+            for entry in entries:
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                tasks.append(
+                    asyncio.create_task(
+                        _tail_file_until_stop(
+                            entry,
+                            on_event,
+                            stop_event=stop_event,
+                            poll_interval=poll_interval,
+                        )
+                    )
+                )
+            await asyncio.sleep(max(poll_interval, 1.0))
+    finally:
+        # Drain the spawned sub-tailers so the gather in the parent
+        # doesn't see pending tasks. They each respect stop_event,
+        # so a wait_for is bounded. We wait_for the WHOLE gather
+        # with one timeout (parallel) — sequential per-task wait_for
+        # was O(N*timeout) and could stall shutdown for 50+ sub-agents
+        # past 100s when one tailer is slow on disk reads.
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
 
 
 async def _wait_for_jsonl_file(

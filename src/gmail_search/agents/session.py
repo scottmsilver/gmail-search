@@ -58,6 +58,58 @@ def create_session(
     conn.commit()
 
 
+def lookup_claude_session_uuid(conn, conversation_id: str) -> str | None:
+    """Return the pinned Claude session UUID for a conversation, or
+    None if no first turn has run yet. Lock-free fast path used by
+    every subsequent turn."""
+    row = conn.execute(
+        "SELECT claude_session_uuid FROM conversation_claude_session WHERE conversation_id = %s",
+        (conversation_id,),
+    ).fetchone()
+    return None if row is None else str(row["claude_session_uuid"])
+
+
+def claim_first_turn_lock(conn, conversation_id: str) -> str | None:
+    """Take a Postgres advisory lock keyed on `conversation_id` and
+    re-check the mapping under the lock.
+
+    Returns:
+      - existing claude_session_uuid if another concurrent caller
+        already established it (caller should drop the lock and use
+        `--resume <uuid>`).
+      - None if we now hold the lock and no UUID exists yet (caller
+        is the first-turn establisher; must call
+        `record_claude_session_uuid` after capturing the UUID from
+        claudebox, then commit/rollback the txn to release the lock).
+
+    Caller MUST be inside an open transaction so the advisory lock's
+    txn-scoped lifetime applies. Empirically: psycopg's connection
+    auto-opens a txn on first execute, so the conn handed in by
+    service.py works as long as no commit() runs between this call
+    and `record_claude_session_uuid`.
+    """
+    # `hashtext` is a stable Postgres hash producing int4. Two
+    # different conversation_ids hashing to the same key would
+    # serialize unnecessarily; that's a perf cost on first turns
+    # only, never a correctness bug.
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (conversation_id,))
+    return lookup_claude_session_uuid(conn, conversation_id)
+
+
+def record_claude_session_uuid(conn, conversation_id: str, claude_session_uuid: str) -> None:
+    """Persist the UUID claudebox returned for a first-turn run.
+    Must be called inside the same txn that holds the advisory lock
+    from `claim_first_turn_lock`. ON CONFLICT DO NOTHING tolerates a
+    race where both writers somehow reached this point (shouldn't
+    happen with the lock, but cheap belt-and-suspenders)."""
+    conn.execute(
+        """INSERT INTO conversation_claude_session
+           (conversation_id, claude_session_uuid) VALUES (%s, %s)
+           ON CONFLICT (conversation_id) DO NOTHING""",
+        (conversation_id, claude_session_uuid),
+    )
+
+
 def append_event(
     conn,
     *,

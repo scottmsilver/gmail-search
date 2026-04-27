@@ -280,12 +280,15 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       });
 
       // Persist the (user message(s) + assistant text) tuple so a
-      // refresh shows the deep-mode answer. Mirrors what chat-mode +
-      // battle-mode already do; without this, deep answers vanish on
-      // reload. Called from every terminating branch — final text,
-      // upstream-failed text, error-event text, stream-exception text,
-      // and the empty-text case — so the user always sees what
-      // happened on reload.
+      // refresh shows the deep-mode answer. Used ONLY by the error/
+      // empty-text fallback branches below — for the happy path, the
+      // Python service writes a RICH assistant message (with all
+      // tool-call blocks reconstructed from agent_events) inside
+      // `_real_run`. Letting this client-side path also fire on the
+      // happy path would race and clobber the rich row with a text-
+      // only one (the bug we hit on 2026-04-27). On error paths
+      // there's nothing rich to preserve, so the text-only fallback
+      // is the right write.
       const persistAssistantText = async (assistantText: string): Promise<void> => {
         if (!args.conversationId) return;
         const persisted: Array<{ role: string; parts: unknown[] }> = args.messages.map(
@@ -352,6 +355,14 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       // terminating branch so the saved version matches what the
       // user saw, including error fallbacks.
       let persistedAssistantText = "";
+      // Set true only when the upstream reaches the happy `final`
+      // event. The Python service's `_real_run` writes a RICH
+      // assistant message into conversation_messages on this branch
+      // (with all tool-call blocks reconstructed from agent_events).
+      // We must skip the client-side text-only PUT in that case or
+      // it would clobber the server's row. Error / empty paths still
+      // PUT (server didn't write, we want SOMETHING in the table).
+      let serverPersistedRichAssistant = false;
 
       // Roll up every per-stage cost event into a single turn total —
       // the deep service emits one `cost` SSE per sub-agent invocation
@@ -426,6 +437,15 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
               writer.write({ type: "text-delta", id: finalStartedId, delta: finalText });
               writer.write({ type: "text-end", id: finalStartedId });
               persistedAssistantText = finalText;
+            } else if (kind === "persist_ok") {
+              // Server's _persist_rich_assistant_message just COMMITTED
+              // a rich assistant message into conversation_messages.
+              // Setting this flag here (NOT on `final`) is the gate
+              // that ensures we skip the client-side text-only PUT
+              // ONLY when the server's row actually exists. If the
+              // persist failed silently the server skips this frame
+              // and our fallback fires below.
+              serverPersistedRichAssistant = true;
             } else if (kind === "error") {
               finalStartedId = `deep-error-${args.loggerId}`;
               const reason = String((data.payload as { message?: string })?.message ?? "unknown");
@@ -478,7 +498,15 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
         // Emit the bottom-of-bubble cost LAST so it sits below the
         // assistant text, mirroring regular-chat layout.
         emitTurnCost();
-        await persistAssistantText(persistedAssistantText);
+        // Skip persistence on the happy path — the Python service
+        // already wrote a rich assistant message with full tool-call
+        // detail. Re-PUTting from here would race + clobber it with
+        // text-only parts (the 2026-04-27 regression). For error/
+        // empty/upstream-failed paths the server didn't write, so
+        // we MUST persist here or the conversation row stays stale.
+        if (!serverPersistedRichAssistant) {
+          await persistAssistantText(persistedAssistantText);
+        }
       }
     },
   });

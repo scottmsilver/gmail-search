@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RETENTION_DAYS = 30
 _SCRATCH_ROOT = "data/agent_scratch"
+_WORKSPACES_ROOT = "deploy/claudebox/workspaces"
 
 
 @dataclass
@@ -46,6 +47,20 @@ class ScratchPruneResult:
 
     dirs_deleted: int
     bytes_freed: int
+
+
+@dataclass
+class WorkspacePruneResult:
+    """What `prune_conversation_workspaces` did. `dirs_deleted` is the
+    count of per-conversation workspace directories removed;
+    `mappings_deleted` is the count of `conversation_claude_session`
+    rows dropped alongside (so the next turn re-establishes a fresh
+    Claude session UUID instead of trying to `--resume` into deleted
+    state)."""
+
+    dirs_deleted: int
+    bytes_freed: int
+    mappings_deleted: int
 
 
 def _scratch_dir_size_bytes(path) -> int:
@@ -126,6 +141,103 @@ def prune_scratch_dirs(
             retention_days,
         )
     return ScratchPruneResult(dirs_deleted, bytes_freed)
+
+
+def prune_conversation_workspaces(
+    conn,
+    *,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
+    workspaces_root: str | None = None,
+) -> WorkspacePruneResult:
+    """Remove `deploy/claudebox/workspaces/deep-conv-<id>/` dirs whose
+    conversation has been idle (no `agent_sessions` row newer than the
+    retention window AND `conversations.updated_at` older than it).
+
+    DB-driven, NOT mtime-driven: a workspace whose disk mtime is fresh
+    but whose conversation row is old gets deleted; conversely an idle
+    workspace whose conversation is still being actively written to
+    (chat-only turns that don't go deep) is preserved. This protects
+    against the false-positive of nuking an active conversation just
+    because deep mode hasn't run for a while.
+
+    Drops the matching `conversation_claude_session` row in the same
+    txn so the next deep turn re-establishes a fresh Claude session
+    UUID instead of trying to `--resume` into the deleted JSONL.
+    The recovery path in `service.py` handles a stale mapping row
+    pointing at a missing workspace too, but doing it here keeps the
+    DB and filesystem consistent."""
+    import os as _os
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    root = _Path(workspaces_root or _WORKSPACES_ROOT)
+    if not root.is_dir():
+        return WorkspacePruneResult(0, 0, 0)
+
+    # Conversations whose latest activity (max of conversations.updated_at
+    # and agent_sessions.finished_at) is older than the retention window.
+    # Includes conversations that have never had a deep turn — those rely
+    # on conversations.updated_at alone, which the chat upsert maintains.
+    rows = conn.execute(
+        """SELECT c.id
+           FROM conversations c
+           LEFT JOIN agent_sessions s ON s.conversation_id = c.id
+           GROUP BY c.id, c.updated_at
+           HAVING GREATEST(
+               c.updated_at::timestamptz,
+               COALESCE(MAX(s.finished_at), c.updated_at::timestamptz)
+           ) < NOW() - (%s || ' days')::interval""",
+        (str(retention_days),),
+    ).fetchall()
+    stale_ids = {str(r["id"]) for r in rows}
+
+    dirs_deleted = 0
+    bytes_freed = 0
+    for entry in _os.scandir(root):
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        name = entry.name
+        if not name.startswith("deep-conv-"):
+            # Only sweep per-conversation workspaces. Per-turn `deep-<id>`
+            # dirs from the pre-Phase-1 era are out of scope here; they
+            # can be cleaned up by a separate one-off if ever needed.
+            continue
+        conv_id = name[len("deep-conv-") :]
+        if conv_id not in stale_ids:
+            continue
+        dir_path = _Path(entry.path)
+        size = _scratch_dir_size_bytes(dir_path)
+        try:
+            _shutil.rmtree(dir_path)
+        except OSError as exc:
+            logger.warning("prune_conversation_workspaces: failed to remove %s: %s", dir_path, exc)
+            continue
+        dirs_deleted += 1
+        bytes_freed += size
+
+    # Drop matching mapping rows so the next deep turn re-establishes
+    # a fresh Claude session UUID. ON DELETE CASCADE on the
+    # conversations FK doesn't help — conversations themselves stay.
+    mappings_deleted = 0
+    if stale_ids:
+        result = conn.execute(
+            "DELETE FROM conversation_claude_session WHERE conversation_id = ANY(%s)",
+            (list(stale_ids),),
+        )
+        # psycopg's rowcount is the count from the last statement
+        mappings_deleted = result.rowcount or 0
+        conn.commit()
+
+    if dirs_deleted or mappings_deleted:
+        logger.info(
+            "prune_conversation_workspaces: removed %d workspace dir(s) (~%d bytes) "
+            "and %d mapping row(s) for conversations idle >%dd",
+            dirs_deleted,
+            bytes_freed,
+            mappings_deleted,
+            retention_days,
+        )
+    return WorkspacePruneResult(dirs_deleted, bytes_freed, mappings_deleted)
 
 
 def prune_artifacts(conn, *, retention_days: int = DEFAULT_RETENTION_DAYS) -> PruneResult:

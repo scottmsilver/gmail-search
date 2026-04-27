@@ -119,6 +119,7 @@ def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypat
         session_id=None,
         cost_sink=None,
         event_sink=None,
+        resume=None,
     ):
         from gmail_search.agents.orchestration import StageResult
 
@@ -244,6 +245,8 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
         question,
         model,
         cost_sink,
+        resume=None,
+        on_session_uuid=None,
     ):
         native_calls.append(
             {
@@ -254,6 +257,8 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
                 "question": question,
                 "model": model,
                 "has_cost_sink": cost_sink is not None,
+                "resume": resume,
+                "has_session_uuid_callback": on_session_uuid is not None,
             }
         )
 
@@ -299,12 +304,21 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
 
     asyncio.run(consume())
 
-    assert workspace_dirs == ["deep-sess-NAT"]
+    # Per-conversation workspace naming (Phase 1): when conversation_id
+    # is supplied, the workspace is `deep-conv-<conversation_id>` and
+    # stays stable across turns so claudebox can `--resume` into the
+    # same JSONL transcript.
+    assert workspace_dirs == ["deep-conv-conv-7"]
     assert len(native_calls) == 1
     call = native_calls[0]
     assert call["session_id"] == "sess-NAT"
-    assert call["workspace"] == "deep-sess-NAT"
+    assert call["workspace"] == "deep-conv-conv-7"
     assert call["conversation_id"] == "conv-7"
+    # Resume + on_session_uuid plumbing must reach native_run; the
+    # `_FakeConn` here can't execute SELECTs so resume is None and the
+    # callback is wired but never fired in this test.
+    assert call["resume"] is None
+    assert call["has_session_uuid_callback"] is True
     assert call["question"] == "what happened"
     assert call["model"] == "opus"
     assert call["has_cost_sink"] is True

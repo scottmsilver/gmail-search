@@ -105,7 +105,16 @@ def _install_fakes(
 
     invoke_calls: list[dict] = []
 
-    async def fake_invoke(agent, prompt, *, workspace, session_id=None, cost_sink=None, event_sink=None):
+    async def fake_invoke(
+        agent,
+        prompt,
+        *,
+        workspace,
+        session_id=None,
+        cost_sink=None,
+        event_sink=None,
+        resume=None,
+    ):
         invoke_calls.append(
             {
                 "agent_name": getattr(agent, "name", None),
@@ -115,6 +124,7 @@ def _install_fakes(
                 "session_id": session_id,
                 "cost_sink": cost_sink,
                 "event_sink": event_sink,
+                "resume": resume,
             }
         )
         # Simulate the JSONL tailer surfacing mid-flight tool_calls

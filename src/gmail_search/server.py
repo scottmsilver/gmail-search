@@ -21,6 +21,19 @@ SQL_MAX_ROWS = 500
 SQL_MAX_QUERY_CHARS = 5000
 SQL_TIMEOUT_SEC = 10.0
 
+# Conversation IDs are interpolated into filesystem paths
+# (`deep-conv-<id>`) and used as PKs in `conversation_claude_session`.
+# Strict allow-list at the API boundary so downstream code can trust
+# the value. Mirrors sandbox.py:_safe_conversation_id.
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Claude session UUIDs (claudebox `sessionId`) are interpolated into
+# filesystem paths in the `/jsonl` endpoint. The pg_schema column
+# is plain TEXT with no format check, and the value comes from
+# parsing claudebox's response — so we constrain it at read time.
+# UUID4 hex shape: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+_CLAUDE_SESSION_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 # Keywords that cannot appear in a `/api/sql` query. The SQLite-specific
 # entries (PRAGMA, LOAD_EXTENSION, READFILE, WRITEFILE, EDIT,
 # FTS3_TOKENIZER, SQLITE_*) are kept as-is — Postgres parses them as
@@ -47,6 +60,23 @@ _SQL_BLOCKED_TABLES = re.compile(
     r"sqlite_sequence|sqlite_stat1|sqlite_stat4|sqlite_dbpage|sqlite_dbstat|"
     r"pg_catalog|pg_user|pg_shadow|pg_authid|pg_roles|pg_stat_activity|"
     r"pg_settings|pg_hba_file_rules|information_schema)\b",
+    re.IGNORECASE,
+)
+
+# BM25-required columns. These are the columns covered by
+# `messages_bm25_idx` and `attachments_bm25_idx`. `LIKE`/`ILIKE`
+# against any of them forces a parallel seq scan over ~410k
+# messages or ~600k attachments (observed: 1-2s/query, ~50x slower
+# than the BM25 path). The agent JSONLs showed Anthropic-side
+# agents reverting to LIKE despite system-prompt guidance, so we
+# reject server-side and surface the BM25 translation in the
+# error string. Escape hatch: `@@@` anywhere in the query — once
+# the agent has BM25-prefiltered, a follow-up LIKE on a small row
+# set is fine.
+_SQL_BM25_REQUIRED = re.compile(
+    r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)?"
+    r"(subject|body_text|from_addr|to_addr|filename|extracted_text)\b"
+    r"\s*(?:NOT\s+)?I?LIKE\b",
     re.IGNORECASE,
 )
 
@@ -112,7 +142,40 @@ def _validate_sql(query: str) -> str | None:
         return "negative LIMIT is not allowed"
     if ";" in stripped.rstrip().rstrip(";"):
         return "multiple statements are not allowed"
+    # BM25 enforcement runs last so the cheaper structural checks
+    # short-circuit first. Skip if the query already uses `@@@` —
+    # that means the agent has BM25-prefiltered and a follow-up
+    # LIKE on a small row set is legitimate.
+    if "@@@" not in stripped:
+        bm25 = _SQL_BM25_REQUIRED.search(stripped)
+        if bm25:
+            col = bm25.group(1).lower()
+            return _bm25_required_error(col)
     return None
+
+
+def _bm25_required_error(column: str) -> str:
+    """Format the rejection message with a concrete BM25 translation
+    for the column the agent tried to LIKE-filter on. Goal: the next
+    tool call after this error should be a correct BM25 query — no
+    re-prompting needed."""
+    table = "attachments" if column in ("filename", "extracted_text") else "messages"
+    return (
+        f"`{column} LIKE/ILIKE '%...%'` is rejected — it forces a seq scan on "
+        f"the {table} table. Use the ParadeDB BM25 index instead "
+        f"(~50x faster). Translate:\n"
+        f"  WHERE {column} ILIKE '%foo%'\n"
+        f"    →  WHERE id @@@ '{column}:foo'\n"
+        f"  WHERE from_addr LIKE '%delta%' AND subject LIKE '%credit%'\n"
+        f"    →  WHERE id @@@ 'from_addr:delta AND subject:credit'\n"
+        f"  WHERE body_text LIKE '%refund issued%'  (multi-word phrase)\n"
+        f"    →  WHERE id @@@ 'body_text:\"refund issued\"'\n"
+        f"Add `ORDER BY paradedb.score(id) DESC` for relevance ranking. "
+        f"Escape hatch: include `@@@` anywhere (e.g. an `id @@@ '...'` "
+        f"prefilter) and the LIKE check is skipped — use that only when "
+        f"BM25 truly cannot express the predicate. Call `describe_schema` "
+        f"if unsure which columns are BM25-indexed."
+    )
 
 
 def _json_safe(value: Any) -> Any:
@@ -623,6 +686,15 @@ def create_app(
     async def _on_startup() -> None:  # noqa: RUF029
         import asyncio as _asyncio
 
+        from gmail_search.claudebox_creds import sync_credentials_if_stale
+
+        # Sync host Claude OAuth creds into the claudebox bind-mount
+        # before serving any traffic. This is the most common cause
+        # of the "Failed to authenticate" 401 surfacing inside deep-
+        # mode model output — the host refreshes on its own, the
+        # mount lags. The check is also re-run per-turn in
+        # service.py:_real_run as belt-and-suspenders.
+        sync_credentials_if_stale()
         # Block startup on the initial build so the first incoming
         # request hits a warm engine, not a cold one.
         await _prewarm_engine()
@@ -1098,6 +1170,71 @@ def create_app(
             ]
         }
 
+    @app.get("/api/conversations/live")
+    async def api_conversations_live(limit: int = Query(100, le=500)):
+        """Sidebar feed: every conversation joined to its latest deep
+        turn (if any). The UI polls this every few seconds to render a
+        live "what's running where" view across concurrent
+        conversations. Empty `latest_session` means the conversation
+        has no deep turn yet (chat-only).
+
+        IMPORTANT: this route MUST stay declared above
+        `GET /api/conversations/{conversation_id}` so FastAPI matches
+        the literal `/live` path before treating it as a conv id."""
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                """WITH latest AS (
+                       SELECT DISTINCT ON (conversation_id)
+                              conversation_id, id, status, started_at, finished_at
+                       FROM agent_sessions
+                       WHERE conversation_id IS NOT NULL
+                       ORDER BY conversation_id, started_at DESC
+                   )
+                   SELECT c.id, c.title, c.created_at, c.updated_at,
+                          ccs.claude_session_uuid,
+                          latest.id           AS latest_session_id,
+                          latest.status       AS latest_status,
+                          latest.started_at   AS latest_started_at,
+                          latest.finished_at  AS latest_finished_at,
+                          (SELECT COUNT(*) FROM agent_events ev
+                           WHERE ev.session_id = latest.id) AS latest_tool_call_count,
+                          (SELECT MAX(created_at) FROM agent_events ev
+                           WHERE ev.session_id = latest.id) AS latest_last_event_at
+                   FROM conversations c
+                   LEFT JOIN conversation_claude_session ccs ON ccs.conversation_id = c.id
+                   LEFT JOIN latest ON latest.conversation_id = c.id
+                   ORDER BY COALESCE(latest.started_at, c.updated_at::timestamptz) DESC
+                   LIMIT %s""",
+                (limit,),
+            ).fetchall()
+            return {
+                "conversations": [
+                    {
+                        "id": r["id"],
+                        "title": r["title"] or "New chat",
+                        "created_at": r["created_at"],
+                        "updated_at": r["updated_at"],
+                        "claude_session_uuid": r["claude_session_uuid"],
+                        "latest_session": (
+                            {
+                                "id": r["latest_session_id"],
+                                "status": r["latest_status"],
+                                "started_at": r["latest_started_at"],
+                                "finished_at": r["latest_finished_at"],
+                                "tool_call_count": r["latest_tool_call_count"] or 0,
+                                "last_event_at": r["latest_last_event_at"],
+                            }
+                            if r["latest_session_id"] is not None
+                            else None
+                        ),
+                    }
+                    for r in rows
+                ]
+            }
+        finally:
+            conn.close()
+
     @app.get("/api/conversations/{conversation_id}")
     async def api_conversation_get(conversation_id: str):
         import json as _json
@@ -1132,6 +1269,17 @@ def create_app(
         """
         import json as _json
 
+        # Conversation IDs flow into per-conversation claudebox workspace
+        # dir names (`deep-conv-<id>`) and into the
+        # `conversation_claude_session` mapping. Strict allow-list keeps
+        # that filesystem-and-DB use safe AND collision-free vs.
+        # sandbox.py:_safe_conversation_id. Reject at the boundary so
+        # downstream code can trust the value.
+        if not _CONVERSATION_ID_RE.match(conversation_id):
+            return JSONResponse(
+                {"error": "conversation_id must match ^[A-Za-z0-9_-]{1,64}$"},
+                status_code=400,
+            )
         messages = payload.get("messages", [])
         if not isinstance(messages, list):
             return JSONResponse({"error": "messages must be a list"}, status_code=400)
@@ -1171,10 +1319,229 @@ def create_app(
     async def api_conversation_delete(conversation_id: str):
         conn = get_connection(db_path)
         conn.execute("DELETE FROM conversation_messages WHERE conversation_id = %s", (conversation_id,))
+        # ON DELETE CASCADE on conversation_claude_session FK
+        # automatically clears the per-conversation Claude session
+        # mapping when the parent conversation row goes away.
         conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
         conn.commit()
         conn.close()
+        # Best-effort filesystem cleanup so a deleted-then-recreated
+        # conversation_id doesn't see a stale workspace. The directory
+        # may not exist (no deep turn ever ran) — that's fine.
+        ws_dir = Path("deploy/claudebox/workspaces") / f"deep-conv-{conversation_id}"
+        if ws_dir.is_dir():
+            try:
+                import shutil as _shutil
+
+                _shutil.rmtree(ws_dir)
+            except OSError as exc:
+                logger.warning("conversation delete: could not remove workspace %s: %s", ws_dir, exc)
         return {"ok": True}
+
+    @app.get("/api/conversations/{conversation_id}/debug")
+    async def api_conversation_debug(conversation_id: str, session_limit: int = Query(20, le=200)):
+        """Per-conversation debug pane payload. Returns sessions
+        (turns) with their tool-call timeline + artifacts + workspace
+        path + JSONL path. UI renders as a collapsible-by-turn view.
+
+        Heavy fields (workspace listing, raw JSONL contents) are NOT
+        inlined here — the UI fetches them from the dedicated
+        endpoints below when the user expands a turn."""
+        if not _CONVERSATION_ID_RE.match(conversation_id):
+            return JSONResponse(
+                {"error": "conversation_id must match ^[A-Za-z0-9_-]{1,64}$"},
+                status_code=400,
+            )
+        conn = get_connection(db_path)
+        try:
+            conv = conn.execute(
+                "SELECT id, title FROM conversations WHERE id = %s",
+                (conversation_id,),
+            ).fetchone()
+            if conv is None:
+                return JSONResponse({"error": "conversation not found"}, status_code=404)
+            ccs = conn.execute(
+                "SELECT claude_session_uuid FROM conversation_claude_session WHERE conversation_id = %s",
+                (conversation_id,),
+            ).fetchone()
+            claude_uuid = ccs["claude_session_uuid"] if ccs else None
+            sessions = conn.execute(
+                """SELECT id, mode, question, status, started_at, finished_at, final_answer
+                   FROM agent_sessions
+                   WHERE conversation_id = %s
+                   ORDER BY started_at DESC
+                   LIMIT %s""",
+                (conversation_id, session_limit),
+            ).fetchall()
+            session_payloads = []
+            for s in sessions:
+                events = conn.execute(
+                    """SELECT seq, agent_name, kind, payload, created_at
+                       FROM agent_events
+                       WHERE session_id = %s
+                       ORDER BY seq""",
+                    (s["id"],),
+                ).fetchall()
+                artifacts = conn.execute(
+                    """SELECT id, name, mime_type, OCTET_LENGTH(data) AS size_bytes, created_at
+                       FROM agent_artifacts
+                       WHERE session_id = %s
+                       ORDER BY created_at""",
+                    (s["id"],),
+                ).fetchall()
+                session_payloads.append(
+                    {
+                        "id": s["id"],
+                        "mode": s["mode"],
+                        "question": s["question"],
+                        "status": s["status"],
+                        "started_at": s["started_at"],
+                        "finished_at": s["finished_at"],
+                        "final_answer": s["final_answer"],
+                        "events": [
+                            {
+                                "seq": e["seq"],
+                                "agent": e["agent_name"],
+                                "kind": e["kind"],
+                                "payload": e["payload"],
+                                "created_at": e["created_at"],
+                            }
+                            for e in events
+                        ],
+                        "artifacts": [
+                            {
+                                "id": a["id"],
+                                "name": a["name"],
+                                "mime_type": a["mime_type"],
+                                "size_bytes": a["size_bytes"],
+                                "created_at": a["created_at"],
+                            }
+                            for a in artifacts
+                        ],
+                    }
+                )
+            workspace_dir = Path("deploy/claudebox/workspaces") / f"deep-conv-{conversation_id}"
+            return {
+                "conversation": {"id": conv["id"], "title": conv["title"]},
+                "claude_session_uuid": claude_uuid,
+                "workspace_dir": str(workspace_dir) if workspace_dir.is_dir() else None,
+                "sessions": session_payloads,
+            }
+        finally:
+            conn.close()
+
+    @app.get("/api/conversations/{conversation_id}/workspace/tree")
+    async def api_conversation_workspace_tree(conversation_id: str):
+        """Workspace directory listing for the debug pane. Recursive
+        but bounded so a runaway agent that wrote 100k files can't
+        blow up the response. Each entry: relative path, size, mtime,
+        is_dir."""
+        if not _CONVERSATION_ID_RE.match(conversation_id):
+            return JSONResponse(
+                {"error": "conversation_id must match ^[A-Za-z0-9_-]{1,64}$"},
+                status_code=400,
+            )
+        ws_dir = Path("deploy/claudebox/workspaces") / f"deep-conv-{conversation_id}"
+        if not ws_dir.is_dir():
+            return JSONResponse({"error": "workspace dir not present"}, status_code=404)
+        # Defense-in-depth: even though the regex constrains
+        # conversation_id, resolve() the dir + skip symlinks during
+        # traversal so a symlink ANY agent could write into the
+        # workspace can't make us return metadata for files outside
+        # it. We don't follow symlinks (use lstat) and we drop any
+        # entry whose resolved path leaves the workspace root.
+        ws_root = ws_dir.resolve()
+        max_entries = 2000
+        entries: list[dict] = []
+        for path in ws_dir.rglob("*"):
+            if len(entries) >= max_entries:
+                break
+            try:
+                # lstat doesn't follow symlinks — symlink target's
+                # metadata is irrelevant; we only describe what's IN
+                # the workspace.
+                st = path.lstat()
+            except OSError:
+                continue
+            if path.is_symlink():
+                # Drop symlinks entirely — listing them is fine in
+                # principle but their resolved path could escape; the
+                # debug pane has no use for them.
+                continue
+            try:
+                resolved = path.resolve()
+                resolved.relative_to(ws_root)
+            except (OSError, ValueError):
+                # Anything that resolves outside the workspace — skip.
+                continue
+            entries.append(
+                {
+                    "path": str(path.relative_to(ws_dir)),
+                    "is_dir": path.is_dir(),
+                    "size_bytes": st.st_size if not path.is_dir() else None,
+                    "mtime": st.st_mtime,
+                }
+            )
+        return {
+            "workspace_dir": str(ws_dir),
+            "entries": entries,
+            "truncated": len(entries) >= max_entries,
+        }
+
+    @app.get("/api/conversations/{conversation_id}/jsonl")
+    async def api_conversation_jsonl(conversation_id: str):
+        """Raw Claude Code JSONL transcript for the conversation.
+        After Phase 0 confirmed `--resume` appends to the same file,
+        the conversation maps to ONE JSONL identified by the pinned
+        claude_session_uuid. Streamed as text so the UI can render
+        line-by-line without buffering huge transcripts in memory.
+
+        Returns 404 if the workspace or JSONL doesn't exist (no deep
+        turn has run yet)."""
+        if not _CONVERSATION_ID_RE.match(conversation_id):
+            return JSONResponse(
+                {"error": "conversation_id must match ^[A-Za-z0-9_-]{1,64}$"},
+                status_code=400,
+            )
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT claude_session_uuid FROM conversation_claude_session WHERE conversation_id = %s",
+                (conversation_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return JSONResponse({"error": "no Claude session pinned to this conversation"}, status_code=404)
+        ws_proj_dir = Path("deploy/claudebox/claude-config/projects") / f"-workspaces-deep-conv-{conversation_id}"
+        # Defense-in-depth: claude_session_uuid is TEXT in Postgres
+        # with no format constraint at the schema level — the value
+        # comes from `_extract_session_uuid` parsing claudebox's
+        # response, so we don't fully trust it. Reject anything that
+        # doesn't look like a UUID (8-4-4-4-12 hex), which is the
+        # only shape Claude Code's `--resume` actually produces, AND
+        # verify the resolved path stays under ws_proj_dir.
+        claude_uuid = str(row["claude_session_uuid"])
+        if not _CLAUDE_SESSION_UUID_RE.match(claude_uuid):
+            logger.warning(
+                "JSONL endpoint refused malformed claude_session_uuid for conv %s: %r",
+                conversation_id,
+                claude_uuid,
+            )
+            return JSONResponse({"error": "stored claude_session_uuid has unexpected format"}, status_code=500)
+        jsonl_path = ws_proj_dir / f"{claude_uuid}.jsonl"
+        try:
+            ws_root = ws_proj_dir.resolve()
+            jsonl_resolved = jsonl_path.resolve()
+            jsonl_resolved.relative_to(ws_root)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "JSONL path escapes workspace dir"}, status_code=400)
+        if not jsonl_resolved.is_file():
+            return JSONResponse(
+                {"error": f"JSONL not present: {jsonl_resolved}"},
+                status_code=404,
+            )
+        return FileResponse(str(jsonl_resolved), media_type="application/jsonl")
 
     @app.get("/api/attachment/{attachment_id}/meta")
     async def api_attachment_meta(attachment_id: int):

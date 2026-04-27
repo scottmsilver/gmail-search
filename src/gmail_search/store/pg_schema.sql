@@ -291,6 +291,27 @@ CREATE INDEX IF NOT EXISTS idx_agent_sessions_conv
 CREATE INDEX IF NOT EXISTS idx_agent_artifacts_session
     ON agent_artifacts (session_id, created_at DESC);
 
+-- ─────────────────────────────────────────────────────────────────────
+-- Per-conversation Claude session UUID mapping.
+--
+-- Each chat conversation pins exactly one Claude Code session UUID so
+-- subsequent deep-mode turns can pass `--resume <uuid>` to claudebox
+-- and append to the same JSONL transcript. The first turn establishes
+-- the UUID by running without `--resume` and capturing the
+-- `sessionId` claudebox returns.
+--
+-- Concurrency: pg_advisory_xact_lock(hashtext(conversation_id)) is
+-- taken around the establishment critical section so two simultaneous
+-- first-turn requests serialize into one establisher + one resumer.
+-- See agents/service.py:_claim_or_establish_claude_session.
+-- ─────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS conversation_claude_session (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    claude_session_uuid TEXT NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Read-only role used by the Analyst sandbox. DO block lets us re-run
 -- the schema file idempotently without erroring on duplicate-role
 -- create. GRANTs are cumulative — re-running them is a no-op.

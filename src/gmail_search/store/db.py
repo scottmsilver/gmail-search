@@ -21,17 +21,36 @@ def _read_pg_schema() -> str:
 # ─────────────────────────────────────────────────────────────────────
 TABLE_DOCS: dict[str, str] = {
     "messages": (
-        "One row per email message. Primary content store.\n"
+        "One row per email message. Primary content store. ~410k rows.\n"
         "- id (TEXT PK): Gmail message ID. Use as cite_ref source via thread_id.\n"
         "- thread_id (TEXT): Gmail thread this message belongs to.\n"
-        "- from_addr (TEXT): 'Name <email>' format — use LIKE '%@domain%' to match domains.\n"
+        "- from_addr (TEXT): 'Name <email>' format. For sender or domain matching, prefer BM25 (below) over LIKE.\n"
         "- to_addr (TEXT): comma-separated 'Name <email>' recipients.\n"
         "- subject (TEXT): often starts with 'Re:' or 'Fwd:'.\n"
         "- body_text (TEXT): plain-text body.\n"
         "- body_html (TEXT): HTML body (rarely needed).\n"
         "- date (TEXT): ISO 8601 UTC, e.g. '2026-04-17T14:32:00+00:00'. Sort and compare as strings.\n"
         '- labels (TEXT): JSON array of Gmail labels, e.g. \'["INBOX","IMPORTANT"]\'. Use LIKE \'%"UNREAD"%\'.\n'
-        "- history_id (INT): Gmail incremental-sync watermark."
+        "- history_id (INT): Gmail incremental-sync watermark.\n"
+        "\n"
+        "FAST FREE-TEXT SEARCH — use BM25, NOT `LIKE '%...%'`:\n"
+        "  `messages_bm25_idx` covers (subject, body_text, from_addr, to_addr).\n"
+        "  Syntax: `WHERE id @@@ '<tantivy-query>'`. Tantivy uses `field:term`,\n"
+        "  combinable with AND / OR / NOT and parentheses. Order by\n"
+        "  `paradedb.score(id) DESC` for relevance ranking.\n"
+        "  Examples:\n"
+        "    -- Sender + subject keyword:\n"
+        "    SELECT id, subject FROM messages\n"
+        "    WHERE id @@@ 'from_addr:delta AND subject:cancel'\n"
+        "    ORDER BY paradedb.score(id) DESC LIMIT 50;\n"
+        "    -- Multi-field OR (any of these fields contains 'invoice'):\n"
+        "    SELECT id FROM messages\n"
+        "    WHERE id @@@ 'subject:invoice OR body_text:invoice';\n"
+        "    -- Exact phrase in body_text:\n"
+        "    SELECT id FROM messages WHERE id @@@ 'body_text:\"refund issued\"';\n"
+        "  `LIKE '%term%'` cannot use this index and forces a full seq scan\n"
+        "  (~1s/query on 410k rows). Use LIKE only when BM25 can't express\n"
+        "  the predicate (e.g. structural patterns inside `labels` JSON)."
     ),
     "thread_summary": (
         "Precomputed per-thread metadata — fastest way to enumerate threads without scanning messages.\n"
@@ -44,7 +63,7 @@ TABLE_DOCS: dict[str, str] = {
         "- date_first / date_last (TEXT): ISO UTC of earliest/latest message."
     ),
     "attachments": (
-        "One row per attachment. Linked via message_id.\n"
+        "One row per attachment. Linked via message_id. ~600k rows.\n"
         "- id (INT PK).\n"
         "- message_id (TEXT FK -> messages.id).\n"
         "- filename (TEXT).\n"
@@ -52,7 +71,15 @@ TABLE_DOCS: dict[str, str] = {
         "- size_bytes (INT).\n"
         "- extracted_text (TEXT): parsed text (PDF/DOCX/TXT). NULL if image-only or extraction failed.\n"
         "- image_path (TEXT): on-disk path to extracted image, NULL if non-image.\n"
-        "- raw_path (TEXT): on-disk path to original raw bytes."
+        "- raw_path (TEXT): on-disk path to original raw bytes.\n"
+        "\n"
+        "FAST FREE-TEXT SEARCH — use BM25, NOT `LIKE '%...%'`:\n"
+        "  `attachments_bm25_idx` covers (filename, extracted_text).\n"
+        "  Syntax: `WHERE id @@@ '<tantivy-query>'`, same as messages.\n"
+        "  Example:\n"
+        "    SELECT id, message_id, filename FROM attachments\n"
+        "    WHERE id @@@ 'filename:invoice OR extracted_text:\"total due\"'\n"
+        "    ORDER BY paradedb.score(id) DESC LIMIT 50;"
     ),
     "topics": (
         "Hierarchical clustering of messages by embedding similarity.\n"
@@ -144,6 +171,10 @@ _INTERNAL_TABLES = {
     "agent_sessions",
     "agent_events",
     "agent_artifacts",
+    # Internal mapping that pins one Claude session UUID per
+    # conversation so deep-mode turns can `--resume` into the same
+    # JSONL transcript. See pg_schema.sql for rationale.
+    "conversation_claude_session",
 }
 
 _SCHEMA_TABLE_RE = re.compile(

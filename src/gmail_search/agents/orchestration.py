@@ -90,10 +90,17 @@ class StageResult:
     output (JSON for Planner/Critic, markdown for Writer, summary for
     Retriever, stdout+summary for Analyst). `tool_calls` is a log of
     every tool the agent invoked this stage — the service layer
-    emits `tool_call` events from it."""
+    emits `tool_call` events from it.
+
+    `claude_session_uuid`, when set, is the Claude Code session UUID
+    the claudebox `/run` returned. The orchestrator uses it on the
+    first turn of a conversation to pin the conversation ↔ Claude
+    session mapping (so subsequent turns can `--resume` and append to
+    the same JSONL transcript). Non-claudebox backends leave it None."""
 
     text: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    claude_session_uuid: str | None = None
 
 
 InvokeFn = Callable[[AgentLike, str], Awaitable[StageResult]]

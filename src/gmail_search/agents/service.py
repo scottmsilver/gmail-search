@@ -249,9 +249,19 @@ def _deep_backend(override: str | None = None) -> str:
     return "adk"
 
 
-def _claudebox_workspace_for(session_id: str) -> str:
-    """One claudebox workspace per deep-mode turn so concurrent
-    stages can't collide on file mutations."""
+def _claudebox_workspace_for(conversation_id: str | None, session_id: str) -> str:
+    """One claudebox workspace per CONVERSATION (stable across turns)
+    so the per-conversation `--resume` thread appends to the same
+    JSONL transcript and the workspace dir accumulates files across
+    turns. Falls back to per-session naming when there's no
+    conversation_id (one-off probes / tests / non-chat flows).
+
+    The conversation_id is already validated against
+    `^[A-Za-z0-9_-]{1,64}$` at the API boundary
+    (server.py:_validate_conversation_id), so we can interpolate
+    directly into the dir name without sanitization here."""
+    if conversation_id:
+        return f"deep-conv-{conversation_id}"
     return f"deep-{session_id}"
 
 
@@ -260,6 +270,182 @@ def _ensure_workspace_dir(workspace: str) -> None:
     Create it on the host filesystem before the first invoke."""
     base = Path("deploy/claudebox/workspaces") / workspace
     base.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_workspace_dir_exists(workspace: str) -> bool:
+    """Return True if the workspace dir exists on disk. Used by the
+    resume-recovery path to detect a stale mapping that points at a
+    workspace prune_conversation_workspaces deleted."""
+    return (Path("deploy/claudebox/workspaces") / workspace).is_dir()
+
+
+def _final_text_from_session(conn, session_id: str) -> str:
+    """Pull the writer's final text out of `agent_events` for one
+    session. Both the orchestrated path (writer/critic emits `final`)
+    and the native path (root emits `final`) write a `kind='final'`
+    event with `payload.text`. Returns "" if absent — the persist
+    path then writes an empty-text bubble rather than crashing."""
+    row = conn.execute(
+        """SELECT payload FROM agent_events
+           WHERE session_id = %s AND kind = 'final'
+           ORDER BY seq DESC LIMIT 1""",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return ""
+    payload = row["payload"] or {}
+    if isinstance(payload, dict):
+        text = payload.get("text")
+        if isinstance(text, str):
+            return text
+    return ""
+
+
+def _build_assistant_parts_from_events(
+    events: list,
+    *,
+    session_id: str,
+    final_text: str,
+) -> list[dict]:
+    """Reconstruct a Vercel AI SDK UIMessage `parts` array from a
+    deep-mode session's `agent_events` log.
+
+    Output schema mirrors what the chat-thread Thread renderer
+    consumes (sampled from real Gemini chat-mode rows): a leading
+    `data-debug-id` block, then per-tool-call `tool-<name>` blocks
+    with both input + output, then the final text. The renderer
+    falls back gracefully on unknown `tool-<name>` types — the
+    payload is still browsable via the JSON inspector.
+
+    Tool calls come from `mcp_tool_call_full` events when they're
+    present (Phase 2 — the durable record carries the structured
+    response too) and fall back to the streamed `tool_call` events
+    (input only, no response captured) when the mcp write didn't
+    land. We dedupe by (name, json(args)) so each tool call shows
+    up exactly once."""
+    import json as _json
+
+    parts: list[dict] = []
+    parts.append(
+        {
+            "type": "data-debug-id",
+            "id": f"dbg-agent-session-{session_id}",
+            "data": {"id": session_id},
+        }
+    )
+    seen: set[tuple] = set()
+    # First pass: rich versions from Phase 2's `mcp_tool_call_full`.
+    for ev in events:
+        if ev.kind != "mcp_tool_call_full":
+            continue
+        payload = ev.payload or {}
+        name = str(payload.get("name") or "?")
+        args = payload.get("args") or {}
+        response = payload.get("response") or {}
+        try:
+            sig = (name, _json.dumps(args, sort_keys=True))
+        except TypeError:
+            sig = (name, repr(args))
+        seen.add(sig)
+        parts.append(
+            {
+                "type": f"tool-{name}",
+                "toolCallId": f"tc-{ev.seq}",
+                "state": "output-available",
+                "input": args,
+                "output": response,
+            }
+        )
+    # Second pass: streamed tool_use blocks the JSONL tailer
+    # forwarded. Skip ones already covered by mcp_tool_call_full;
+    # what remains are tool calls whose response wasn't durably
+    # captured (claudebox-internal tools like Bash, Task, etc.).
+    for ev in events:
+        if ev.kind != "tool_call":
+            continue
+        payload = ev.payload or {}
+        name = str(payload.get("name") or "?")
+        args = payload.get("args") or {}
+        try:
+            sig = (name, _json.dumps(args, sort_keys=True))
+        except TypeError:
+            sig = (name, repr(args))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        parts.append(
+            {
+                "type": f"tool-{name}",
+                "toolCallId": f"tc-stream-{ev.seq}",
+                "state": "input-available",
+                "input": args,
+            }
+        )
+    parts.append({"type": "text", "text": final_text or ""})
+    return parts
+
+
+def _persist_rich_assistant_message(
+    conn,
+    *,
+    conversation_id: str | None,
+    session_id: str,
+    final_text: str | None = None,
+) -> bool:
+    """At the end of a deep-mode turn, INSERT a rich assistant message
+    into `conversation_messages` reconstructed from `agent_events`.
+    The chat-thread UI reads from `conversation_messages.parts`
+    (NOT `agent_events`), and the front-end's deep-mode persist
+    path is text-only — without this call, the UI loses every tool
+    call on reload.
+
+    Best-effort: a failure logs and continues. The deep turn already
+    succeeded — chat-thread display is the only thing affected.
+
+    Pairs with the front-end change in `web/app/api/chat/route.ts`
+    that disables `persistAssistantText` for deep mode (otherwise
+    the front-end's PUT would race + clobber this row with a
+    text-only version)."""
+    import json as _json
+
+    if not conversation_id:
+        return False
+    try:
+        if final_text is None:
+            final_text = _final_text_from_session(conn, session_id)
+        events = list(fetch_events_after(conn, session_id, after_seq=0))
+        parts = _build_assistant_parts_from_events(events, session_id=session_id, final_text=final_text)
+        next_seq_row = conn.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq " "FROM conversation_messages WHERE conversation_id = %s",
+            (conversation_id,),
+        ).fetchone()
+        next_seq = int(next_seq_row["next_seq"])
+        conn.execute(
+            """INSERT INTO conversation_messages
+               (conversation_id, seq, role, parts) VALUES (%s, %s, 'assistant', %s)""",
+            (conversation_id, next_seq, _json.dumps(parts)),
+        )
+        # Bump conversations.updated_at so the sidebar's
+        # most-recent-first ordering picks up this turn immediately.
+        conn.execute(
+            "UPDATE conversations SET updated_at = NOW() WHERE id = %s",
+            (conversation_id,),
+        )
+        conn.commit()
+        logger.info(
+            "persisted rich assistant msg for conv=%s session=%s parts=%d",
+            conversation_id,
+            session_id,
+            len(parts),
+        )
+        return True
+    except Exception:
+        logger.exception(
+            f"persist rich assistant message failed for conv={conversation_id} "
+            f"session={session_id} (chat thread may show only the front-end's "
+            "text-only fallback on reload)"
+        )
+        return False
 
 
 _HISTORY_MAX_TURNS = 4
@@ -445,11 +631,94 @@ async def _real_run(
     # orchestrator's InvokeFn contract; claude_native is a separate
     # path that owns its own event emission + finalization.
     backend = _deep_backend(backend)
-    workspace = _claudebox_workspace_for(session_id)
+    # Per-turn credential refresh: catches the case where the host
+    # rotated `~/.claude/.credentials.json` between server startup and
+    # this turn (Claude Code refreshes via OAuth roughly every 24h, so
+    # a long-running web server WILL drift if we only sync at boot).
+    # No-op when mtimes already match.
+    if backend in ("claude_native", "claude_code"):
+        try:
+            from gmail_search.claudebox_creds import sync_credentials_if_stale
+
+            sync_credentials_if_stale()
+        except Exception:
+            logger.exception("per-turn claudebox credential sync failed (continuing)")
+    workspace = _claudebox_workspace_for(conversation_id, session_id)
     if backend == "claude_native":
         from gmail_search.agents.runtime_claude_native import native_run
+        from gmail_search.agents.session import (
+            claim_first_turn_lock,
+            lookup_claude_session_uuid,
+            record_claude_session_uuid,
+        )
 
         _ensure_workspace_dir(workspace)
+        # Resolve the Claude session UUID this conversation is pinned to
+        # (or None if this is its first deep turn). When None, native_run
+        # will run without `--resume` and call `_persist_first_uuid` once
+        # claudebox returns the UUID it generated. Subsequent turns of
+        # the same conversation hit the fast-path lookup with no lock.
+        # Wrap defensively: a DB failure here should NOT crash the turn
+        # — we just fall through to "no resume, treat as first turn".
+        resume_uuid = None
+        if conversation_id:
+            try:
+                resume_uuid = lookup_claude_session_uuid(conn, conversation_id)
+            except Exception:
+                logger.warning(
+                    f"resume-uuid lookup failed for conversation {conversation_id}; "
+                    "starting fresh Claude session for this turn",
+                    exc_info=True,
+                )
+            else:
+                # Recovery: a mapping that points at a workspace whose
+                # JSONL was deleted (e.g. by prune_conversation_workspaces
+                # while the conversation was idle) would crash claudebox
+                # with "No conversation found with session ID". Detect
+                # the gap up-front by checking the workspace dir; if
+                # missing, drop the stale mapping and start a fresh
+                # Claude session. The user's chat continuity (Postgres
+                # conversation_messages) is unaffected.
+                if resume_uuid and not _ensure_workspace_dir_exists(workspace):
+                    logger.warning(
+                        f"workspace {workspace!r} missing on disk for conversation "
+                        f"{conversation_id} (mapping pointed at claude_session_uuid "
+                        f"{resume_uuid!r}). Dropping stale mapping and starting fresh."
+                    )
+                    try:
+                        conn.execute(
+                            "DELETE FROM conversation_claude_session WHERE conversation_id = %s",
+                            (conversation_id,),
+                        )
+                        conn.commit()
+                    except Exception:
+                        logger.exception(
+                            f"failed to drop stale mapping for {conversation_id}; "
+                            "next turn may still attempt to resume against missing state"
+                        )
+                    resume_uuid = None
+
+        def _persist_first_uuid(claude_uuid: str) -> None:
+            """First-turn establisher: take the advisory lock, re-check
+            for a row another concurrent caller may have just persisted,
+            INSERT if we're still the first writer. Same-conversation
+            concurrent first-turns are also serialized at the workspace
+            level by claudebox's busy_workspaces lock, but the DB lock
+            here is the source-of-truth across orchestrator processes."""
+            if not conversation_id:
+                return
+            claim_conn = get_connection(db_path)
+            try:
+                existing = claim_first_turn_lock(claim_conn, conversation_id)
+                if not existing:
+                    record_claude_session_uuid(claim_conn, conversation_id, claude_uuid)
+                claim_conn.commit()
+            except Exception:
+                claim_conn.rollback()
+                logger.exception(f"persist claude_session_uuid failed for conversation {conversation_id}")
+            finally:
+                claim_conn.close()
+
         native_task = asyncio.create_task(
             native_run(
                 db_path=db_path,
@@ -459,6 +728,8 @@ async def _real_run(
                 question=question,
                 model=default_model,
                 cost_sink=_record_cost,
+                resume=resume_uuid,
+                on_session_uuid=_persist_first_uuid,
             )
         )
         last_seq = 0
@@ -482,6 +753,25 @@ async def _real_run(
             exc = native_task.exception()
             if exc is not None:
                 logger.exception(f"native_run raised in session {session_id}: {exc}")
+            else:
+                # Persist a rich assistant message into conversation_messages
+                # so the chat-thread UI shows tool calls on reload (without
+                # this, the front-end's persistAssistantText writes a text-
+                # only version and we lose all debug detail). Emit a
+                # `persist_ok` SSE frame ONLY on commit success — the
+                # front-end's serverPersistedRichAssistant flag gates on
+                # this frame, so a silent persist failure causes the
+                # front-end to fall back to its text-only PUT (loss of
+                # rich detail, but at least an assistant bubble exists
+                # on reload). Without the explicit `persist_ok` gate, a
+                # persist failure would leave NO assistant row at all.
+                persisted = _persist_rich_assistant_message(
+                    conn,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                )
+                if persisted:
+                    yield _sse("persist_ok", {"session_id": session_id})
         finally:
             try:
                 poll_conn.close()
@@ -497,6 +787,11 @@ async def _real_run(
             register_session_via_admin,
             unregister_session_via_admin,
         )
+        from gmail_search.agents.session import (
+            claim_first_turn_lock,
+            lookup_claude_session_uuid,
+            record_claude_session_uuid,
+        )
 
         _ensure_workspace_dir(workspace)
         await register_session_via_admin(
@@ -507,6 +802,58 @@ async def _real_run(
             workspace=workspace,
         )
         claude_session_active = True
+
+        # Mirror the native-branch claim flow: look up any existing
+        # Claude session UUID for this conversation; first sub-agent
+        # invoke without it captures one and we cache it for the
+        # remaining sub-agents in this turn so all stages share the
+        # same Claude conversation. See PER_CONVERSATION_SESSIONS.md
+        # for the establishment protocol.
+        claude_uuid_for_turn: dict[str, str | None] = {"v": None}
+        if conversation_id:
+            try:
+                claude_uuid_for_turn["v"] = lookup_claude_session_uuid(conn, conversation_id)
+            except Exception:
+                logger.warning(
+                    f"resume-uuid lookup failed for conversation {conversation_id}; "
+                    "starting fresh Claude session for this turn",
+                    exc_info=True,
+                )
+            else:
+                if claude_uuid_for_turn["v"] and not _ensure_workspace_dir_exists(workspace):
+                    logger.warning(
+                        f"workspace {workspace!r} missing on disk for conversation "
+                        f"{conversation_id} (mapping pointed at claude_session_uuid "
+                        f"{claude_uuid_for_turn['v']!r}). Dropping stale mapping."
+                    )
+                    try:
+                        conn.execute(
+                            "DELETE FROM conversation_claude_session WHERE conversation_id = %s",
+                            (conversation_id,),
+                        )
+                        conn.commit()
+                    except Exception:
+                        logger.exception(f"failed to drop stale mapping for {conversation_id}")
+                    claude_uuid_for_turn["v"] = None
+
+        def _persist_first_uuid_code(claude_uuid: str) -> None:
+            """First-turn establisher for the orchestrated claude_code
+            backend. Same advisory-lock + idempotent-INSERT shape as
+            the claude_native variant — kept inline rather than shared
+            so each branch can evolve independently without coupling."""
+            if not conversation_id:
+                return
+            claim_conn = get_connection(db_path)
+            try:
+                existing = claim_first_turn_lock(claim_conn, conversation_id)
+                if not existing:
+                    record_claude_session_uuid(claim_conn, conversation_id, claude_uuid)
+                claim_conn.commit()
+            except Exception:
+                claim_conn.rollback()
+                logger.exception(f"persist claude_session_uuid failed for conversation {conversation_id}")
+            finally:
+                claim_conn.close()
 
         # Stream tool_call events to the session's agent_events table
         # as they arrive in the per-session JSONL transcript. The
@@ -529,14 +876,24 @@ async def _real_run(
                 logger.exception(f"streaming append_event failed for session {session_id}")
 
         async def _invoke(agent, prompt):
-            return await claudebox_invoke(
+            resume = claude_uuid_for_turn["v"]
+            result = await claudebox_invoke(
                 agent,
                 prompt,
                 workspace=workspace,
                 session_id=session_id,
                 cost_sink=_record_cost,
                 event_sink=_stream_tool_call_to_events,
+                resume=resume,
             )
+            # First sub-agent in this turn that ran without resume —
+            # capture the Claude session UUID claudebox returned and
+            # persist it so subsequent sub-agents (this turn) and
+            # subsequent turns of this conversation can `--resume`.
+            if resume is None and result.claude_session_uuid:
+                claude_uuid_for_turn["v"] = result.claude_session_uuid
+                _persist_first_uuid_code(result.claude_session_uuid)
+            return result
 
     else:
 
@@ -620,6 +977,19 @@ async def _real_run(
                     ev.kind,
                     {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload},
                 )
+            # Persist a rich assistant message into conversation_messages
+            # so the chat-thread UI shows tool calls on reload (without
+            # this, the front-end's persistAssistantText writes a text-
+            # only version and we lose all debug detail). Emit
+            # `persist_ok` ONLY on commit success — see twin block in
+            # the claude_native branch above for why this gate matters.
+            persisted = _persist_rich_assistant_message(
+                conn,
+                conversation_id=conversation_id,
+                session_id=session_id,
+            )
+            if persisted:
+                yield _sse("persist_ok", {"session_id": session_id})
         # Surface any orchestrator exception that didn't make it to
         # the event log (orchestrator logs `error` itself on raise,
         # but re-raising lets the SSE client see a failed stream).

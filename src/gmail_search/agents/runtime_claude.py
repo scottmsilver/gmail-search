@@ -212,14 +212,37 @@ def _instruction_with_session_binding(agent, session_id: str | None) -> str:
     return base + _SESSION_ID_PROMPT_BLOCK.format(session_id=session_id)
 
 
-def _build_request_body(agent, prompt: str, *, workspace: str, session_id: str | None = None) -> dict[str, Any]:
-    return {
+def _build_request_body(
+    agent,
+    prompt: str,
+    *,
+    workspace: str,
+    session_id: str | None = None,
+    resume: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "prompt": prompt,
         "workspace": workspace,
         "model": _resolve_model(agent),
         "systemPrompt": _instruction_with_session_binding(agent, session_id),
         "outputFormat": "json-verbose",
     }
+    # Pinning the Claude session UUID (`--resume <uuid>`) makes Claude
+    # Code append to the same JSONL transcript across turns and gets a
+    # real prompt-cache hit on resume. See PER_CONVERSATION_SESSIONS.md
+    # for the establishment flow (first turn omits resume; subsequent
+    # turns pass the UUID captured from the first response's `sessionId`).
+    if resume:
+        body["resume"] = resume
+    return body
+
+
+def _extract_session_uuid(response: dict[str, Any]) -> str | None:
+    """Pull the Claude session UUID out of a claudebox /run response.
+    Field name is `sessionId` (camelCase). Returns None if absent so
+    callers handling non-claudebox responses don't need to special-case."""
+    sid = response.get("sessionId")
+    return str(sid) if sid else None
 
 
 def _build_auth_headers() -> dict[str, str]:
@@ -461,6 +484,14 @@ _POLL_INTERVAL_SECONDS = 2.0
 # JSONL line at completion. 5 min default; tune up if you have very
 # long-form turns. Env override: `GMAIL_CLAUDEBOX_IDLE_TIMEOUT_SECONDS`.
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 300.0
+
+# When the parent has any open Task tool_use (sub-agent in flight),
+# the parent JSONL goes silent for the duration of the sub-agent's
+# work; sub-agent JSONLs are also tailed (jsonl_tail.py) but the
+# watchdog gets an extra grace multiplier as belt-and-suspenders.
+# Observed: 8-way parallel Task fan-out can keep the parent silent
+# for 5+ minutes if sub-agent JSONL discovery lags.
+_FANOUT_IDLE_MULTIPLIER = 4.0
 _HARD_TIMEOUT_SECONDS = 60 * 60  # 1h hard cap on a single async run.
 
 
@@ -499,6 +530,7 @@ async def claudebox_invoke(
     session_id: str | None = None,
     cost_sink: CostSink | None = None,
     event_sink: EventSink | None = None,
+    resume: str | None = None,
 ) -> StageResult:
     """Drop-in replacement for `adk_invoke` that talks to a
     docker-claudebox HTTP server.
@@ -544,6 +576,7 @@ async def claudebox_invoke(
             session_id=session_id,
             cost_sink=cost_sink,
             event_sink=event_sink,
+            resume=resume,
         )
     return await _claudebox_invoke_sync(
         agent,
@@ -552,6 +585,7 @@ async def claudebox_invoke(
         session_id=session_id,
         cost_sink=cost_sink,
         event_sink=event_sink,
+        resume=resume,
     )
 
 
@@ -563,11 +597,12 @@ async def _claudebox_invoke_sync(
     session_id: str | None,
     cost_sink: CostSink | None,
     event_sink: EventSink | None,
+    resume: str | None = None,
 ) -> StageResult:
     """Legacy sync `/run` path. Held in place verbatim as a fallback
     so a misbehaving async deploy can be reverted by flipping
     `GMAIL_CLAUDEBOX_USE_ASYNC=0`."""
-    body = _build_request_body(agent, prompt, workspace=workspace, session_id=session_id)
+    body = _build_request_body(agent, prompt, workspace=workspace, session_id=session_id, resume=resume)
     tailer_task, stop_event = _maybe_start_jsonl_tailer(workspace, event_sink)
     try:
         response = await _post_claudebox_run(body)
@@ -577,7 +612,11 @@ async def _claudebox_invoke_sync(
     text = _extract_result_text(response)
     tool_calls = await _resolve_tool_calls(response, session_id=session_id)
     _report_cost(agent, response, cost_sink)
-    return StageResult(text=text, tool_calls=tool_calls)
+    return StageResult(
+        text=text,
+        tool_calls=tool_calls,
+        claude_session_uuid=_extract_session_uuid(response),
+    )
 
 
 async def _claudebox_invoke_async(
@@ -588,21 +627,23 @@ async def _claudebox_invoke_async(
     session_id: str | None,
     cost_sink: CostSink | None,
     event_sink: EventSink | None,
+    resume: str | None = None,
 ) -> StageResult:
     """Async-mode entry point: kick off `/run` with `async=True`,
     poll for completion, and run the JSONL tailer alongside the poll
     loop as both an event source and an idle-progress watchdog."""
-    body = _build_request_body(agent, prompt, workspace=workspace, session_id=session_id)
+    body = _build_request_body(agent, prompt, workspace=workspace, session_id=session_id, resume=resume)
     body["async"] = True
     initial = await _post_claudebox_run_async(body)
     run_id = _extract_run_id(initial)
 
     last_event_at = {"t": _now()}
+    open_task_ids: set[str] = set()
     stop_event = asyncio.Event()
-    tailer_task = _start_progress_tailer(workspace, event_sink, last_event_at, stop_event)
+    tailer_task = _start_progress_tailer(workspace, event_sink, last_event_at, stop_event, open_task_ids=open_task_ids)
 
     try:
-        result_blob = await _poll_until_done(run_id, last_event_at)
+        result_blob = await _poll_until_done(run_id, last_event_at, open_task_ids=open_task_ids)
     finally:
         if tailer_task is not None:
             await _shutdown_tailer(tailer_task, stop_event)
@@ -610,7 +651,11 @@ async def _claudebox_invoke_async(
     text = _extract_result_text(result_blob)
     tool_calls = await _resolve_tool_calls(result_blob, session_id=session_id)
     _report_cost(agent, result_blob, cost_sink)
-    return StageResult(text=text, tool_calls=tool_calls)
+    return StageResult(
+        text=text,
+        tool_calls=tool_calls,
+        claude_session_uuid=_extract_session_uuid(result_blob),
+    )
 
 
 def _extract_run_id(initial: dict[str, Any]) -> str:
@@ -636,6 +681,7 @@ def _start_progress_tailer(
     event_sink: EventSink | None,
     last_event_at: dict[str, float],
     stop_event: asyncio.Event,
+    open_task_ids: set[str] | None = None,
 ) -> asyncio.Task | None:
     """Spawn a JSONL tailer that updates the idle-watchdog timestamp
     on every parsed event and (if a sink is wired) forwards the
@@ -643,7 +689,7 @@ def _start_progress_tailer(
     runs whenever async mode is on — even without an event_sink — so
     the watchdog has a progress signal."""
     host_dir = _host_jsonl_dir_for(workspace)
-    handler = _make_progress_handler(event_sink, last_event_at)
+    handler = _make_progress_handler(event_sink, last_event_at, open_task_ids=open_task_ids)
     return asyncio.create_task(
         tail_session_events(host_dir, handler, stop_event=stop_event),
     )
@@ -652,13 +698,22 @@ def _start_progress_tailer(
 def _make_progress_handler(
     event_sink: EventSink | None,
     last_event_at: dict[str, float],
+    open_task_ids: set[str] | None = None,
 ) -> Callable[[dict], Awaitable[None]]:
     """Build the per-line callback the tailer uses. Every line bumps
     the watchdog timestamp; lines mappable to tool_calls also fan out
-    to the caller's event_sink when one is wired."""
+    to the caller's event_sink when one is wired.
+
+    If `open_task_ids` is supplied, the handler tracks open Task-tool
+    invocations so the idle-timeout check can apply a longer grace
+    period while sub-agents are running. We add the tool_use_id when
+    we see a `Task` `tool_use` block, and remove it when the matching
+    `tool_result` arrives."""
 
     async def _handle(parsed: dict) -> None:
         last_event_at["t"] = _now()
+        if open_task_ids is not None:
+            _update_open_task_ids(parsed, open_task_ids)
         if event_sink is None:
             return
         for tool_call in map_jsonl_event_to_tool_calls(parsed):
@@ -670,11 +725,52 @@ def _make_progress_handler(
     return _handle
 
 
-async def _poll_until_done(run_id: str, last_event_at: dict[str, float]) -> dict[str, Any]:
+def _update_open_task_ids(parsed: dict, open_task_ids: set[str]) -> None:
+    """Mutate `open_task_ids` based on one parsed JSONL line.
+
+    Adds tool_use_id when the line is an assistant Task tool_use;
+    removes it when a matching user tool_result lands. Robust to the
+    many shapes claudebox JSONL lines can take — silently skips
+    anything we don't recognize. The watchdog only needs a rough
+    approximation: if Task is in flight, give the run more breathing
+    room; if not, fall back to the standard threshold."""
+    msg_type = parsed.get("type")
+    message = parsed.get("message")
+    if not isinstance(message, dict):
+        return
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    if msg_type == "assistant":
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and str(block.get("name") or "") == "Task":
+                tool_use_id = block.get("id")
+                if isinstance(tool_use_id, str) and tool_use_id:
+                    open_task_ids.add(tool_use_id)
+    elif msg_type == "user":
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id")
+                if isinstance(tool_use_id, str):
+                    open_task_ids.discard(tool_use_id)
+
+
+async def _poll_until_done(
+    run_id: str,
+    last_event_at: dict[str, float],
+    *,
+    open_task_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """Poll `GET /run/result` until the run completes, fails, or one
     of two watchdogs trips:
-      * idle: no JSONL progress for `_IDLE_TIMEOUT_SECONDS` →
-        claudebox subprocess looks wedged; abort client-side.
+      * idle: no JSONL progress for `_idle_timeout_seconds()` →
+        claudebox subprocess looks wedged; abort client-side. While
+        any Task tool_use is open (sub-agent in flight), the threshold
+        is multiplied by `_FANOUT_IDLE_MULTIPLIER`.
       * hard: total wall time exceeds `_HARD_TIMEOUT_SECONDS`."""
     started = _now()
     while True:
@@ -683,7 +779,7 @@ async def _poll_until_done(run_id: str, last_event_at: dict[str, float]) -> dict
         status, body = await _poll_run_result(run_id)
         if status == "done":
             return body  # type: ignore[return-value]
-        _check_idle_timeout(run_id, last_event_at)
+        _check_idle_timeout(run_id, last_event_at, open_task_ids=open_task_ids)
 
 
 def _check_hard_timeout(run_id: str, started: float) -> None:
@@ -691,14 +787,27 @@ def _check_hard_timeout(run_id: str, started: float) -> None:
         raise ClaudeboxError(f"hard timeout {_HARD_TIMEOUT_SECONDS}s exceeded for run {run_id}")
 
 
-def _check_idle_timeout(run_id: str, last_event_at: dict[str, float]) -> None:
+def _check_idle_timeout(
+    run_id: str,
+    last_event_at: dict[str, float],
+    *,
+    open_task_ids: set[str] | None = None,
+) -> None:
     idle = _now() - last_event_at["t"]
-    if idle > _idle_timeout_seconds():
+    threshold = _idle_timeout_seconds()
+    if open_task_ids:
+        threshold *= _FANOUT_IDLE_MULTIPLIER
+    if idle > threshold:
+        fanout_note = (
+            f" (Task fan-out active with {len(open_task_ids)} open sub-agent(s); " f"threshold was {threshold:.0f}s)"
+            if open_task_ids
+            else ""
+        )
         raise ClaudeboxError(
             f"no JSONL progress for {idle:.0f}s on run {run_id}; "
             f"claudebox subprocess appears stuck (no tool_use events emitted "
-            f"since the last log line). Aborting client-side; the server-side "
-            f"run may still complete and is purged after 6h."
+            f"since the last log line){fanout_note}. Aborting client-side; "
+            f"the server-side run may still complete and is purged after 6h."
         )
 
 

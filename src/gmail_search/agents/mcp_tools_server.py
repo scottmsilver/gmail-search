@@ -35,12 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from gmail_search.agents.sandbox import SandboxRequest, execute_in_sandbox
 from gmail_search.agents.session import save_artifact
-from gmail_search.agents.tools import get_thread as _get_thread_impl
-from gmail_search.agents.tools import query_emails as _query_emails_impl
-from gmail_search.agents.tools import search_emails as _search_emails_impl
-from gmail_search.agents.tools import sql_query as _sql_query_impl
+from gmail_search.agents.tools import describe_schema as _describe_schema_impl
+from gmail_search.agents.tools import get_attachment_batch as _get_attachment_batch_impl
+from gmail_search.agents.tools import get_thread_batch as _get_thread_batch_impl
+from gmail_search.agents.tools import query_emails_batch as _query_emails_batch_impl
+from gmail_search.agents.tools import search_emails_batch as _search_emails_batch_impl
+from gmail_search.agents.tools import sql_query_batch as _sql_query_batch_impl
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 7878
 DEFAULT_PATH = "/mcp"
-
-# Mirrors `analyst._truncate` caps so the MCP shape matches the
-# existing ADK shape exactly. Walkers in
-# `orchestration._artifact_ids_from_tool_calls` and
-# `_cite_refs_from_tool_calls` already handle this exact dict.
-RUN_CODE_STDOUT_CAP = 8000
-RUN_CODE_STDERR_CAP = 4000
-RUN_CODE_TIMEOUT_SECONDS = 60
 
 # Per-session call-log cap. The side channel exists to bypass
 # claudebox's tool_result truncation, but unbounded growth turns it
@@ -143,25 +136,91 @@ _SESSION_CAP_WARNED: set[str] = set()
 
 
 def _record_call(session_id: str, name: str, args: dict, response: dict) -> None:
-    """Append one tool call to the session's call log. Stored as the
-    full structured response — no stringify, no truncation. Drops
-    silently (after one warning per session) once the per-session cap
-    is reached so a runaway tool loop can't exhaust memory."""
+    """Append one tool call to two stores:
+
+    1. **In-memory side-channel** (kept for backwards compat with
+       `/admin/calls/<session_id>` and the orchestrator's post-turn
+       drain). Bounded by `_MAX_CALLS_PER_SESSION` so a runaway tool
+       loop can't exhaust process memory.
+    2. **`agent_events` table** — durable, survives orchestrator
+       crashes between tool execution and post-turn drain (which the
+       in-memory log alone can't, see codex review of the original
+       per-conversation plan). This is the source of truth the debug
+       pane reads from. Best-effort: a failed DB write logs and
+       continues — the in-memory log is the fallback."""
     import time as _time
 
     bucket = _SESSION_CALLS.setdefault(session_id, [])
-    if len(bucket) >= _MAX_CALLS_PER_SESSION:
+    over_cap = len(bucket) >= _MAX_CALLS_PER_SESSION
+    if over_cap:
         if session_id not in _SESSION_CAP_WARNED:
             _SESSION_CAP_WARNED.add(session_id)
             logger.warning(
-                "session %s reached _MAX_CALLS_PER_SESSION=%d; further calls run "
-                "but will not be recorded in the side-channel log",
+                "session %s reached _MAX_CALLS_PER_SESSION=%d; in-memory log "
+                "is full but DB persistence still records every call",
                 session_id,
                 _MAX_CALLS_PER_SESSION,
             )
+    else:
+        entry = {"name": name, "args": dict(args), "response": response, "ts": _time.time()}
+        bucket.append(entry)
+    _persist_call_to_events(session_id, name, args, response)
+
+
+def _persist_call_to_events(session_id: str, name: str, args: dict, response: dict) -> None:
+    """Write a single tool call to `agent_events` as a `mcp_tool_call_full`
+    event. Opens a short-lived psycopg connection per call so concurrent
+    parallel-tool_use writes for the same session don't share connection
+    state (httpx async runtime can interleave multiple `_record_call`s
+    on the event loop). The seq race is handled by retrying the INSERT
+    a few times — append_event computes seq from MAX+1 and the
+    UNIQUE (session_id, seq) constraint catches collisions cleanly."""
+    dsn = _resolve_server_db_dsn()
+    if not dsn:
         return
-    entry = {"name": name, "args": dict(args), "response": response, "ts": _time.time()}
-    bucket.append(entry)
+    conn = None
+    try:
+        from gmail_search.agents.session import append_event
+
+        conn = _open_db_conn(dsn)
+        payload = {"name": name, "args": dict(args), "response": response}
+        for attempt in range(5):
+            try:
+                append_event(
+                    conn,
+                    session_id=session_id,
+                    agent_name="mcp",
+                    kind="mcp_tool_call_full",
+                    payload=payload,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                # UniqueViolation on (session_id, seq) means a concurrent
+                # writer claimed our seq — recompute and retry. ForeignKey
+                # violation means the agent_sessions row doesn't exist
+                # yet (e.g. an admin-test session that didn't go through
+                # create_session); skip silently.
+                import psycopg
+
+                if isinstance(exc, psycopg.errors.ForeignKeyViolation):
+                    return
+                if isinstance(exc, psycopg.errors.UniqueViolation) and attempt < 4:
+                    conn.rollback()
+                    continue
+                raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "persist call to agent_events failed for session=%s name=%s: %s",
+            session_id,
+            name,
+            exc,
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def get_session_calls(session_id: str) -> list[dict]:
@@ -266,72 +325,54 @@ def _get_session(session_id: str) -> SessionContext:
 # ── Tool implementations (re-routes) ───────────────────────────────
 
 
-async def _tool_search_emails(
-    session_id: str,
-    query: str,
-    date_from: str = "",
-    date_to: str = "",
-    top_k: int = 10,
-) -> dict:
-    """Re-route to the existing async search_emails. `session_id`
-    threading is documented in the public docstring registered with
-    FastMCP; the impl's only use of session_id is to assert the
-    caller registered before calling — search itself is global."""
+async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> dict:
+    """Re-route to `search_emails_batch`. `session_id` threading is
+    documented in the public docstring registered with FastMCP; the
+    impl's only use of session_id is to assert the caller registered
+    before calling — search itself is global."""
     _get_session(session_id)
-    args = {"query": query, "date_from": date_from, "date_to": date_to, "top_k": top_k}
-    response = await _search_emails_impl(**args)
-    _record_call(session_id, "search_emails", args, response)
+    args = {"searches": searches}
+    response = await _search_emails_batch_impl(searches)
+    _record_call(session_id, "search_emails_batch", args, response)
     return response
 
 
-async def _tool_query_emails(
-    session_id: str,
-    sender: str = "",
-    subject_contains: str = "",
-    date_from: str = "",
-    date_to: str = "",
-    label: str = "",
-    has_attachment: bool | None = None,
-    order_by: str = "date_desc",
-    limit: int = 20,
-) -> dict:
+async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict:
     _get_session(session_id)
-    args = {
-        "sender": sender,
-        "subject_contains": subject_contains,
-        "date_from": date_from,
-        "date_to": date_to,
-        "label": label,
-        "has_attachment": has_attachment,
-        "order_by": order_by,
-        "limit": limit,
-    }
-    response = await _query_emails_impl(**args)
-    _record_call(session_id, "query_emails", args, response)
+    args = {"filters": filters}
+    response = await _query_emails_batch_impl(filters)
+    _record_call(session_id, "query_emails_batch", args, response)
     return response
 
 
-async def _tool_get_thread(session_id: str, thread_id: str) -> dict:
+async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict:
     _get_session(session_id)
-    args = {"thread_id": thread_id}
-    response = await _get_thread_impl(**args)
-    _record_call(session_id, "get_thread", args, response)
+    args = {"thread_ids": thread_ids}
+    response = await _get_thread_batch_impl(thread_ids)
+    _record_call(session_id, "get_thread_batch", args, response)
     return response
 
 
-async def _tool_sql_query(session_id: str, query: str) -> dict:
+async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
     _get_session(session_id)
-    args = {"query": query}
-    response = await _sql_query_impl(**args)
-    _record_call(session_id, "sql_query", args, response)
+    args = {"queries": queries}
+    response = await _sql_query_batch_impl(queries)
+    _record_call(session_id, "sql_query_batch", args, response)
     return response
 
 
-async def _tool_get_attachment(session_id: str, attachment_id: int, mode: str = "text") -> dict:
+async def _tool_describe_schema(session_id: str) -> dict:
     _get_session(session_id)
-    args = {"attachment_id": attachment_id, "mode": mode}
-    response = await _get_attachment_impl(**args)
-    _record_call(session_id, "get_attachment", args, response)
+    response = await _describe_schema_impl()
+    _record_call(session_id, "describe_schema", {}, response)
+    return response
+
+
+async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
+    _get_session(session_id)
+    args = {"items": items}
+    response = await _get_attachment_batch_impl(items)
+    _record_call(session_id, "get_attachment_batch", args, response)
     return response
 
 
@@ -400,20 +441,18 @@ def _sniff_mime(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-async def _tool_publish_artifact(
+def _publish_one(
+    *,
+    ctx: SessionContext,
     session_id: str,
     path: str,
-    name: str = "",
-    mime_type: str = "",
+    name: str,
+    mime_type: str,
 ) -> dict:
-    """Publish a file as a user-visible artifact. Read the file from
-    the workspace (or the persistent /work scratch dir), upload to
-    `agent_artifacts`, return the id the model can cite as
-    `[art:<id>]`. The model uses this AFTER it has produced a
-    chart/CSV via Bash + Python (or any other means) and wants the
-    user to see it in the answer."""
-    ctx = _get_session(session_id)
-    args = {"path": path, "name": name, "mime_type": mime_type}
+    """Publish a single file as a user-visible artifact. Synchronous
+    because the underlying file read + save_artifact are sync; the
+    batch wrapper sequences these on the event loop thread (no
+    benefit to gather() — the bottleneck is the DB write, not I/O)."""
     try:
         file_path = _resolve_publish_source(
             path,
@@ -421,18 +460,12 @@ async def _tool_publish_artifact(
             conversation_id=ctx.conversation_id,
         )
     except (FileNotFoundError, RuntimeError) as exc:
-        response = {"error": str(exc)}
-        _record_call(session_id, "publish_artifact", args, response)
-        return response
-
+        return {"error": str(exc)}
     size = file_path.stat().st_size
     if size > MAX_PUBLISH_BYTES:
-        response = {
+        return {
             "error": f"file too large: {size} bytes; max {MAX_PUBLISH_BYTES}. Save a smaller version (downsample, lower DPI, or summarize)."
         }
-        _record_call(session_id, "publish_artifact", args, response)
-        return response
-
     data = file_path.read_bytes()
     final_name = name or file_path.name
     final_mime = mime_type or _sniff_mime(file_path)
@@ -443,83 +476,39 @@ async def _tool_publish_artifact(
         mime_type=final_mime,
         data=data,
     )
-    response = {"id": art_id, "name": final_name, "mime_type": final_mime, "size": size}
-    _record_call(session_id, "publish_artifact", args, response)
-    return response
+    return {"id": art_id, "name": final_name, "mime_type": final_mime, "size": size}
 
 
-def _truncate(s: str, cap: int) -> str:
-    """Match the analyst module's truncation marker exactly so the
-    MCP run_code result reads identically to the ADK version."""
-    if s is None:
-        return ""
-    if len(s) <= cap:
-        return s
-    return s[: cap - 16] + f"\n... (truncated, original {len(s)} chars)"
-
-
-def _persist_sandbox_artifacts(
-    artifacts,
-    *,
-    session_id: str,
-    db_conn,
-) -> list[dict[str, Any]]:
-    """Upload each sandbox-produced artifact to `agent_artifacts` and
-    return the list of `{id, name, mime_type}` rows the model can
-    cite. Failures are logged but don't fail the whole tool call —
-    matches the existing ADK behaviour."""
-    persisted: list[dict[str, Any]] = []
-    for art in artifacts:
-        try:
-            art_id = save_artifact(
-                db_conn,
-                session_id=session_id,
-                name=art.name,
-                mime_type=art.mime_type,
-                data=art.data,
-            )
-            persisted.append({"id": art_id, "name": art.name, "mime_type": art.mime_type})
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"save_artifact failed for {art.name}: {e}")
-    return persisted
-
-
-def _tool_run_code(session_id: str, code: str) -> dict:
-    """Sync — execute_in_sandbox is sync, so wrapping in async would
-    just block the event loop on the Docker call without any
-    benefit. FastMCP supports both."""
+async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> dict:
+    """Publish many files as user-visible artifacts in ONE call.
+    Each item is `{path, name?, mime_type?}`. Per-item errors land
+    in that entry's `result` as `{error: ...}`; the batch as a
+    whole still succeeds so the agent can publish every other file
+    even if one is missing."""
     ctx = _get_session(session_id)
-    req = SandboxRequest(
-        code=code,
-        evidence=ctx.evidence_records,
-        db_dsn=ctx.db_dsn,
-        timeout_seconds=RUN_CODE_TIMEOUT_SECONDS,
-        conversation_id=ctx.conversation_id,
-    )
-    result = execute_in_sandbox(req)
-    # Only open the DB connection when we actually have something to
-    # persist. Sessions that never produce an artifact (search-only
-    # turns, or sandboxes that just print) shouldn't require DB_DSN to
-    # be configured on the MCP server.
-    persisted = (
-        _persist_sandbox_artifacts(
-            result.artifacts,
+    args = {"items": items}
+    if not isinstance(items, list) or not items:
+        response = {"error": "items must be a non-empty list of dicts"}
+        _record_call(session_id, "publish_artifact_batch", args, response)
+        return response
+    from gmail_search.agents.tools import BATCH_MAX_ITEMS as _CAP
+
+    if len(items) > _CAP:
+        response = {"error": f"items cap is {_CAP}; got {len(items)}. Split into multiple batches."}
+        _record_call(session_id, "publish_artifact_batch", args, response)
+        return response
+    results = []
+    for it in items:
+        result = _publish_one(
+            ctx=ctx,
             session_id=session_id,
-            db_conn=ctx.get_db_conn(),
+            path=it.get("path", ""),
+            name=it.get("name", ""),
+            mime_type=it.get("mime_type", ""),
         )
-        if result.artifacts
-        else []
-    )
-    response = {
-        "exit_code": result.exit_code,
-        "stdout": _truncate(result.stdout, RUN_CODE_STDOUT_CAP),
-        "stderr": _truncate(result.stderr, RUN_CODE_STDERR_CAP),
-        "wall_ms": result.wall_ms,
-        "timed_out": result.timed_out,
-        "oom_killed": result.oom_killed,
-        "artifacts": persisted,
-    }
-    _record_call(session_id, "run_code", {"code": code}, response)
+        results.append({"input": it, "result": result})
+    response = {"results": results}
+    _record_call(session_id, "publish_artifact_batch", args, response)
     return response
 
 
@@ -535,60 +524,103 @@ SESSION_PARAM_NOTE = (
     "right evidence + database context."
 )
 
-SEARCH_DESC = (
-    "Search messages by relevance (semantic + BM25 blend). Use for "
-    '"what did we decide about X" / "find messages mentioning Y". '
-    "Empty date_from/date_to skip date filter; top_k caps thread "
-    f"count (default 10). {SESSION_PARAM_NOTE}"
+SEARCH_BATCH_DESC = (
+    "Run many semantic searches concurrently in ONE call. `searches` "
+    "is a list (1-100) of `{query, date_from?, date_to?, top_k?}` "
+    'dicts; `top_k` defaults to 10. Use for relevance lookups ("what '
+    'did we decide about X", "find messages mentioning Y"). Returns '
+    "`{results: [{input, result}, ...]}` aligned with input. "
+    "Per-search errors land in that entry's `result` as `{error: ...}`.\n\n"
+    "ALWAYS use this for multi-angle investigations — fan out across "
+    "phrasings/date-windows in ONE call. Even a single search goes "
+    f"through this tool (pass a one-item list). {SESSION_PARAM_NOTE}"
 )
 
-QUERY_DESC = (
-    "Filter messages by structured metadata. Use when you know WHAT "
-    "fields to filter on — no relevance ranking. Returns threads in "
-    f"the requested order (date_desc default). {SESSION_PARAM_NOTE}"
+QUERY_BATCH_DESC = (
+    "Run many structured-metadata filters concurrently in ONE call. "
+    "`filters` is a list (1-100) of dicts; each accepts any of "
+    "`{sender, subject_contains, date_from, date_to, label, "
+    "has_attachment, order_by, limit}`. Use when you know WHICH "
+    "fields to filter on (no relevance ranking). Returns "
+    f"`{{results: [{{input, result}}, ...]}}` aligned with input. {SESSION_PARAM_NOTE}"
 )
 
-THREAD_DESC = (
-    "Fetch every message in a thread with body text + attachment "
-    "manifest. Bodies clipped to 20k chars. Use AFTER search/query "
-    f"when you need the actual words. {SESSION_PARAM_NOTE}"
+THREAD_BATCH_DESC = (
+    "Fetch many threads concurrently in ONE call. `thread_ids` is a "
+    "list (1-100). Use this whenever you need ≥2 threads — never "
+    "split into multiple sequential single-thread calls. Each "
+    "thread's payload is the full message bodies + attachment "
+    "manifest (bodies clipped to 20k chars). Returns "
+    "`{results: [{thread_id, result}, ...]}` aligned with input. "
+    "Per-thread errors land in that entry's `result` as "
+    f"`{{error: ...}}`; the batch as a whole still succeeds. {SESSION_PARAM_NOTE}"
 )
 
-SQL_DESC = (
-    "Run a read-only SELECT against the messages DB (gated by the "
-    "server's safety check: SELECT/WITH only, no DDL/DML, 500-row + "
-    f"10s timeout). Cells > 8000 chars are clipped. {SESSION_PARAM_NOTE}"
+SQL_QUERY_BATCH_DESC = (
+    "Run many read-only SELECTs concurrently in ONE call against the "
+    "messages DB (Postgres + ParadeDB). `queries` is a list (1-100). "
+    "Each query is independently gated: SELECT/WITH only, no DDL/DML, "
+    "500-row + 10s per-query timeout. Returns "
+    "`{results: [{query, result}, ...]}` aligned with input; per-query "
+    "errors land in that entry's `result` as `{error: ...}` — the "
+    "batch as a whole still succeeds.\n\n"
+    "Even a single query goes through this tool — pass a one-item "
+    "list. Use multi-item batches for multi-angle investigations: "
+    "different senders, keywords, time windows, year-buckets, ticket "
+    "numbers. Same wall clock for 1 query or 20.\n\n"
+    "Call `describe_schema` first if unsure about column names. "
+    "Common gotchas: `from_addr` (not `sender`), `body_text` (not "
+    "`body`), `id` (not `message_id`), no `snippet` column.\n\n"
+    "REQUIRED — BM25 for free-text. The server REJECTS `LIKE`/`ILIKE` "
+    "on these columns (forces seq scan, ~50x slower):\n"
+    "  messages: subject, body_text, from_addr, to_addr\n"
+    "  attachments: filename, extracted_text\n"
+    "Use the `@@@` operator with the row PK (`id`) instead. Tantivy "
+    "syntax: `field:term`, combinable with AND / OR / NOT and parens. "
+    "Translation table:\n"
+    "  WHERE subject ILIKE '%credit%'\n"
+    "    →  WHERE id @@@ 'subject:credit'\n"
+    "  WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'\n"
+    "    →  WHERE id @@@ 'from_addr:delta AND subject:cancel'\n"
+    "  WHERE body_text LIKE '%refund issued%'  (phrase)\n"
+    "    →  WHERE id @@@ 'body_text:\"refund issued\"'\n"
+    "Add `ORDER BY paradedb.score(id) DESC` for relevance. Escape "
+    "hatch: any query containing `@@@` skips the LIKE check, so a "
+    "BM25 prefilter + LIKE refinement is allowed (use only when BM25 "
+    "truly cannot express the predicate). Cells > 8000 chars are "
+    f"clipped. {SESSION_PARAM_NOTE}"
 )
 
-RUN_CODE_DESC = (
-    "Execute a Python snippet in the analysis sandbox. Has access "
-    "to `evidence` (pandas DataFrame), `db` (read-only psycopg "
-    "connection), `pd`, `np`, `plt`, `sns`, `sklearn`, and "
-    "`save_artifact(name, obj)`. Returns exit_code, stdout, stderr, "
-    "wall_ms, timed_out, oom_killed, artifacts (list of "
-    f"{{id, name, mime_type}}). {SESSION_PARAM_NOTE}"
+DESCRIBE_SCHEMA_DESC = (
+    "Return markdown documentation for every table the `sql_query` "
+    "tool can read. Call this before writing a non-trivial sql_query "
+    "if you're unsure about column names. Cheap, no parameters beyond "
+    f"session_id. {SESSION_PARAM_NOTE}"
 )
 
-ATTACHMENT_DESC = (
-    "Fetch an email attachment. `attachment_id` comes from "
-    "get_thread's attachments[].id. `mode` is one of: "
-    "'meta' (filename/mime/size only — cheap), "
-    "'text' (extracted text from PDFs/docx/OCR — the usual choice), "
+ATTACHMENT_BATCH_DESC = (
+    "Fetch many email attachments concurrently in ONE call. `items` "
+    "is a list (1-100) of `{attachment_id, mode?}` dicts. `mode` is "
+    "one of: 'meta' (filename/mime/size only — cheap), 'text' "
+    "(extracted text from PDFs/docx/OCR — the usual choice, default), "
     "'rendered_pages' (PDF pages as base64 PNGs — heavy, only when "
-    f"text is empty/unhelpful and you need to read images). {SESSION_PARAM_NOTE}"
+    "text is empty/unhelpful). `attachment_id` comes from a thread's "
+    "`attachments[].id`. Returns `{results: [{input, result}, ...]}` "
+    f"aligned with input. Even a single attachment goes through this tool. {SESSION_PARAM_NOTE}"
 )
 
-PUBLISH_ARTIFACT_DESC = (
-    "Register a file as part of the answer the user sees. Anything you "
-    "produce that should appear in the user's answer must be published "
-    "first — files you write to disk are invisible by default. Call "
-    "this regardless of how you produced the file (Bash, external "
-    "command, download, anything). `path` may be relative ('plot.png') "
-    "or absolute ('/workspaces/<your-workspace>/plot.png' or "
+PUBLISH_ARTIFACT_BATCH_DESC = (
+    "Register many files as part of the answer the user sees, in ONE "
+    "call. `items` is a list (1-100) of `{path, name?, mime_type?}` "
+    "dicts. Anything you produce that should appear in the user's "
+    "answer must be published first — files you write to disk are "
+    "invisible by default. `path` may be relative ('plot.png') or "
+    "absolute ('/workspaces/<your-workspace>/plot.png' or "
     "'/work/plot.png'). Optional: `name` for the citation chip, "
     "`mime_type` if auto-detect is wrong. Returns "
-    "`{id, name, mime_type, size}`; cite the `id` as `[art:<id>]` in "
-    f"your answer. Files >10MB are rejected. {SESSION_PARAM_NOTE}"
+    "`{results: [{input, result: {id, name, mime_type, size} | {error}}, ...]}`; "
+    "cite each `id` as `[art:<id>]` in your answer. Files >10MB are "
+    f"rejected per-item. {SESSION_PARAM_NOTE}"
 )
 
 
@@ -738,13 +770,13 @@ def _make_fastmcp_app(host: str, port: int):
         streamable_http_path=DEFAULT_PATH,
     )
 
-    app.tool(name="search_emails", description=SEARCH_DESC)(_tool_search_emails)
-    app.tool(name="query_emails", description=QUERY_DESC)(_tool_query_emails)
-    app.tool(name="get_thread", description=THREAD_DESC)(_tool_get_thread)
-    app.tool(name="sql_query", description=SQL_DESC)(_tool_sql_query)
-    app.tool(name="run_code", description=RUN_CODE_DESC)(_tool_run_code)
-    app.tool(name="get_attachment", description=ATTACHMENT_DESC)(_tool_get_attachment)
-    app.tool(name="publish_artifact", description=PUBLISH_ARTIFACT_DESC)(_tool_publish_artifact)
+    app.tool(name="search_emails_batch", description=SEARCH_BATCH_DESC)(_tool_search_emails_batch)
+    app.tool(name="query_emails_batch", description=QUERY_BATCH_DESC)(_tool_query_emails_batch)
+    app.tool(name="get_thread_batch", description=THREAD_BATCH_DESC)(_tool_get_thread_batch)
+    app.tool(name="sql_query_batch", description=SQL_QUERY_BATCH_DESC)(_tool_sql_query_batch)
+    app.tool(name="describe_schema", description=DESCRIBE_SCHEMA_DESC)(_tool_describe_schema)
+    app.tool(name="get_attachment_batch", description=ATTACHMENT_BATCH_DESC)(_tool_get_attachment_batch)
+    app.tool(name="publish_artifact_batch", description=PUBLISH_ARTIFACT_BATCH_DESC)(_tool_publish_artifact_batch)
 
     _register_admin_routes(app)
 

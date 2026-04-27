@@ -147,11 +147,23 @@ async def test_sql_query_clips_oversized_cells(monkeypatch):
 
 @pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
 def test_build_retrieval_tools_assembles_expected_set():
-    """The five retrieval tools must always be present — the Retriever
+    """All retrieval tools must always be present — the Retriever
     agent relies on this exact set. A missing tool silently degrades
     retrieval quality."""
     from gmail_search.agents.tools import build_retrieval_tools
 
     tools = build_retrieval_tools()
     names = sorted(t.name for t in tools)
-    assert names == ["get_attachment", "get_thread", "query_emails", "search_emails", "sql_query"]
+    assert names == [
+        "describe_schema",
+        "get_attachment",
+        "get_attachment_batch",
+        "get_thread",
+        "get_thread_batch",
+        "query_emails",
+        "query_emails_batch",
+        "search_emails",
+        "search_emails_batch",
+        "sql_query",
+        "sql_query_batch",
+    ]
