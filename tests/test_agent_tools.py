@@ -78,7 +78,7 @@ async def test_search_emails_backfills_cite_ref(monkeypatch):
         },
     )
     data = await search_emails("how much did we spend?")
-    assert data["results"][0]["cite_ref"] == "abcdef01"
+    assert data["results"][0]["cite_ref"] == "abcdef0123456789"
     assert data["results"][1]["cite_ref"] == "preset"
 
 
@@ -91,7 +91,7 @@ async def test_query_emails_backfills_cite_ref(monkeypatch):
         {"results": [{"thread_id": "aaabbbcccdddeeee", "subject": "x"}]},
     )
     data = await query_emails(sender="alice@example.com")
-    assert data["results"][0]["cite_ref"] == "aaabbbcc"
+    assert data["results"][0]["cite_ref"] == "aaabbbcccdddeeee"
 
 
 @pytest.mark.asyncio
@@ -147,11 +147,11 @@ async def test_sql_query_clips_oversized_cells(monkeypatch):
 
 @pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
 def test_build_retrieval_tools_assembles_expected_set():
-    """The four retrieval tools must always be present — the Retriever
+    """The five retrieval tools must always be present — the Retriever
     agent relies on this exact set. A missing tool silently degrades
     retrieval quality."""
     from gmail_search.agents.tools import build_retrieval_tools
 
     tools = build_retrieval_tools()
     names = sorted(t.name for t in tools)
-    assert names == ["get_thread", "query_emails", "search_emails", "sql_query"]
+    assert names == ["get_attachment", "get_thread", "query_emails", "search_emails", "sql_query"]

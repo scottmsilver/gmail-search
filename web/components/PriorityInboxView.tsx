@@ -8,7 +8,7 @@ import { ThreadDrawer } from "@/components/ThreadDrawer";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/components/ThreadDrawerContext";
 import type { PriorityInboxSection, QueryThread, SearchThread } from "@/lib/backend";
 
-const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "http://127.0.0.1:8080";
+const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "";
 
 // Reuse the same adapter pattern as InboxView — inbox rows have no
 // per-message score or match metadata, so we synthesise a single "match"

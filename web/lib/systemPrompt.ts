@@ -98,7 +98,7 @@ Anti-pattern for factual recall (never do this): opening with "Here is the statu
 </query_type>
 
 <citations>
-Every thread in a tool result carries \`cite_ref\` (8 hex chars). To cite a thread, write [ref:CITE_REF] using the cite_ref value EXACTLY as returned.
+Every thread in a tool result carries \`cite_ref\` (a hex string). To cite a thread, write [ref:CITE_REF] using the cite_ref value EXACTLY as returned — do not shorten or truncate it.
 - NEVER invent, truncate, or reuse a cite_ref from memory / training data.
 - NEVER write a bare ID inline.
 - ONE citation per bracket: "[ref:A] [ref:B]", never "[ref:A, ref:B]".

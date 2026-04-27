@@ -1,0 +1,8 @@
+@__route_gms host gms.i.oursilverfamily.com
+handle @__route_gms {
+	# Single upstream: Next.js (3000). Next.js owns the entire /api/*
+	# surface — some are real routes (chat, agent), some are thin
+	# proxies to the Python backend on 127.0.0.1:8090. The browser
+	# never talks to Python directly.
+	reverse_proxy 127.0.0.1:3000
+}

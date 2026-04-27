@@ -122,10 +122,13 @@ async def search_emails(query: str, date_from: str = "", date_to: str = "", top_
     if date_to:
         params["date_to"] = date_to
     data = await _get("/api/search", params=params)
-    # Add an 8-char cite_ref (prefix of thread_id) alongside each row
-    # so the Writer has the same shorthand the chat-mode path uses.
+    # cite_ref = full thread_id. Earlier we used the first 8 hex chars
+    # as a shorter shorthand, but that's a 32-bit namespace and
+    # collisions occur in real mailboxes (e.g. two emails arriving in
+    # the same second from the same sender). The UI shortens chips
+    # visually anyway, so there's no benefit to truncating here.
     for row in data.get("results", []):
-        row.setdefault("cite_ref", (row.get("thread_id") or "")[:8])
+        row.setdefault("cite_ref", row.get("thread_id") or "")
     return data
 
 
@@ -170,7 +173,7 @@ async def query_emails(
         params["has_attachment"] = str(has_attachment).lower()
     data = await _get("/api/query", params=params)
     for row in data.get("results", []):
-        row.setdefault("cite_ref", (row.get("thread_id") or "")[:8])
+        row.setdefault("cite_ref", row.get("thread_id") or "")
     return data
 
 
@@ -220,6 +223,35 @@ async def sql_query(query: str) -> dict:
     return data
 
 
+# ── get_attachment ─────────────────────────────────────────────────
+
+
+_ATTACHMENT_VALID_MODES = ("meta", "text", "rendered_pages")
+
+
+async def get_attachment(attachment_id: int, mode: str = "text") -> dict:
+    """Fetch an email attachment in one of three shapes:
+
+    - `meta`: filename + mime_type + size_bytes + thread_id, no body.
+      Cheap, useful for "what's attached?" queries before deciding
+      whether to read.
+    - `text`: extracted text (PDF / docx / OCR'd images). Run this
+      when you want the attachment's words.
+    - `rendered_pages`: PDF pages rasterized to base64-PNG. Heavy
+      (multiple MB per page), token-expensive — only use when text
+      extraction is empty or unhelpful (scans, complex layouts) AND
+      the model can read images.
+
+    `attachment_id` comes from `get_thread`'s `attachments[*].id`."""
+    if mode not in _ATTACHMENT_VALID_MODES:
+        return {"error": f"invalid mode {mode!r}; must be one of {list(_ATTACHMENT_VALID_MODES)}"}
+    if mode == "meta":
+        return await _get(f"/api/attachment/{attachment_id}/meta")
+    if mode == "text":
+        return await _get(f"/api/attachment/{attachment_id}/text")
+    return await _get(f"/api/attachment/{attachment_id}/render_pages")
+
+
 # ── ADK tool factory ───────────────────────────────────────────────
 
 
@@ -235,4 +267,5 @@ def build_retrieval_tools() -> list:
         FunctionTool(query_emails),
         FunctionTool(get_thread),
         FunctionTool(sql_query),
+        FunctionTool(get_attachment),
     ]

@@ -18,7 +18,7 @@ import {
   subscribeChatSettings,
 } from "@/lib/chatSettings";
 
-const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "http://127.0.0.1:8080";
+const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "";
 
 const DrawerHost = () => {
   const { openThreadId, setOpenThreadId } = useThreadDrawer();
@@ -75,6 +75,7 @@ export default function Page() {
             thinkingLevel: s.thinkingLevel,
             battle: s.battleMode,
             deep: s.deepMode,
+            deep_backend: s.deepBackend,
             conversation_id: conversationIdRef.current,
           };
         },

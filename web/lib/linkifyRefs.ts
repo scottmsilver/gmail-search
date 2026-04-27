@@ -3,7 +3,10 @@ export const ATT_PREFIX = "att://";
 export const ART_PREFIX = "art://";
 
 // Matches either:
-//   [ref:ID]         — bracketed thread citation (hex cite_ref)
+//   [ref:ID]         — bracketed thread citation. ID is normally the full
+//                      16-char thread_id; we accept any hex/dash token here
+//                      for resilience to model truncation (which we then
+//                      try to resolve as a prefix of a known thread_id).
 //   [att:123]        — bracketed attachment citation (numeric attachment_id)
 //   [art:123]        — bracketed analyst-artifact citation (numeric id from
 //                      /api/artifact/<id> — plot PNG, CSV, etc.)
