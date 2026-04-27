@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import {
-  AVAILABLE_MODELS,
+  availableModelsFor,
   THINKING_LEVELS,
+  type DeepBackend,
   type ThinkingLevel,
 } from "@/lib/config";
 import {
@@ -28,6 +29,10 @@ const SHORT_NAME: Record<string, string> = {
   "gemini-2.5-pro": "2.5 Pro",
   "gemini-2.5-flash": "2.5 Flash",
   "gemini-2.5-flash-lite": "2.5 Flash Lite",
+  sonnet: "Sonnet",
+  opus: "Opus",
+  haiku: "Haiku",
+  opusplan: "Opus Plan",
 };
 
 const shortModel = (m: string) => SHORT_NAME[m] ?? m;
@@ -56,9 +61,20 @@ export const ModelPicker = () => {
 
   const battleOn = settings.battleMode;
   const deepOn = settings.deepMode;
+  const deepBackend = settings.deepBackend;
+  const modelOptions = availableModelsFor(deepBackend);
   const triggerLabel = battleOn
     ? "⚔ battle mode"
     : `${shortModel(settings.model)} · ${settings.thinkingLevel}`;
+
+  const switchDeepBackend = (next: DeepBackend) => {
+    const nextModels = availableModelsFor(next);
+    const patch: Partial<ChatSettings> = { deepBackend: next };
+    if (!(nextModels as readonly string[]).includes(settings.model)) {
+      patch.model = nextModels[0] as ChatSettings["model"];
+    }
+    setChatSettings(patch);
+  };
 
   return (
     <div ref={rootRef} className="relative shrink-0">
@@ -83,7 +99,7 @@ export const ModelPicker = () => {
               disabled={battleOn}
               className="w-full bg-neutral-50 border border-neutral-200 rounded px-2 py-1 text-neutral-800 font-medium focus:outline-none focus:border-neutral-400"
             >
-              {AVAILABLE_MODELS.map((m) => (
+              {modelOptions.map((m) => (
                 <option key={m} value={m}>
                   {shortModel(m)}
                 </option>
@@ -135,6 +151,52 @@ export const ModelPicker = () => {
               🔬 {deepOn ? "on — multi-agent with Python sandbox" : "off — single agent"}
             </button>
           </div>
+
+          {deepOn && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
+                Deep backend
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => switchDeepBackend("adk")}
+                  className={
+                    deepBackend === "adk"
+                      ? "flex-1 rounded bg-neutral-700 text-white px-2 py-1 font-medium hover:bg-neutral-600"
+                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
+                  }
+                  title="ADK pipeline: Gemini planner → retriever → analyst → writer → critic. Python sandbox."
+                >
+                  ADK
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchDeepBackend("claude_code")}
+                  className={
+                    deepBackend === "claude_code"
+                      ? "flex-1 rounded bg-blue-700 text-white px-2 py-1 font-medium hover:bg-blue-600"
+                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
+                  }
+                  title="Claude Code runtime: Claudebox + MCP, full orchestrator (planner → ... → critic)."
+                >
+                  Claude Code
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchDeepBackend("claude_native")}
+                  className={
+                    deepBackend === "claude_native"
+                      ? "flex-1 rounded bg-purple-700 text-white px-2 py-1 font-medium hover:bg-purple-600"
+                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
+                  }
+                  title="Claude Native: single Claude agent with all MCP tools, no orchestrator. Faster, cheaper."
+                >
+                  Claude Native
+                </button>
+              </div>
+            </div>
+          )}
 
           <div>
             <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">

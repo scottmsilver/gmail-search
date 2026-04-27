@@ -56,3 +56,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: requires live MCP+claudebox+postgres+gmail-search stack; opt-in via pytest -m integration",
+]
+addopts = "-m 'not integration'"

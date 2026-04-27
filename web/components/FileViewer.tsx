@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 
 import { MarkdownText } from "./MarkdownText";
 import { PdfRenderer } from "./PdfRenderer";
+import { XlsxTable } from "./XlsxTable";
 
 // A mime-type dispatcher. Given a URL + mime, render the right view:
 //   application/pdf   → <PdfRenderer>
 //   image/*           → <img>
 //   text/csv          → a simple HTML table (first ~200 rows)
+//   xlsx              → <XlsxTable> (sheet tabs + first ~200 rows)
 //   text/markdown     → MarkdownText
 //   text/* or JSON    → preformatted text
 //   anything else     → Download link
@@ -26,6 +28,9 @@ type Props = {
 const isTextLike = (m: string) =>
   m.startsWith("text/") || m === "application/json" || m === "application/javascript";
 
+const isXlsx = (m: string) =>
+  m === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
 export const FileViewer = ({ url, filename, mimeType }: Props) => {
   if (mimeType === "application/pdf") {
     return <PdfRenderer url={url} />;
@@ -42,6 +47,7 @@ export const FileViewer = ({ url, filename, mimeType }: Props) => {
     );
   }
   if (mimeType === "text/csv") return <CsvTable url={url} />;
+  if (isXlsx(mimeType)) return <XlsxTable url={url} />;
   if (mimeType === "text/markdown") return <MarkdownFromUrl url={url} />;
   if (isTextLike(mimeType)) return <TextBody url={url} />;
 

@@ -28,6 +28,23 @@ export const AVAILABLE_MODELS = [
   "gemini-2.5-flash-lite",
 ] as const;
 
+// Picker choices when the deep-mode backend is set to Claude Code.
+// These are the alias names accepted by the Claude Code runtime.
+export const CLAUDE_AVAILABLE_MODELS = [
+  "sonnet",
+  "opus",
+  "haiku",
+  "opusplan",
+] as const;
+
+export type DeepBackend = "adk" | "claude_code" | "claude_native";
+
+const isClaudeBackend = (backend: DeepBackend): boolean =>
+  backend === "claude_code" || backend === "claude_native";
+
+export const availableModelsFor = (backend: DeepBackend): readonly string[] =>
+  isClaudeBackend(backend) ? CLAUDE_AVAILABLE_MODELS : AVAILABLE_MODELS;
+
 // Note: "minimal" is valid in the SDK type but rejected by some Gemini 3.x
 // models (e.g. 3.1-pro-preview responds "Thinking level MINIMAL is not
 // supported for this model"). Dropping it from the UI + battle pool so

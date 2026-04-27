@@ -1,0 +1,21 @@
+services:
+  claudebox:
+    image: psyb0t/claudebox:latest-minimal@sha256:f7480ab95be2501472e7f7a7ea71c27086003b1730ecd386e1d79f63f4af1a46
+    container_name: claudebox
+    restart: unless-stopped
+    ports:
+    - 8765:8765
+    environment:
+      CLAUDE_MODE_API: '1'
+      CLAUDE_MODE_API_PORT: '8765'
+      CLAUDE_MODE_API_TOKEN: ${CLAUDEBOX_API_TOKEN}
+      CLAUDE_WORKSPACE: /workspaces
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1'
+      CLAUDE_CODE_ENABLE_TASKS: '1'
+      ANTHROPIC_API_KEY: ''
+      ANTHROPIC_AUTH_TOKEN: ''
+    volumes:
+    - ./claude-config:/home/claude/.claude
+    - ./workspaces:/workspaces
+    extra_hosts:
+    - host.docker.internal:host-gateway

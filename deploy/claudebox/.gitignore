@@ -1,0 +1,18 @@
+.env
+workspaces/
+
+# Claude Code runtime state — per-machine, contains session logs,
+# cached tool results, growth-book flags, OAuth tokens, etc.
+# Only the templates / settings checked in below are tracked.
+claude-config/.credentials.json
+claude-config/.credentials.json.expired-bak-*
+claude-config/.claude.json
+claude-config/.claude.json.lock
+claude-config/backups/
+claude-config/cache/
+claude-config/projects/
+claude-config/sessions/
+claude-config/shell-snapshots/
+claude-config/file-history/
+claude-config/history.jsonl
+claude-config/mcp-needs-auth-cache.json

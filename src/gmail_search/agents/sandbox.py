@@ -69,7 +69,14 @@ class SandboxRequest:
     into the workdir and exposed to the snippet as `evidence` (pandas
     DataFrame via the preamble — see `_serialize_evidence_for_sandbox`
     for accepted shapes). `db_dsn` — if set — is passed as an env var
-    the preamble uses to open a read-only PG connection."""
+    the preamble uses to open a read-only PG connection.
+
+    `conversation_id` — when set — switches `/work` from a per-call
+    tmpdir to a host-bind-mounted scratch directory shared by every
+    call in the same conversation (across run_code calls within one
+    deep-mode turn AND across turns). Lets the analyst stage parquets,
+    pickled models, etc. between calls. None preserves the original
+    ephemeral behaviour."""
 
     code: str
     evidence: Any = None
@@ -78,6 +85,7 @@ class SandboxRequest:
     memory: str = DEFAULT_MEMORY
     pids_limit: int = DEFAULT_PIDS_LIMIT
     cpus: str = DEFAULT_CPUS
+    conversation_id: str | None = None
 
 
 @dataclass
@@ -276,6 +284,70 @@ def image_available() -> bool:
     return rv.returncode == 0
 
 
+# ── Persistent scratch (per-conversation /work) ────────────────────
+
+
+# Host-side root for per-conversation scratch dirs. Relative to CWD
+# because the daemon's working directory is the project root in the
+# dev/test setups (`gmail-search serve`, pytest). Each conversation
+# gets one subdir under here, bind-mounted at /work for every call.
+_SCRATCH_ROOT = "data/agent_scratch"
+
+
+def _safe_conversation_id(conversation_id: str) -> str:
+    """Strict allow-list filter: alphanumeric, hyphen, underscore only.
+    Anything else is rejected outright — we're about to use this string
+    as a directory name on the host, so a single `..` or `/` would let
+    a bad caller escape the scratch root."""
+    cleaned = "".join(c for c in conversation_id if c.isalnum() or c in ("-", "_"))
+    if cleaned != conversation_id or not cleaned:
+        raise ValueError(f"invalid conversation_id {conversation_id!r}")
+    assert cleaned and ".." not in cleaned and "/" not in cleaned
+    return cleaned
+
+
+def _resolve_scratch_dir(conversation_id: str) -> Path:
+    """Return the host scratch dir for a conversation, creating it
+    (mode 0700) if absent. Touches mtime so the GC sweep can tell which
+    conversations are still active.
+
+    Path is always absolute — Docker rejects relative paths in `-v`
+    mounts ("includes invalid characters for a local volume name").
+    Resolved against CWD, which the orchestrator runs from project
+    root."""
+    safe_id = _safe_conversation_id(conversation_id)
+    path = (Path(_SCRATCH_ROOT) / safe_id).resolve()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.utime(path, None)
+    return path
+
+
+def _prepare_persistent_workdir(workdir: Path, code: str, evidence: Any) -> None:
+    """Seed a persistent scratch dir for one call. Overwrites `run.py`
+    + `inputs.json` (orchestrator owns those) and resets the artifact
+    manifest so we don't re-sweep stale entries from a prior turn.
+    Existing user files under /work and old artifacts/ files are left
+    alone — that's the whole point of persistence."""
+    (workdir / "artifacts").mkdir(exist_ok=True)
+    (workdir / "run.py").write_text(code, encoding="utf-8")
+    with (workdir / "inputs.json").open("w", encoding="utf-8") as fh:
+        json.dump({"evidence": _serialize_evidence_for_sandbox(evidence)}, fh)
+    manifest = workdir / "artifacts" / "_manifest.jsonl"
+    if manifest.exists():
+        manifest.unlink()
+
+
+def _prepare_ephemeral_workdir(code: str, evidence: Any) -> Path:
+    """Create a fresh per-call tmpdir and seed it. Original behaviour
+    when no conversation_id is provided."""
+    workdir = Path(tempfile.mkdtemp(prefix="gmail-analyst-"))
+    (workdir / "artifacts").mkdir(exist_ok=True)
+    (workdir / "run.py").write_text(code, encoding="utf-8")
+    with (workdir / "inputs.json").open("w", encoding="utf-8") as fh:
+        json.dump({"evidence": _serialize_evidence_for_sandbox(evidence)}, fh)
+    return workdir
+
+
 # ── Public API ──────────────────────────────────────────────────────
 
 
@@ -292,15 +364,16 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
     if not image_available():
         raise RuntimeError(f"sandbox image {IMAGE_NAME} not built — run `docker build -t {IMAGE_NAME} sandbox/`")
 
-    # Fresh scratch dir per run — avoids any cross-invocation state
-    # leakage even if the caller forgets to clean up.
-    workdir = Path(tempfile.mkdtemp(prefix="gmail-analyst-"))
-    (workdir / "artifacts").mkdir(exist_ok=True)
-    (workdir / "run.py").write_text(req.code, encoding="utf-8")
-    # Evidence goes in as JSON — see `_serialize_evidence_for_sandbox`
-    # for the safety rationale (pickle.load on untrusted input = RCE).
-    with (workdir / "inputs.json").open("w", encoding="utf-8") as fh:
-        json.dump({"evidence": _serialize_evidence_for_sandbox(req.evidence)}, fh)
+    # Per-conversation persistent scratch when conversation_id is set;
+    # otherwise the original per-call tmpdir behaviour. Persistent
+    # dirs survive across calls and turns; ephemeral ones don't and
+    # are deleted in the finally cleanup below.
+    persistent = req.conversation_id is not None
+    if persistent:
+        workdir = _resolve_scratch_dir(req.conversation_id or "")
+        _prepare_persistent_workdir(workdir, req.code, req.evidence)
+    else:
+        workdir = _prepare_ephemeral_workdir(req.code, req.evidence)
     # Container runs as uid=1000 in its own user namespace. The host
     # tmpdir is owned by the caller, so we just need owner+group rwx;
     # 0o770 gives the container's mapped uid write access without
@@ -379,8 +452,10 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
     artifacts = _sweep_artifacts(workdir) if exit_code == 0 else []
 
     # Best-effort cleanup. A readonly-rootfs leftover container is
-    # already removed by --rm; the tmp workdir is ours.
-    _cleanup_workdir(workdir)
+    # already removed by --rm; the tmp workdir is ours. Persistent
+    # scratch dirs are owned by the GC sweep — we keep them.
+    if not persistent:
+        _cleanup_workdir(workdir)
 
     return SandboxResult(
         exit_code=exit_code,

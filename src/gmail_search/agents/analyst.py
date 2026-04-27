@@ -65,8 +65,8 @@ Your final text response must:
    evidence supports.
 
 SCALE (when the Planner flagged a large question):
-- The filesystem `/work/` is tmpfs, writable, ~64 MB scratch.
-  Use it to stage big intermediate data:
+- The filesystem `/work/` is writable scratch. Use it to stage big
+  intermediate data:
     cur = db.execute("SELECT ... FROM messages WHERE ...")
     df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
     df.to_parquet('/work/raw.parquet')   # or to_csv for smaller data
@@ -80,6 +80,21 @@ SCALE (when the Planner flagged a large question):
   artifact instead and reference the artifact id.
 - If a single operation risks OOM (>512 MB), split it — the
   sandbox kills at 512 MB hard.
+
+## Your `/work` directory persists.
+Files you write under `/work` (or `/work/anything/`) survive across
+`run_code` calls in this turn AND across turns in this conversation.
+Use this to save intermediate data — fitted models, parquets, large
+dataframes — anywhere outside `/work/artifacts/` that you want to
+reuse later. `/work/run.py` and `/work/inputs.json` are overwritten
+by the orchestrator on every call; don't rely on those being yours.
+
+Packages installed via `pip` do NOT persist (they live in the
+container's system site-packages, not `/work`) — and `pip install`
+won't work anyway because the sandbox has no network. The standard
+stack is pre-installed: `pandas`, `numpy`, `matplotlib`, `seaborn`,
+`sklearn`, `scipy`. If you genuinely need something else, check the
+existing import surface first; don't try to install.
 
 Available in every snippet (via the runtime preamble):
   evidence       — pandas DataFrame from the retriever's results
@@ -123,6 +138,7 @@ def build_run_code_tool(
     session_id: str,
     db_conn,
     timeout_seconds: int = 60,
+    conversation_id: str | None = None,
 ):
     """Return an ADK FunctionTool bound to THIS session's sandbox
     inputs + artifact sink.
@@ -159,6 +175,7 @@ def build_run_code_tool(
             evidence=evidence_records,
             db_dsn=db_dsn,
             timeout_seconds=timeout_seconds,
+            conversation_id=conversation_id,
         )
         result = execute_in_sandbox(req)
 
@@ -197,6 +214,7 @@ def build_analyst_agent(
     db_conn,
     model: str | None = None,
     instruction: str | None = None,
+    conversation_id: str | None = None,
 ):
     """Assemble the Analyst LlmAgent ready to run.
 
@@ -213,6 +231,7 @@ def build_analyst_agent(
         db_dsn=db_dsn,
         session_id=session_id,
         db_conn=db_conn,
+        conversation_id=conversation_id,
     )
     # Default model bumped from gemini-2.5-flash to 3.1-pro after a
     # live test: flash agents reliably failed to invoke `run_code`

@@ -126,6 +126,14 @@ class Orchestrator:
     # retrieval evidence when analysis is needed.
     analyst_factory: Callable[[list[dict] | dict | None], AgentLike]
     invoke: InvokeFn
+    # When True, per-tool-call `tool_call` events are NOT emitted
+    # from `_run_retriever` / `_run_analyst_if_needed`. This is the
+    # mode for backends that already streamed tool_call events
+    # mid-flight via the runtime adapter's `event_sink` — re-emitting
+    # them post-hoc would double up the UI's tool-call lane. The
+    # rolled-up `evidence` / `analysis` aggregates still fire so the
+    # downstream stages keep their inputs.
+    skip_per_tool_emission: bool = False
 
     async def run(self, question: str) -> str:
         """Drive all five stages for `question` and return the final
@@ -169,8 +177,9 @@ class Orchestrator:
         """
         prompt = _retriever_input(question, plan)
         result = await self.invoke(self.retriever, prompt)
-        for tc in result.tool_calls:
-            self._emit("retriever", "tool_call", tc)
+        if not self.skip_per_tool_emission:
+            for tc in result.tool_calls:
+                self._emit("retriever", "tool_call", tc)
         cite_refs = _cite_refs_from_tool_calls(result.tool_calls)
         self._emit(
             "retriever",
@@ -198,8 +207,9 @@ class Orchestrator:
         prompt = _analyst_input(question, plan, evidence)
         result = await self.invoke(analyst, prompt)
         artifact_ids = _artifact_ids_from_tool_calls(result.tool_calls)
-        for tc in result.tool_calls:
-            self._emit("analyst", "code_run", tc)
+        if not self.skip_per_tool_emission:
+            for tc in result.tool_calls:
+                self._emit("analyst", "code_run", tc)
         self._emit(
             "analyst",
             "analysis",

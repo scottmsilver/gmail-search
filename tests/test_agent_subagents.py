@@ -33,16 +33,16 @@ def test_build_planner_agent_has_no_tools():
     assert agent.instruction == PLANNER_INSTRUCTION
 
 
-def test_build_retriever_agent_carries_all_four_retrieval_tools():
+def test_build_retriever_agent_carries_all_five_retrieval_tools():
     """Retriever is the ONLY agent that talks to the data layer; if
-    any of the four retrieval tools goes missing, whole classes of
+    any of the five retrieval tools goes missing, whole classes of
     questions fail silently."""
     from gmail_search.agents.retriever import build_retriever_agent
 
     agent = build_retriever_agent()
     assert agent.name == "retriever"
     names = sorted(t.name for t in agent.tools)
-    assert names == ["get_thread", "query_emails", "search_emails", "sql_query"]
+    assert names == ["get_attachment", "get_thread", "query_emails", "search_emails", "sql_query"]
 
 
 def test_build_writer_agent_has_no_tools_and_mentions_citation_rules():

@@ -87,3 +87,385 @@ def test_probe_adk_imports_silent_on_healthy_install(caplog):
     assert not any(
         "ADK imports failed" in r.getMessage() for r in warnings
     ), f"healthy install should not warn; got: {[r.getMessage() for r in warnings]}"
+
+
+# ── claude_code backend wiring ─────────────────────────────────────
+
+
+def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypatch, tmp_path):
+    """`GMAIL_DEEP_BACKEND=claude_code` must:
+       1. ensure the workspace dir exists,
+       2. register the MCP session BEFORE the orchestrator runs,
+       3. route every Orchestrator invoke through `claudebox_invoke`
+          with `workspace=` and `session_id=` bound,
+       4. unregister the MCP session in the finally cleanup.
+
+    We don't bring up actual containers — `claudebox_invoke`,
+    `register_session`, and `unregister_session` are all swapped for
+    spies, and the Orchestrator's `run` is stubbed so the harness
+    returns instantly."""
+    import asyncio
+
+    monkeypatch.setenv("GMAIL_DEEP_BACKEND", "claude_code")
+
+    events: list[str] = []
+    invoke_calls: list[dict] = []
+
+    async def fake_claudebox_invoke(
+        agent,
+        prompt,
+        *,
+        workspace,
+        session_id=None,
+        cost_sink=None,
+        event_sink=None,
+    ):
+        from gmail_search.agents.orchestration import StageResult
+
+        invoke_calls.append(
+            {
+                "agent": getattr(agent, "name", "?"),
+                "workspace": workspace,
+                "session_id": session_id,
+                "has_cost_sink": cost_sink is not None,
+                "has_event_sink": event_sink is not None,
+            }
+        )
+        return StageResult(text="{}", tool_calls=[])
+
+    async def fake_register_session(session_id, *, evidence_records, db_dsn, conversation_id=None, workspace=None):
+        events.append(f"register:{session_id}:conv={conversation_id}:ws={workspace}")
+
+    async def fake_unregister_session(session_id):
+        events.append(f"unregister:{session_id}")
+
+    workspace_dirs: list[str] = []
+
+    def fake_ensure_workspace(workspace):
+        workspace_dirs.append(workspace)
+
+    # Stub orchestrator.run so the test doesn't actually run any
+    # planner/retriever/etc — we only need to verify wiring.
+    class _FakeOrch:
+        def __init__(
+            self,
+            *,
+            session_id,
+            conn,
+            planner,
+            retriever,
+            writer,
+            critic,
+            analyst_factory,
+            invoke,
+            skip_per_tool_emission=False,
+        ):
+            self.session_id = session_id
+            self.invoke = invoke
+            self.skip_per_tool_emission = skip_per_tool_emission
+
+        async def run(self, question):
+            class _A:
+                name = "planner"
+
+            await self.invoke(_A(), "x")  # fire one invoke to capture wiring
+            return None
+
+    # Stub DB + builders so no real ADK / DB activity happens.
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _path: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+    monkeypatch.setattr(service, "_ensure_workspace_dir", fake_ensure_workspace)
+
+    import gmail_search.agents.runtime_claude as rc
+
+    monkeypatch.setattr(rc, "register_session_via_admin", fake_register_session)
+    monkeypatch.setattr(rc, "unregister_session_via_admin", fake_unregister_session)
+    monkeypatch.setattr(rc, "claudebox_invoke", fake_claudebox_invoke)
+
+    # Bypass the actual Orchestrator + sub-agent factories.
+    import gmail_search.agents.orchestration as orch_mod
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _FakeOrch)
+    for builder in ("build_planner_agent", "build_retriever_agent", "build_writer_agent", "build_critic_agent"):
+        for mod_name, attr in [
+            ("planner", "build_planner_agent"),
+            ("retriever", "build_retriever_agent"),
+            ("writer", "build_writer_agent"),
+            ("critic", "build_critic_agent"),
+        ]:
+            mod = __import__(f"gmail_search.agents.{mod_name}", fromlist=[attr])
+            monkeypatch.setattr(mod, attr, lambda *a, **kw: object(), raising=True)
+
+    async def consume():
+        async for _ in service._real_run(tmp_path / "x.db", "sess-XYZ", "what happened"):
+            pass
+
+    asyncio.run(consume())
+
+    # Workspace dir created with the expected naming scheme.
+    assert workspace_dirs == ["deep-sess-XYZ"]
+    # register fired before any invoke; unregister fired last. The
+    # register payload includes the conversation_id (None here — the
+    # test calls _real_run without one).
+    assert events[0] == "register:sess-XYZ:conv=None:ws=deep-sess-XYZ"
+    assert events[-1] == "unregister:sess-XYZ"
+    # Every invoke saw the right workspace + session_id + cost_sink.
+    assert invoke_calls and all(c["workspace"] == "deep-sess-XYZ" for c in invoke_calls)
+    assert all(c["session_id"] == "sess-XYZ" for c in invoke_calls)
+    assert all(c["has_cost_sink"] for c in invoke_calls)
+
+
+def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
+    """`GMAIL_DEEP_BACKEND=claude_native` must:
+       1. ensure the workspace dir exists,
+       2. delegate to `native_run` (NOT the orchestrator),
+       3. forward the right kwargs (db_path, session_id, workspace,
+          conversation_id, question, model, cost_sink),
+       4. SKIP every orchestrator/sub-agent builder.
+
+    We swap `native_run` for a spy and assert the call shape. The
+    Orchestrator factory is also stubbed to assert it never runs."""
+    import asyncio
+
+    monkeypatch.setenv("GMAIL_DEEP_BACKEND", "claude_native")
+
+    native_calls: list[dict] = []
+
+    async def fake_native_run(
+        *,
+        db_path,
+        session_id,
+        workspace,
+        conversation_id,
+        question,
+        model,
+        cost_sink,
+    ):
+        native_calls.append(
+            {
+                "db_path": db_path,
+                "session_id": session_id,
+                "workspace": workspace,
+                "conversation_id": conversation_id,
+                "question": question,
+                "model": model,
+                "has_cost_sink": cost_sink is not None,
+            }
+        )
+
+    import gmail_search.agents.runtime_claude_native as rcn
+
+    monkeypatch.setattr(rcn, "native_run", fake_native_run)
+
+    workspace_dirs: list[str] = []
+
+    def fake_ensure_workspace(workspace):
+        workspace_dirs.append(workspace)
+
+    monkeypatch.setattr(service, "_ensure_workspace_dir", fake_ensure_workspace)
+
+    # Asserting orchestrator never runs: blow up if anything tries to
+    # construct it.
+    class _OrchestratorMustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Orchestrator should not be constructed for claude_native")
+
+    import gmail_search.agents.orchestration as orch_mod
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _OrchestratorMustNotRun)
+
+    # DB stub: support fetch_events_after returning [] so the poller
+    # exits as soon as native_task is done.
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _path: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+
+    async def consume():
+        async for _ in service._real_run(
+            tmp_path / "x.db",
+            "sess-NAT",
+            "what happened",
+            default_model="opus",
+            conversation_id="conv-7",
+        ):
+            pass
+
+    asyncio.run(consume())
+
+    assert workspace_dirs == ["deep-sess-NAT"]
+    assert len(native_calls) == 1
+    call = native_calls[0]
+    assert call["session_id"] == "sess-NAT"
+    assert call["workspace"] == "deep-sess-NAT"
+    assert call["conversation_id"] == "conv-7"
+    assert call["question"] == "what happened"
+    assert call["model"] == "opus"
+    assert call["has_cost_sink"] is True
+
+
+def test_real_run_adk_backend_does_not_register_mcp_session(monkeypatch, tmp_path):
+    """Default backend must NOT touch the MCP session registry —
+    that path is entirely claude_code-only."""
+    import asyncio
+
+    monkeypatch.delenv("GMAIL_DEEP_BACKEND", raising=False)
+
+    register_calls: list[str] = []
+    unregister_calls: list[str] = []
+
+    import gmail_search.agents.runtime_claude as rc
+
+    async def fake_register(sid, **kw):
+        register_calls.append(sid)
+
+    async def fake_unregister(sid):
+        unregister_calls.append(sid)
+
+    monkeypatch.setattr(rc, "register_session_via_admin", fake_register)
+    monkeypatch.setattr(rc, "unregister_session_via_admin", fake_unregister)
+
+    class _FakeOrch:
+        def __init__(self, **kw):
+            pass
+
+        async def run(self, question):
+            return None
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _path: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+    import gmail_search.agents.orchestration as orch_mod
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _FakeOrch)
+    for mod_name, attr in [
+        ("planner", "build_planner_agent"),
+        ("retriever", "build_retriever_agent"),
+        ("writer", "build_writer_agent"),
+        ("critic", "build_critic_agent"),
+    ]:
+        mod = __import__(f"gmail_search.agents.{mod_name}", fromlist=[attr])
+        monkeypatch.setattr(mod, attr, lambda *a, **kw: object(), raising=True)
+
+    async def consume():
+        async for _ in service._real_run(tmp_path / "x.db", "adk-sess", "q"):
+            pass
+
+    asyncio.run(consume())
+
+    assert register_calls == []
+    assert unregister_calls == []
+
+
+# ── conversation history preamble ──────────────────────────────────
+
+
+class _FakeRow(dict):
+    """psycopg-style row that supports both dict-key and attribute access."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, sql, params):
+        return _FakeCursor(self._rows)
+
+
+def _row(role, text):
+    import json as _json
+
+    return _FakeRow(role=role, parts=_json.dumps([{"type": "text", "text": text}]))
+
+
+def test_history_preamble_empty_when_no_conversation_id():
+    assert service._build_conversation_history_preamble(_FakeConn([]), None) == ""
+
+
+def test_history_preamble_empty_for_first_turn():
+    """Only the in-progress user message exists yet — no prior history."""
+    conn = _FakeConn([_row("user", "first question")])
+    assert service._build_conversation_history_preamble(conn, "conv-1") == ""
+
+
+def test_history_preamble_includes_prior_turns():
+    """Two completed turns + an in-progress user message: preamble has
+    the first two pairs, drops the trailing user."""
+    conn = _FakeConn(
+        [
+            _row("user", "first question"),
+            _row("assistant", "first answer"),
+            _row("user", "second question"),
+            _row("assistant", "second answer"),
+            _row("user", "third question (in progress)"),
+        ]
+    )
+    out = service._build_conversation_history_preamble(conn, "conv-1")
+    assert "first question" in out
+    assert "first answer" in out
+    assert "second question" in out
+    assert "second answer" in out
+    assert "third question (in progress)" not in out
+    assert out.endswith("# Latest user question (answer this)\n\n")
+
+
+def test_history_preamble_truncates_to_max_turns():
+    """When more than max_turns pairs exist, only the most recent are
+    kept."""
+    conn = _FakeConn(
+        [
+            _row("user", "very old question"),
+            _row("assistant", "very old answer"),
+            _row("user", "old question"),
+            _row("assistant", "old answer"),
+            _row("user", "recent question"),
+            _row("assistant", "recent answer"),
+            _row("user", "in progress"),
+        ]
+    )
+    out = service._build_conversation_history_preamble(conn, "conv-1", max_turns=1)
+    assert "very old" not in out
+    assert "old question" not in out
+    assert "recent question" in out
+    assert "recent answer" in out
+
+
+def test_history_preamble_skips_non_text_blocks():
+    """Messages with only data-deep-stage / data-debug-id blocks
+    contribute no text and don't appear in the preamble."""
+    import json as _json
+
+    conn = _FakeConn(
+        [
+            _row("user", "real question"),
+            _FakeRow(role="assistant", parts=_json.dumps([{"type": "data-debug-id", "id": "x"}])),
+            _row("user", "in progress"),
+        ]
+    )
+    out = service._build_conversation_history_preamble(conn, "conv-1")
+    assert "real question" in out
+    # No assistant text appeared — but the preamble still has the user
+    # turn, which is enough to establish topic context.

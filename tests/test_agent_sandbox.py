@@ -133,3 +133,66 @@ def test_sandbox_errors_when_image_missing(monkeypatch):
     monkeypatch.setattr(sb, "image_available", lambda: False)
     with pytest.raises(RuntimeError, match="docker build"):
         execute_in_sandbox(SandboxRequest(code="print(1)"))
+
+
+# ── Persistent /work across run_code calls ─────────────────────────
+
+
+def test_sandbox_persistent_workdir_survives_across_calls(monkeypatch, tmp_path):
+    """Two execute_in_sandbox calls with the same conversation_id share
+    /work: the first writes a file, the second reads it back. This is
+    the load-bearing test for the persistence feature."""
+    from gmail_search.agents import sandbox as sb
+
+    monkeypatch.setattr(sb, "_SCRATCH_ROOT", str(tmp_path / "scratch"))
+
+    res1 = execute_in_sandbox(
+        SandboxRequest(
+            code="open('/work/state.txt', 'w').write('hello-from-call-1')\nprint('wrote')\n",
+            conversation_id="conv-abc-123",
+        )
+    )
+    assert res1.exit_code == 0, res1.stderr
+    assert "wrote" in res1.stdout
+
+    res2 = execute_in_sandbox(
+        SandboxRequest(
+            code="print('saw:', open('/work/state.txt').read())\n",
+            conversation_id="conv-abc-123",
+        )
+    )
+    assert res2.exit_code == 0, res2.stderr
+    assert "saw: hello-from-call-1" in res2.stdout
+
+
+def test_sandbox_no_conversation_id_is_ephemeral(monkeypatch, tmp_path):
+    """Without conversation_id, /work resets between calls — the file
+    written in call 1 must NOT be visible in call 2. Confirms the
+    legacy ephemeral path is preserved."""
+    from gmail_search.agents import sandbox as sb
+
+    monkeypatch.setattr(sb, "_SCRATCH_ROOT", str(tmp_path / "scratch"))
+
+    res1 = execute_in_sandbox(
+        SandboxRequest(code="open('/work/state.txt', 'w').write('x')\nprint('wrote')\n"),
+    )
+    assert res1.exit_code == 0, res1.stderr
+
+    res2 = execute_in_sandbox(
+        SandboxRequest(
+            code=("import os\n" "print('exists:', os.path.exists('/work/state.txt'))\n"),
+        ),
+    )
+    assert res2.exit_code == 0, res2.stderr
+    assert "exists: False" in res2.stdout
+
+
+def test_safe_conversation_id_rejects_traversal():
+    """The path-traversal guard is the security boundary for the
+    persistent path; verify it rejects the obvious attacks."""
+    from gmail_search.agents.sandbox import _safe_conversation_id
+
+    assert _safe_conversation_id("conv-123_abc") == "conv-123_abc"
+    for bad in ("../etc", "a/b", "..", "", "with space", "drop;table"):
+        with pytest.raises(ValueError):
+            _safe_conversation_id(bad)

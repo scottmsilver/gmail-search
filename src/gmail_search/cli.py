@@ -1529,6 +1529,7 @@ def prune_artifacts(ctx, retention_days):
     — only the artifact bytes get dropped.
     """
     from gmail_search.agents.gc import prune_artifacts as _prune
+    from gmail_search.agents.gc import prune_scratch_dirs as _prune_scratch
 
     conn = get_connection(ctx.obj["db_path"])
     try:
@@ -1539,4 +1540,9 @@ def prune_artifacts(ctx, retention_days):
         f"pruned {result.artifacts_deleted} artifacts "
         f"(~{result.bytes_freed_estimate:,} bytes) across {result.sessions_considered} sessions "
         f"older than {retention_days}d"
+    )
+    scratch = _prune_scratch(retention_days=retention_days)
+    click.echo(
+        f"pruned {scratch.dirs_deleted} scratch dir(s) "
+        f"(~{scratch.bytes_freed:,} bytes) older than {retention_days}d"
     )

@@ -22,7 +22,10 @@ Tools:
   search_emails(query, date_from?, date_to?, top_k?)  — relevance
   query_emails(sender?, subject_contains?, date_from?, date_to?,
                label?, has_attachment?, order_by?, limit?)  — filter
-  get_thread(thread_id)                                — full bodies
+  get_thread(thread_id)                                — full bodies + attachment manifest
+  get_attachment(attachment_id, mode)                  — attachment text/meta;
+                                                          mode is "text" (default),
+                                                          "meta", or "rendered_pages"
   sql_query(query)                                     — aggregations
 
 If a tool returns `{error: "..."}` instead of data, READ the error

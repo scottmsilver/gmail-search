@@ -264,6 +264,10 @@ type DeepStreamArgs = {
   // (Planner / Retriever / Analyst / Writer / Critic). When omitted,
   // Python falls back to per-stage env vars / built-in defaults.
   model: string;
+  // Which deep backend the Python service should run: "adk" (default),
+  // "claude_code" (claudebox + orchestrator), or "claude_native"
+  // (single-agent claudebox loop). Forwarded as `backend`.
+  deepBackend?: "adk" | "claude_code" | "claude_native";
 };
 
 const createDeepModeStream = (args: DeepStreamArgs) =>
@@ -301,6 +305,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
           question: args.question,
           conversation_id: args.conversationId,
           model: args.model,
+          backend: args.deepBackend,
         }),
       });
       if (!upstream.ok || !upstream.body) {
@@ -486,6 +491,7 @@ export async function POST(req: NextRequest) {
     thinkingLevel?: string;
     battle?: boolean;
     deep?: boolean;
+    deep_backend?: string;
     conversation_id?: string;
   };
   const messages = body.messages;
@@ -495,7 +501,23 @@ export async function POST(req: NextRequest) {
   }
 
   // Per-request overrides from the UI picker; fall back to defaults.
-  const model = isValidModel(body.model) ? body.model : AGENT_MODEL;
+  const deepBackend: "adk" | "claude_code" | "claude_native" =
+    body.deep_backend === "claude_code"
+      ? "claude_code"
+      : body.deep_backend === "claude_native"
+        ? "claude_native"
+        : "adk";
+  // For deep mode with a Claude backend (code or native) we accept the
+  // picker's model alias verbatim ("sonnet" / "opus" / etc.) — the
+  // Python runtime resolves it. For everything else (chat, battle,
+  // deep+adk) we restrict to the Gemini whitelist.
+  const acceptModelVerbatim =
+    body.deep === true && (deepBackend === "claude_code" || deepBackend === "claude_native");
+  const model = acceptModelVerbatim
+    ? (typeof body.model === "string" && body.model ? body.model : AGENT_MODEL)
+    : isValidModel(body.model)
+      ? body.model
+      : AGENT_MODEL;
   const thinkingLevel: ThinkingLevel = isValidThinking(body.thinkingLevel)
     ? body.thinkingLevel
     : DEFAULT_THINKING;
@@ -535,6 +557,7 @@ export async function POST(req: NextRequest) {
       loggerPath: logger.path,
       messages,
       model,
+      deepBackend,
     });
     return createUIMessageStreamResponse({ stream });
   }
