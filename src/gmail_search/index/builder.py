@@ -48,13 +48,42 @@ def _write_empty_index(index_dir: Path) -> None:
     (index_dir / "ids.json").write_text("[]")
 
 
-def _build_scann_from_vectors(ids: list[int], vectors: np.ndarray, index_dir: Path) -> None:
+def _build_scann_from_vectors(
+    ids: list[int],
+    vectors: np.ndarray,
+    index_dir: Path,
+    *,
+    ah_dim: int | None = None,
+    reorder_pool: int = 100,
+) -> None:
     """The ScaNN-specific part of index building. Takes vectors as any
     numpy-array-like (regular array or memmap) and produces a serialized
     ScaNN index at index_dir.
+
+    `ah_dim`: when set < vectors.shape[1], slice + L2-normalize each
+    input vector to that dim before passing to ScaNN. Used by the
+    manual-rerank index format (see build_index_sharded). The ScaNN
+    index ends up at `ah_dim` (smaller, faster), and the caller is
+    responsible for keeping the FULL-precision vectors elsewhere
+    (corpus_full.memmap) for the per-query rerank step.
+
+    `reorder_pool`: passed to ScaNN's `.reorder(N)` — number of AH
+    candidates to rerank with full-precision (within the SAME dim
+    that the index was built on). Default 100 matches legacy.
+    Manual-rerank builds typically pass a larger pool (e.g. 500) so
+    the Python-side rerank has more candidates to choose from.
     """
+    if ah_dim is not None and ah_dim < vectors.shape[1]:
+        # MRL truncation: slice to ah_dim then re-normalize so cosine
+        # similarity (computed via dot_product on unit-normalized
+        # vectors) stays well-defined for the truncated subspace.
+        vectors = vectors[:, :ah_dim].astype(np.float32, copy=True)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        vectors = vectors / norms
+
     dimensions = vectors.shape[1]
-    logger.info(f"Building ScaNN index with {len(ids)} vectors, {dimensions} dims")
+    logger.info(f"Building ScaNN index with {len(ids)} vectors, {dimensions} dims, " f"reorder_pool={reorder_pool}")
 
     num_leaves = max(int(math.sqrt(len(ids))), 1)
     num_leaves = min(num_leaves, len(ids))
@@ -68,7 +97,7 @@ def _build_scann_from_vectors(ids: list[int], vectors: np.ndarray, index_dir: Pa
             training_sample_size=min(len(ids), 250000),
         )
         builder = builder.score_ah(2, anisotropic_quantization_threshold=0.2)
-        builder = builder.reorder(100)
+        builder = builder.reorder(reorder_pool)
     else:
         builder = builder.score_brute_force()
 
@@ -194,9 +223,23 @@ def _build_one_shard(
     rows: list[tuple[int, bytes]],
     dimensions: int,
     shard_dir: Path,
+    *,
+    ah_dim: int | None = None,
+    reorder_pool: int = 100,
+    full_corpus_appender: "_FullCorpusAppender | None" = None,
 ) -> list[int]:
     """Materialize one shard of at-most-shard_size rows into a memmap
     and build a ScaNN index at shard_dir. Returns the shard's id list.
+
+    `ah_dim` / `reorder_pool` flow through to `_build_scann_from_vectors`
+    for the manual-rerank build mode (truncate input + larger reorder pool).
+
+    `full_corpus_appender`, when supplied, also appends THIS shard's
+    full-precision vectors to the index-level `corpus_full.memmap`
+    that the manual-rerank searcher mmaps at query time. Append happens
+    BEFORE the truncation in `_build_scann_from_vectors`, so the file
+    always holds the original `dimensions`-dim vectors regardless of
+    what ScaNN's index was built with.
     """
     shard_dir.mkdir(parents=True, exist_ok=True)
     memmap_path = shard_dir / "_vectors.f32.tmp"
@@ -209,12 +252,46 @@ def _build_one_shard(
         vectors[i] = np.frombuffer(blob, dtype=np.float32)
     vectors.flush()
 
+    if full_corpus_appender is not None:
+        full_corpus_appender.append(vectors)
+
     try:
-        _build_scann_from_vectors(ids, vectors, shard_dir)
+        _build_scann_from_vectors(ids, vectors, shard_dir, ah_dim=ah_dim, reorder_pool=reorder_pool)
     finally:
         del vectors
         memmap_path.unlink(missing_ok=True)
     return ids
+
+
+class _FullCorpusAppender:
+    """Streams shard vectors into a single index-level memmap so the
+    manual-rerank searcher can do per-query rerank against the full-
+    precision corpus without re-fetching from PG. The file lives at
+    `<index_dir>/corpus_full.memmap` and is laid out [shard0_rows,
+    shard1_rows, ...] in the same order shards were built — which is
+    the same order ids appear in `ids.json`. So the position of an
+    embedding id in `ids.json` is its row index in this memmap.
+    """
+
+    def __init__(self, index_dir: Path, total_count: int, dimensions: int):
+        self.path = index_dir / "corpus_full.memmap"
+        self.dimensions = dimensions
+        self.total_count = total_count
+        # Open in w+ mode so the file is created at the right size up
+        # front. Shard appends just write into the right slice.
+        self._mm = np.memmap(self.path, dtype=np.float32, mode="w+", shape=(total_count, dimensions))
+        self._cursor = 0
+
+    def append(self, shard_vectors: np.ndarray) -> None:
+        n = shard_vectors.shape[0]
+        if self._cursor + n > self.total_count:
+            raise RuntimeError(f"corpus_full overflow: cursor={self._cursor}, append={n}, " f"total={self.total_count}")
+        self._mm[self._cursor : self._cursor + n] = shard_vectors
+        self._cursor += n
+
+    def flush(self) -> None:
+        self._mm.flush()
+        del self._mm
 
 
 def build_index_sharded(
@@ -223,6 +300,11 @@ def build_index_sharded(
     model: str,
     dimensions: int,
     shard_size: int,
+    *,
+    truncate_dim: int | None = None,
+    manual_rerank: bool = False,
+    ah_dim: int = 1536,
+    reorder_pool: int = 100,
 ) -> Path:
     """Build N ScaNN indexes into a fresh timestamped sibling of
     `index_dir` and record it in a DB pointer row so readers always
@@ -253,6 +335,35 @@ def build_index_sharded(
     """
     if shard_size < 1:
         raise ValueError(f"shard_size must be >= 1, got {shard_size}")
+    if manual_rerank and ah_dim >= dimensions:
+        # Manual rerank with ah_dim >= dimensions is a no-op compared
+        # to legacy. Disable rather than build a confusing artifact.
+        logger.info(
+            f"manual_rerank requested but ah_dim={ah_dim} >= dimensions={dimensions}; " "falling back to legacy build"
+        )
+        manual_rerank = False
+
+    # Effective AH-stage dim. Three modes:
+    #   - manual_rerank=True:   ah_dim < dimensions, plus corpus_full
+    #     mmap and a per-query rerank step in the searcher (variant C).
+    #   - truncate_dim < dimensions, manual_rerank=False: V3-style —
+    #     ScaNN built on a truncated subspace, queries also truncated
+    #     at search time, but no full-precision rerank step. Cheapest
+    #     compaction: ~75% smaller than baseline at ~1.8% NDCG drop.
+    #   - everything else (defaults): legacy full-dim baseline.
+    if manual_rerank and truncate_dim and truncate_dim < dimensions and truncate_dim != ah_dim:
+        # Both knobs set with different values is almost always a config
+        # mistake — manual_rerank uses `ah_dim`, not `truncate_dim`, so
+        # the latter is silently ignored. Surface it instead.
+        logger.warning(
+            "manual_rerank=True with truncate_dim=%d (≠ ah_dim=%d) — "
+            "truncate_dim is ignored when manual_rerank is on; using ah_dim",
+            truncate_dim,
+            ah_dim,
+        )
+    effective_ah_dim = (
+        ah_dim if manual_rerank else (truncate_dim if truncate_dim and truncate_dim < dimensions else None)
+    )
 
     use_pointer = _pointer_table_exists(db_path)
     target_dir = _pick_versioned_dir(index_dir) if use_pointer else index_dir
@@ -279,20 +390,53 @@ def build_index_sharded(
         all_ids: list[int] = []
         shard_idx = 0
         buffer: list[tuple[int, bytes]] = []
+        # When manual_rerank is on, stream the FULL-precision vectors
+        # of every shard into one index-level memmap. The searcher
+        # mmaps it at query time to rerank ScaNN's truncated-AH
+        # candidates. The position of each id in `all_ids` IS the row
+        # index in this memmap (shards are appended in build order).
+        appender = _FullCorpusAppender(target_dir, total, dimensions) if manual_rerank else None
+        # Truncation flows through to ScaNN regardless of manual_rerank;
+        # only the corpus_full appender is gated on manual_rerank.
+        shard_kwargs: dict[str, object] = {"reorder_pool": reorder_pool}
+        if effective_ah_dim is not None:
+            shard_kwargs["ah_dim"] = effective_ah_dim
+        if appender is not None:
+            shard_kwargs["full_corpus_appender"] = appender
         for row in cursor:
             buffer.append((row["id"], row["embedding"]))
             if len(buffer) >= shard_size:
-                all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}"))
+                all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
                 buffer = []
                 shard_idx += 1
         if buffer:
-            all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}"))
+            all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
             shard_idx += 1
+        if appender is not None:
+            appender.flush()
 
         num_shards = shard_idx
-        (target_dir / "manifest.json").write_text(
-            json.dumps({"num_shards": num_shards, "dimensions": dimensions, "shard_size": shard_size})
-        )
+        manifest_payload: dict[str, object] = {
+            "num_shards": num_shards,
+            "dimensions": dimensions,
+            "shard_size": shard_size,
+        }
+        if effective_ah_dim is not None:
+            # Tells the searcher to truncate the query to this dim
+            # before passing to ScaNN. Independent of manual_rerank
+            # — V3 (truncate only) writes this without manual_rerank,
+            # variant C writes both.
+            manifest_payload["index_dim"] = effective_ah_dim
+        if manual_rerank:
+            # Searcher reads this block to switch on the rerank step;
+            # absence == "truncate query, search ScaNN, return as-is."
+            manifest_payload["manual_rerank"] = {
+                "ah_dim": effective_ah_dim,
+                "reorder_pool": reorder_pool,
+                "full_dim": dimensions,
+                "corpus_full_path": "corpus_full.memmap",
+            }
+        (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
 
         if use_pointer:

@@ -523,10 +523,13 @@ class SearchEngine:
 
         # Large restricted set — fall back to ScaNN with overfetch, then
         # filter. We want enough candidates that the restricted subset
-        # still covers fetch_k items.
+        # still covers fetch_k items. Skip manual rerank here even on
+        # rerank-capable indexes: we'd waste CPU reranking thousands of
+        # candidates that the post-filter throws away. Top-K precision
+        # at this stage is dominated by the SQL filter, not rank order.
         overfetch = max(fetch_k, 10_000)
         overfetch = min(overfetch, len(self.searcher.embedding_ids))
-        emb_ids, scores = self.searcher.search(query_vector, top_k=overfetch)
+        emb_ids, scores = self.searcher.search(query_vector, top_k=overfetch, manual_rerank=False)
         if not emb_ids:
             return [], []
 
