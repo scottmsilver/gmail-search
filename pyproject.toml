@@ -42,6 +42,12 @@ dependencies = [
     "urllib3>=2.5.0",
     "requests>=2.33.0",
     "nltk>=3.9.4",
+    # Multi-tenant Phase 1: HS256 Bearer JWT verification (issued by NextAuth,
+    # consumed by FastAPI). PyJWT chosen over python-jose: PyJWT is the
+    # actively-maintained reference implementation and has cleaner CVE
+    # history. Used only inside auth/session.py — not a transitive surface
+    # we expose to crawled content or LLM-controlled inputs.
+    "pyjwt>=2.9.0",
 ]
 
 [project.optional-dependencies]

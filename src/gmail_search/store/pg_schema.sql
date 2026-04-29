@@ -382,6 +382,52 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
     ON embeddings (message_id, attachment_id, chunk_type, model);
 
 -- ─────────────────────────────────────────────────────────────────────
+-- Multi-tenant identity (Phase 1 of PER_USER_LOGIN_2026-04-27.md)
+-- ─────────────────────────────────────────────────────────────────────
+-- Tables exist unconditionally so the `gmail-search invite` CLI works
+-- against an un-migrated install. Data scoping (user_id columns on
+-- messages/embeddings/etc.) is gated behind GMAIL_MULTI_TENANT=1 and
+-- lands in Phases 2/3.
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    -- google_sub is OPTIONAL: the silver-oauth broker holds the only
+    -- Google OAuth client and doesn't expose Google's `sub` claim, so
+    -- we just leave this NULL. The column lingers from an earlier
+    -- NextAuth attempt that owned its own OAuth client and needed sub
+    -- to upsert against. Kept NULL-able + UNIQUE so a future migration
+    -- to a real-sub world can land without dropping/recreating the
+    -- column. Multi-NULL is OK in PG: NULL ≠ NULL for uniqueness.
+    google_sub TEXT UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    avatar_url TEXT,
+    invited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+-- Idempotent migration for installs that already created `users` with
+-- the original NOT NULL google_sub. Skipped silently on fresh installs
+-- (column is already nullable) and on re-runs (same).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'google_sub' AND is_nullable = 'NO'
+    ) THEN
+        ALTER TABLE users ALTER COLUMN google_sub DROP NOT NULL;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS invited_emails (
+    email TEXT PRIMARY KEY,
+    invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    invited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note TEXT
+);
+
+-- ─────────────────────────────────────────────────────────────────────
 -- Delta vs SQLite
 -- ─────────────────────────────────────────────────────────────────────
 -- Tables intentionally DROPPED relative to SQLite:

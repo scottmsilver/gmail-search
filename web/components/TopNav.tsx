@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
+import { AvatarMenu } from "@/components/AvatarMenu";
 import { cn } from "@/lib/utils";
 
 const TABS: Array<{ href: string; label: string }> = [
@@ -18,18 +18,15 @@ const isActive = (pathname: string, href: string): boolean => {
   return pathname === href || pathname.startsWith(`${href}/`);
 };
 
-const GearIcon = () => (
-  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  </svg>
-);
-
 export const TopNav = () => {
   const pathname = usePathname() || "/";
-  const settingsActive = isActive(pathname, "/settings");
   return (
-    <nav className="relative flex h-10 shrink-0 items-center justify-center gap-1 border-b bg-background px-4">
+    // z-50 on the nav itself so the avatar dropdown's stacking context
+    // (created by the wrapper's translateY transform below) sits above
+    // chat content in <main>. Without this the menu renders correctly
+    // but is painted UNDER chat bubbles since <main> appears later in
+    // source order with its own auto-stacking.
+    <nav className="relative z-50 flex h-10 shrink-0 items-center justify-center gap-1 border-b bg-background px-4">
       {TABS.map((t) => {
         const active = isActive(pathname, t.href);
         return (
@@ -47,17 +44,12 @@ export const TopNav = () => {
           </Link>
         );
       })}
-      <Button
-        asChild
-        variant={settingsActive ? "secondary" : "ghost"}
-        size="icon"
-        className="absolute right-2 top-1/2 h-7 w-7 -translate-y-1/2"
-        aria-label="Settings"
-      >
-        <Link href="/settings">
-          <GearIcon />
-        </Link>
-      </Button>
+      {/* Avatar (or gear in single-pool mode) sits at the far right;
+          its dropdown holds Settings + Sign out so the right side is
+          a single affordance. */}
+      <div className="absolute right-2 top-1/2 -translate-y-1/2">
+        <AvatarMenu />
+      </div>
     </nav>
   );
 };

@@ -502,6 +502,10 @@ def create_app(
         _conn.close()
 
     app = FastAPI(title="Gmail Search")
+    # Stash the data dir on app.state so the auth dependency (and
+    # anything else added later) can resolve gmail_search.db without
+    # a global. Phase 1 of PER_USER_LOGIN.
+    app.state.data_dir = data_dir
 
     # Mount the opt-in deep-analysis agent surface. See
     # docs/DEEP_ANALYSIS_AGENT.md. Chat mode is unaffected; the agent
@@ -509,6 +513,13 @@ def create_app(
     from gmail_search.agents.service import register_agent_routes
 
     register_agent_routes(app, db_path)
+
+    # Auth surface for multi-tenant Phase 1. The endpoints register
+    # unconditionally so the bootstrap flow works even when
+    # GMAIL_MULTI_TENANT=0; gating happens inside `require_user`.
+    from gmail_search.auth.routes import register_auth_routes
+
+    register_auth_routes(app, db_path)
 
     templates_dir = Path(__file__).parent.parent.parent / "templates"
     # Index dir is resolved on-demand in `get_engine` / `_prewarm_engine`

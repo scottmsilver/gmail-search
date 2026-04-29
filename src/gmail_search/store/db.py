@@ -175,6 +175,11 @@ _INTERNAL_TABLES = {
     # conversation so deep-mode turns can `--resume` into the same
     # JSONL transcript. See pg_schema.sql for rationale.
     "conversation_claude_session",
+    # Multi-tenant identity tables (Phase 1 of PER_USER_LOGIN). Off-limits
+    # to the LLM-facing sql_query tool — querying a user's email or invite
+    # status is an auth concern, not a corpus concern.
+    "users",
+    "invited_emails",
 }
 
 _SCHEMA_TABLE_RE = re.compile(

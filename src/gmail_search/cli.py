@@ -1546,3 +1546,100 @@ def prune_artifacts(ctx, retention_days):
         f"pruned {scratch.dirs_deleted} scratch dir(s) "
         f"(~{scratch.bytes_freed:,} bytes) older than {retention_days}d"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Multi-tenant identity (Phase 1 of PER_USER_LOGIN_2026-04-27.md)
+# ─────────────────────────────────────────────────────────────────────
+# Op-only commands. They edit `users` / `invited_emails` regardless of
+# whether GMAIL_MULTI_TENANT is set — the env flag gates the *runtime*
+# auth wall, not the schema. This means a pre-flag invite call still
+# works, so the bootstrap order is: invite → flip flag → sign in.
+
+
+# Reuse the auth module's helper so the CLI and the runtime auth path
+# stay aligned. If `normalize_email` ever grows (e.g. unicode NFKC for
+# homograph defense), the CLI inherits it automatically — otherwise a
+# `gmail-search invite` could store an email the callback's allowlist
+# check then fails to recognize.
+from gmail_search.auth.session import normalize_email as _normalize_email  # noqa: E402
+
+
+@main.command(help="Invite an email address to sign in (multi-tenant Phase 1)")
+@click.argument("email")
+@click.option("--note", default=None, help="Free-text note recorded with the invite.")
+@common_options
+@click.pass_context
+def invite(ctx, email, note):
+    normalized = _normalize_email(email)
+    conn = get_connection(ctx.obj["db_path"])
+    try:
+        # ON CONFLICT DO NOTHING so re-running is idempotent — convenient
+        # for bootstrap scripts. We report whether the row was inserted
+        # vs already-present so the operator knows which case happened.
+        row = conn.execute(
+            "INSERT INTO invited_emails (email, note) VALUES (%s, %s) "
+            "ON CONFLICT (email) DO NOTHING RETURNING email",
+            (normalized, note),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    if row:
+        click.echo(f"invited: {normalized}")
+    else:
+        click.echo(f"already invited: {normalized}")
+
+
+@main.command("list-users", help="List invited emails and registered users (Phase 1)")
+@common_options
+@click.pass_context
+def list_users(ctx):
+    conn = get_connection(ctx.obj["db_path"])
+    try:
+        invites = conn.execute("SELECT email, invited_at, note FROM invited_emails ORDER BY invited_at").fetchall()
+        users = conn.execute(
+            "SELECT id, email, name, last_login_at, created_at FROM users ORDER BY created_at"
+        ).fetchall()
+    finally:
+        conn.close()
+    click.echo(f"invited_emails: {len(invites)}")
+    for inv in invites:
+        suffix = f" ({inv['note']})" if inv["note"] else ""
+        click.echo(f"  {inv['email']}  invited_at={inv['invited_at']}{suffix}")
+    click.echo(f"users: {len(users)}")
+    for u in users:
+        click.echo(
+            f"  {u['id']}  {u['email']}  name={u['name'] or '-'}  "
+            f"last_login={u['last_login_at'] or 'never'}  created={u['created_at']}"
+        )
+
+
+@main.command("delete-user", help="Hard-delete a user by email (Phase 1)")
+@click.argument("email")
+@click.option("--also-uninvite", is_flag=True, help="Also remove from invited_emails.")
+@common_options
+@click.pass_context
+def delete_user(ctx, email, also_uninvite):
+    normalized = _normalize_email(email)
+    conn = get_connection(ctx.obj["db_path"])
+    try:
+        deleted = conn.execute("DELETE FROM users WHERE email = %s RETURNING id", (normalized,)).fetchone()
+        uninvited = None
+        if also_uninvite:
+            uninvited = conn.execute(
+                "DELETE FROM invited_emails WHERE email = %s RETURNING email",
+                (normalized,),
+            ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    if deleted:
+        click.echo(f"deleted user: {normalized} (id={deleted['id']})")
+    else:
+        click.echo(f"no user found for: {normalized}")
+    if also_uninvite:
+        if uninvited:
+            click.echo(f"uninvited: {normalized}")
+        else:
+            click.echo(f"no invite found for: {normalized}")
