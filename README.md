@@ -1,37 +1,45 @@
 # Gmail Search
 
-Local semantic search over your entire Gmail. Downloads your mailbox, embeds messages and attachments using Google's Gemini embedding model, and makes everything searchable through a Gmail-style web UI or CLI.
+A self-hosted, semantically-aware Gmail front end. Downloads your mailbox into Postgres, embeds messages and attachments with Gemini, summarizes them with a local LLM, and serves a Next.js web app with hybrid search, a Priority Inbox, a chat agent that can query your email, and an opt-in deep-analysis multi-agent that can read, run code, and write reports against your corpus.
 
 ## Why this exists
 
-Gmail search is keyword-only. It can't find "that email about the construction budget" unless those exact words appear. It can't search inside PDF attachments. It doesn't understand that your accountant's emails about "engagement letter" are related to your search for "tax documents."
+Gmail search is keyword-only. It can't find "that email about the construction budget" unless those exact words appear. It can't search inside PDF attachments. It doesn't understand that your accountant's emails about "engagement letter" are related to your search for "tax documents." And asking Gmail a question — "what's the status of the kitchen remodel?" — is something it simply won't do.
 
-Gmail Search fixes this with hybrid search: semantic understanding (what you mean) + keyword matching (what you said) + signals Gmail already computed (labels, importance) + your own engagement patterns (who you reply to). The result is search that actually finds what you're looking for, even with typos, even inside attachments, even when you can't remember the exact words.
+Gmail Search fixes this with hybrid search (semantic + BM25 + Gmail signals + your engagement patterns), local LLM summaries on every thread, a chat agent grounded in your corpus, and an optional deep-research mode that runs a planner → retriever → analyst → writer → critic loop with a Docker-sandboxed code interpreter. Everything runs locally except embedding and LLM calls.
 
 **What makes it good:**
 
-- **Hybrid ranking with 8 signals** — not just embeddings. Combines semantic similarity, BM25 keyword match, recency, Gmail labels (IMPORTANT/PERSONAL/PROMOTIONS), contact frequency, thread engagement, match density, and thread size. Each signal catches things the others miss.
-- **Searches inside attachments** — PDFs get text extracted and page-rendered as images. Both text and images are embedded, so you can find a contract by describing what's in it.
-- **Spell correction** — "draw requst" finds "draw request." Local SymSpell correction using a dictionary built from your own email corpus (0.1ms, no API call). Searches with both corrected and original query so nothing is lost.
-- **Personal abbreviation expansion** — "KE board" finds "Kol Emeth board" because the system mines co-occurrence patterns from your emails at reindex time. Discovers abbreviations like KE=Kol Emeth, HOA=Colony, FRCO=Frank Rimerman automatically.
-- **Structured filters** — `from:landmarks draw request` or `after:march invoice` work like Gmail operators, applied as SQL filters before ranking.
-- **Temporal awareness** — "recent invoice" automatically boosts recency. "that email from last week" does the right thing.
-- **Off-topic filtering** — drops clearly irrelevant results using an adaptive score gap threshold. Toggle in the UI.
-- **LLM reranker** — conditionally reranks top 30 results using Gemini Flash Lite, but only when the top scores are tightly clustered (ambiguous). Clear winners skip the reranker (~250ms vs ~1.4s).
-- **Hierarchical topic browsing** — emails are clustered into a semantic topic tree (built via recursive bisecting k-means on embeddings, auto-labeled by Gemini). Browse by topic in the sidebar: Personal > Family & Finance > Tax Documents.
-- **Query embedding cache** — repeated queries are instant (62ms) via a persistent SQLite cache. No API call on cache hit.
-- **Thread-grouped results** — shows conversations, not individual messages. Deduplicates repeat newsletters by sender+subject.
-- **Rolling pipeline** — `update` processes in batches of 500: download, extract, embed, reindex. Search gets better continuously as it runs, not just at the end.
-- **Cost-controlled** — hard budget limit, per-operation cost tracking, ~$5 per 20k messages.
-- **Fully local** — your email never leaves your machine. The SQLite DB, attachments, and indexes are all in a gitignored `data/` directory. Only embedding vectors are sent to Gemini's API.
+- **Hybrid ranking with 8 signals** — semantic similarity, BM25 keyword match, recency, Gmail labels (IMPORTANT/PERSONAL/PROMOTIONS), contact frequency, thread engagement, match density, and thread size. Each signal catches things the others miss.
+- **Searches inside attachments** — PDFs get text extracted and pages rendered as images. Office docs (docx, xlsx, pptx, xls), HEIC photos, calendar invites, plain text, CSVs, and ZIP archives are all extracted recursively. Drive links in email bodies are followed and ingested too.
+- **URL crawler** — links in emails get fetched, distilled, and folded into the thread's summary. Tracker domains are denylisted (Disconnect's tracker list + custom blocks), bulk mail with too many links is skipped, and crawls go newest-first.
+- **Postgres + pg_search BM25** — Postgres is the only backend. FTS uses ParadeDB's `pg_search` (Tantivy) for proper BM25; structured filters (`from:`, `to:`, `subject:`, `has:attachment`, `after:`, `before:`) are SQL pre-filters before ranking.
+- **Gmail-style query parser** — `from:landmarks draw request`, `after:march invoice`, `subject:"engagement letter"`, `has:attachment` work like Gmail operators.
+- **Spell correction + alias expansion** — "draw requst" finds "draw request" (local SymSpell, 0.1ms). "KE board" finds "Kol Emeth board" because abbreviations are mined from your corpus' co-occurrence patterns at reindex time. Searches with both corrected and original query so nothing is lost.
+- **Conditional LLM reranker** — Gemini Flash Lite reranks the top 30 only when the top scores are tightly clustered. Clear winners skip the reranker (~250ms vs ~1.4s).
+- **Hierarchical topic browsing** — emails are clustered into a semantic topic tree (recursive bisecting k-means on embeddings, auto-labeled by Gemini). Browse by topic in the sidebar.
+- **Priority Inbox** — a Gmail-style 3-section inbox view (IMPORTANT+INBOX, recent, everything else) where every thread shows its LLM-generated summary inline. Time-to-glass is instrumented.
+- **LLM summaries on every thread** — generated by a configurable local backend (Ollama or vLLM, default is gemma-class). Summaries v6: markdown links, content-aware (not just header recitation), sender-name dedup, fresh-first queue (today's mail summarizes before the multi-year backfill).
+- **Chat agent** — a tool-using assistant with `search_emails`, `sql_query` (read-only), `google_search` (grounded web), and a model-directed attachment manifest with inline preview chips. Multiple conversations are persisted; an A/B "battle mode" runs the full Gemini model × thinking-level matrix and lets you blind-vote.
+- **Deep analysis mode** — opt-in multi-agent flow (planner → retriever → analyst → writer → critic, with revision loop). The Analyst runs Python in a Docker sandbox against staged email/attachment artifacts, citations are grounded against an explicit allowed-citations list, and per-stage cost + streaming stages render in the chat UI under a single disclosure.
+- **Supervised daemons, no PID files** — a `supervise` watchdog keeps `update` (download/extract/embed/reindex), `summarize`, `reconcile` (drift detector for `thread_summary`), and the URL crawler alive using DB heartbeats. Stale rows are reaped automatically; duplicate daemons are prevented at the DB layer.
+- **Frontfill that self-heals** — when Gmail's history horizon expires, frontfill falls back to a full sync window without manual intervention. Crawl/sync status is visible in Settings.
+- **Sharded ScaNN index** — bounded-RAM index builder for 100k+ message corpora. Adaptive config (brute force <100, asymmetric hashing above).
+- **Cost-controlled** — hard budget limit, per-operation cost tracking, per-turn cost shown under each chat response, and per-stage cost for deep mode. Embedding can use Gemini's Batch API (50% cheaper) at large scale.
+- **Themes** — light, dark, sepia, slate. Email bodies render in the active theme.
+- **Fully local data** — your email never leaves your machine. The Postgres DB, attachments, and indexes live in a gitignored `data/` directory. Only embedding text, search queries, and chat/deep-mode prompts go to Gemini.
 
 ## Quick start
 
 ### Prerequisites
 
-- Python 3.11+
-- A Google Cloud project with the Gmail API enabled
-- A Gemini API key (set as `GEMINI_API_KEY` or `GOOGLE_API_KEY` env var)
+- **Python 3.11+**
+- **Postgres 14+** with the `pg_search` extension (ParadeDB). Easiest: run the ParadeDB Docker image.
+- **Node 20+ / Bun** for the Next.js web UI.
+- **Docker** (only required for deep-analysis mode — the Analyst runs in a sandbox container).
+- **A local LLM backend** for summaries: Ollama (default) or a vLLM server. Optional but recommended.
+- A Google Cloud project with the **Gmail API** enabled (and **Drive API** if you want Drive-attachment ingestion).
+- A **Gemini API key** (set as `GEMINI_API_KEY` or `GOOGLE_API_KEY`).
 
 ### 1. Install
 
@@ -39,16 +47,21 @@ Gmail Search fixes this with hybrid search: semantic understanding (what you mea
 git clone https://github.com/scottmsilver/gmail-search.git
 cd gmail-search
 pip install -e .
+
+# Web UI
+cd web && bun install && cd ..
 ```
 
-### 2. Set up Google Cloud credentials
+### 2. Postgres
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create or select a project
-3. Enable the **Gmail API** (APIs & Services > Library)
-4. Create **OAuth client ID** credentials (APIs & Services > Credentials)
-   - Application type: Desktop app
-   - Download the JSON file
+Start a Postgres with `pg_search` available, then point the project at it via `config.local.yaml` (see Configuration below). The schema in `src/gmail_search/store/pg_schema.sql` is applied on first connect.
+
+### 3. Google Cloud credentials
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com).
+2. Create or select a project.
+3. Enable the **Gmail API** (and **Drive API** for Drive-attachment ingestion).
+4. Create **OAuth client ID** credentials (Desktop app) and download the JSON.
 5. Save it:
 
 ```bash
@@ -56,7 +69,7 @@ mkdir -p data
 mv ~/Downloads/client_secret_*.json data/credentials.json
 ```
 
-### 3. Set your Gemini API key
+### 4. Gemini API key
 
 ```bash
 export GEMINI_API_KEY="your-api-key-here"
@@ -64,167 +77,233 @@ export GEMINI_API_KEY="your-api-key-here"
 
 Get one at [ai.google.dev](https://ai.google.dev/gemini-api/docs/api-key).
 
-### 4. Authenticate and download
+### 5. Authenticate and ingest
 
 ```bash
-# Authenticate with Gmail (opens browser)
+# OAuth — opens browser. Asks for Gmail (and Drive, if configured) scopes.
 gmail-search auth
 
-# Download and process everything in rolling batches
+# Full pipeline in rolling batches: download → extract → embed → reindex.
+# Crash-safe; rerun to resume.
 gmail-search update --max-messages 10000
+
+# Generate per-thread LLM summaries (in a separate window).
+gmail-search summarize --loop
+
+# Or run everything supervised:
+gmail-search supervise
 ```
 
-The `update` command runs the full pipeline in batches of 500 messages: download, extract attachments, embed, and rebuild the search index. Search gets better as it runs.
+`supervise` is the recommended steady-state mode. It keeps `update`, `summarize`, `reconcile`, and the URL crawler alive using DB heartbeats — no PID files, no zombie processes, duplicate daemons are blocked at the DB layer.
 
-### 5. Search
+### 6. Use it
 
 ```bash
 # CLI search
 gmail-search search "contract from the accountant"
 
-# Web UI
+# API server (FastAPI)
 gmail-search serve --port 8080
+
+# Web UI (Next.js, in another shell)
+cd web && bun dev
 ```
 
-Open http://localhost:8080 in your browser.
+Open the web UI (default: http://localhost:3000). The API server backs it on port 8080.
 
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │                  User Query                  │
-                    └─────────────┬───────────────────────────────┘
-                                  │
-                    ┌─────────────▼───────────────────────────────┐
-                    │         Query Processing Layer               │
-                    │                                              │
-                    │  1. Spell correct (local SymSpell, 0.1ms)    │
-                    │  2. Expand aliases (KE → kol emeth)          │
-                    │  3. Parse filters (from:, after:, etc.)      │
-                    │  4. Detect temporal intent (recent, last)     │
-                    │  5. Check embedding cache (SQLite)            │
-                    └─────────────┬───────────────────────────────┘
-                                  │
-              ┌───────────────────┼───────────────────┐
-              │                   │                   │
-   ┌──────────▼────────┐ ┌───────▼───────┐ ┌────────▼────────┐
-   │  Vector Search     │ │ Keyword Search│ │ SQL Filters     │
-   │  (ScaNN)           │ │ (FTS5 BM25)  │ │ (from/to/date)  │
-   │                    │ │               │ │                  │
-   │  Gemini embedding  │ │ Phrase 1.5x + │ │ Applied to       │
-   │  (cached) → cosine │ │ individual +  │ │ thread_summary   │
-   │                    │ │ both queries  │ │                  │
-   └──────────┬─────────┘ └───────┬───────┘ └────────┬────────┘
-              │                   │                   │
-              └───────────────────┼───────────────────┘
-                                  │
-                    ┌─────────────▼───────────────────────────────┐
-                    │         Merge + Multi-Signal Ranking         │
-                    │                                              │
-                    │  Similarity (40%) + BM25 (15%) +             │
-                    │  Recency (15%, dynamic) + Labels (12%) +     │
-                    │  Contact Freq (8%) + Replied (8%) +          │
-                    │  Match Density (6%) + Thread Size (4%)       │
-                    └─────────────┬───────────────────────────────┘
-                                  │
-                    ┌─────────────▼───────────────────────────────┐
-                    │         Conditional LLM Reranker             │
-                    │  Only when top-5 score spread < 0.15         │
-                    │  (ambiguous results need reranking)           │
-                    └─────────────┬───────────────────────────────┘
-                                  │
-                    ┌─────────────▼───────────────────────────────┐
-                    │         Post-Processing                      │
-                    │  Off-topic filter → Sender collapsing →      │
-                    │  Thread grouping → Topic facets → Top K       │
-                    └─────────────────────────────────────────────┘
+                  ┌─────────────────────────────────────────────┐
+                  │           Next.js Web App (web/)            │
+                  │  Inbox · Priority · Search · Chat · Deep ·  │
+                  │            Settings (shadcn/ui)              │
+                  └────────────┬────────────────────────────────┘
+                               │ /api/*
+                  ┌────────────▼────────────────────────────────┐
+                  │     FastAPI server (gmail_search.server)    │
+                  │  /api/search · /api/inbox · /api/priority · │
+                  │  /api/thread · /api/agent · /api/battle ·   │
+                  │  /api/conversations · /api/deep (SSE) ·     │
+                  │  /api/artifact · /api/jobs · /api/log       │
+                  └────────────┬────────────────────────────────┘
+                               │
+        ┌──────────────────────┼──────────────────────────────┐
+        │                      │                              │
+┌───────▼────────┐    ┌────────▼────────┐         ┌───────────▼──────────┐
+│  Search engine │    │  Chat agent      │         │   Deep-analysis      │
+│  (search/)     │    │  (agents/runtime)│         │   orchestrator       │
+│                │    │                  │         │   (agents/orch.)     │
+│  Spell · Alias │    │  search_emails · │         │                       │
+│  Filters ·     │    │  sql_query ·     │         │  Planner → Retriever │
+│  ScaNN + BM25  │    │  google_search · │         │  → Analyst (Docker)  │
+│  → 8-signal    │    │  attachments ·   │         │  → Writer → Critic   │
+│  rerank → LLM  │    │  battle pool     │         │  with revision loop, │
+│  rerank → topic│    │                  │         │  per-stage cost,     │
+│  facets        │    │                  │         │  artifact GC         │
+└───────┬────────┘    └────────┬─────────┘         └───────────┬──────────┘
+        │                      │                              │
+        └──────────────────────┼──────────────────────────────┘
+                               │
+                  ┌────────────▼────────────────────────────────┐
+                  │          Postgres (store/)                   │
+                  │  messages · attachments · embeddings ·       │
+                  │  thread_summary · message_summaries ·        │
+                  │  contact_frequency · topics · term_aliases · │
+                  │  query_cache · job_progress ·                │
+                  │  agent_sessions · agent_events ·             │
+                  │  pg_search BM25 indexes (Tantivy)            │
+                  └────────────┬────────────────────────────────┘
+                               │
+                ┌──────────────┴──────────────┐
+                │   Supervised daemons         │
+                │   (cli supervise)            │
+                │                              │
+                │   update · summarize ·       │
+                │   reconcile · crawl_urls     │
+                │   (DB-heartbeat lifecycle)   │
+                └──────────────────────────────┘
 ```
 
 ### Data pipeline
 
 ```
-Gmail API ──► SQLite ──► Extract ──► Embed ──► Index + Analyze
-              (messages,   (PDF text,  (Gemini    (ScaNN vectors
-               attachments  page imgs)  3072-dim)  + FTS5 keywords
-               raw files)                          + thread summaries
-                                                   + contact freq
-                                                   + topic hierarchy
-                                                   + term aliases
-                                                   + spell dictionary
-                                                   + query cache)
+Gmail API ──► Postgres ──► Extract ──► Embed ──► Reindex ──► Summarize
+   ▲          (messages,   (PDFs, Office  (Gemini   (sharded     (local LLM,
+   │           attachments, docs, images,  3072-dim  ScaNN +      thread-level)
+   │           Drive stubs) calendar,                pg_search        │
+   │                        ZIPs, HEIC)              BM25 +           │
+URL crawler ──► (linked            ▲                 topics +        ▼
+                page text          │                 aliases +    Priority Inbox
+                folded into        │                 contacts +   + summary
+                attachments)       │                 spell dict + chips in UI
+                                   │                 query cache)
+                       Drive client (OAuth-scoped, body links followed)
 ```
 
-Each stage is idempotent. Crash at any point, re-run, and it picks up where it left off. The `update` command runs all stages in rolling batches of 500 messages, rebuilding indexes after each batch so search improves continuously.
+Every stage is idempotent. Crash anywhere, rerun, it picks up where it left off. `update` runs all extract/embed/reindex stages in rolling batches of 500, rebuilding indexes after each batch so search and summaries get continuously better while it runs. `supervise` keeps the loops alive in production.
 
-### Precomputed tables (built at reindex time)
+### Key tables
 
 | Table | What | Why |
 |-------|------|-----|
-| `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search (16x speedup) |
+| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth |
+| `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search; reconcile daemon detects drift |
+| `message_summaries` | LLM-generated per-thread summaries (markdown) | Inline in inbox + priority + chat |
 | `contact_frequency` | Log-scaled message count per sender | Boosts results from frequent correspondents |
-| `topics` | Hierarchical topic tree (recursive bisecting k-means, auto-labeled) | Browse-by-topic sidebar, off-topic filtering |
-| `message_topics` | Message → topic assignments (leaf + ancestors) | Client-side topic filtering |
-| `term_aliases` | Abbreviation → expansion mappings mined from co-occurrence | "KE" → "kol emeth" query expansion |
-| `query_cache` | Query text → embedding vector (persistent) | 200x speedup on repeated queries |
-| `messages_fts` | FTS5 full-text index over subjects + bodies | BM25 keyword matching |
-| `attachments_fts` | FTS5 index over attachment text | Keyword search inside PDFs |
-| `spell_dictionary.txt` | Word frequency dictionary built from corpus | Local spell correction (SymSpell, 0.1ms) |
+| `topics`, `message_topics` | Hierarchical topic tree + assignments | Browse-by-topic + off-topic filtering |
+| `term_aliases` | Mined abbreviation → expansion mappings | "KE" → "kol emeth" query expansion |
+| `query_cache` | Query text → embedding vector | 200x speedup on repeated queries |
+| `messages_fts`, `attachments_fts` (pg_search) | BM25 indexes via ParadeDB Tantivy | Keyword + phrase scoring |
+| `job_progress` | DB-heartbeat rows for every long-running job | `supervise` uses this — no PID files |
+| `agent_sessions`, `agent_events` | Deep-analysis turn state + stage event stream | Replay + resume + UI streaming |
+| `spell_dictionary.txt` | Word frequency dict from corpus | Local SymSpell, 0.1ms per query |
 
 ### Module map
 
 ```
 src/gmail_search/
-  config.py        — Config loading (config.yaml + config.local.yaml overrides)
-  cli.py           — Click CLI: auth, download, sync, extract, embed, reindex,
-                     search, cost, status, serve, update (rolling pipeline)
-  server.py        — FastAPI: /api/search (with facets), /api/topics (tree),
-                     /api/thread, /api/message, /api/attachment, /api/status
-  store/
-    db.py          — SQLite schema, FTS5 indexes, precomputed tables:
-                     thread_summary, contact_frequency, topics (hierarchical),
-                     term_aliases, query_cache, spell_dictionary
-    models.py      — Dataclasses: Message, Attachment, EmbeddingRecord, CostRecord
-    queries.py     — CRUD, FTS search (phrase + individual + dual-query)
-    cost.py        — Per-operation cost tracking with budget enforcement
+  cli.py            — Click CLI (commands listed below)
+  server.py         — FastAPI: search, inbox, priority, thread, chat agent,
+                       battle pool, conversations, deep SSE proxies, artifacts,
+                       jobs, logs, status
+  config.py         — config.yaml + config.local.yaml overrides
+  pipeline.py       — `update` rolling pipeline (download/extract/embed/reindex)
+  summarize.py      — Local-LLM summary backfill (concurrent, fresh-first)
+  jobs.py           — DB-heartbeat job_progress lifecycle
+  locks.py          — Writer-lock + reindex-orchestrator coordination
+  reap.py           — Stale-job reaper
+
   gmail/
-    auth.py        — OAuth2 (gmail.readonly scope, token with 0600 perms)
-    client.py      — Batch download with rate limit retry, incremental sync
-    parser.py      — Gmail API response → Message + attachment metadata
+    auth.py         — OAuth2 (gmail.readonly + drive.readonly), 0600 token
+    client.py       — Batch download, rate-limit retry, incremental sync
+    parser.py       — Gmail API → Message + attachments (RFC 5322 sender parser)
+    drive.py        — Drive API ingestion for body-linked Drive docs
+    url_extract.py  — URL extraction from message bodies (with denylist)
+    url_fetcher.py  — crawl4ai-based URL crawler, async httpx, content cleaning
+  store/
+    db.py           — psycopg connection pool, pg_search bootstrap
+    models.py       — Dataclasses
+    queries.py      — CRUD + FTS (phrase + individual + dual-query)
+    cost.py         — Per-operation cost tracking with budget enforcement
+    pg_schema.sql   — Authoritative schema
   extract/
-    __init__.py    — Dispatcher: mime_type → extractor
-    pdf.py         — pymupdf: text extraction + page rendering (150 DPI PNG)
-    image.py       — Passthrough for jpg/png/gif attachments
+    __init__.py     — Dispatcher: mime_type → extractor
+    pdf.py          — pymupdf text + page rendering (150 DPI PNG)
+    office.py       — docx, xlsx, pptx, xls, csv, ical, HEIC, plain
+    archive.py      — Recursive ZIP extraction
   embed/
-    client.py      — Gemini wrapper (text + multimodal), quote stripping,
-                     BatchGeminiEmbedder for Batch API (50% cheaper)
-    pipeline.py    — Batched embedding with retry, budget checks, idempotency
+    client.py       — Gemini wrapper (text + multimodal), Batch API support
+    pipeline.py     — Batched embedding with retry, budget checks
   index/
-    builder.py     — ScaNN index: adaptive config (brute force < 100, AH > 100)
-    searcher.py    — ScaNN query → (embedding_ids, scores)
+    builder.py      — Sharded ScaNN builder (bounded-RAM)
+    searcher.py     — ScaNN query → (embedding_ids, scores)
   search/
-    engine.py      — Full search pipeline: spell correct → alias expand →
-                     parse filters → embed (cached) → ScaNN + BM25 →
-                     merge → rank (8 signals) → conditional rerank →
-                     off-topic filter → sender collapse → topic facets
+    engine.py       — Spell → alias → parse filters → embed (cached) →
+                      ScaNN + pg_search BM25 → merge → rank (8 signals) →
+                      conditional rerank → off-topic → sender collapse →
+                      topic facets
+  llm/
+    backend.py      — Backend protocol (Ollama, vLLM)
+    ollama.py
+    vllm.py         — Spawn/teardown lifecycle to avoid pinning the GPU
+  agents/
+    runtime.py      — Chat-agent runtime (Claude-native + ADK paths)
+    tools.py        — search_emails, sql_query, google_search, attachments
+    skills.py       — Tool catalog + system-prompt assembly
+    sandbox.py      — Docker-sandboxed Python interpreter for the Analyst
+    orchestration.py — Deep-mode state machine (planner→retriever→analyst→
+                       writer→critic, revision loop, MAX_CRITIC_ROUNDS=2)
+    planner.py / retriever.py / analyst.py / writer.py / critic.py
+    runtime_claude.py / runtime_claude_native.py — Anthropic chat path
+    auto_publish.py — SSE event fanout to /api/deep
+    gc.py           — Artifact retention sweeper
+    cost.py         — Per-stage cost tally
+    session.py      — agent_sessions / agent_events persistence
+
+web/                — Next.js 15 + assistant-ui + shadcn/ui app
+  app/
+    page.tsx        — Landing
+    inbox/          — Inbox view with summary chips
+    priority/       — 3-section Priority Inbox (Gmail-style)
+    search/         — Search results with topic facets
+    deep/           — Deep-mode streaming view
+    settings/       — Crawl status, daemon status, theme picker
+    api/            — agent, battle, chat, conversations, inbox, jobs,
+                      log, priority-inbox, search, status, thread,
+                      thread_lookup, artifact, attachment, auth
+  components/       — Theme provider, model picker, battle inspector,
+                      preview drawer, JSON viewer, …
+
+deploy/
+  caddy/            — Reverse proxy config (gms.i.oursilverfamily.com)
+  claudebox/        — Containerized Anthropic agent sandbox (deep mode)
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `gmail-search auth` | Run OAuth flow, save token |
-| `gmail-search update` | Full pipeline in rolling batches: download, extract, embed, reindex |
+| `gmail-search auth` | OAuth flow, save token (Gmail + optional Drive scopes) |
+| `gmail-search update` | Full pipeline in rolling batches (download → extract → embed → reindex). `--loop` for steady-state |
 | `gmail-search download` | Download messages only |
-| `gmail-search sync` | Incremental sync (new messages since last download) |
-| `gmail-search extract` | Extract text/images from attachments |
-| `gmail-search embed` | Embed unembedded messages and attachments |
-| `gmail-search embed --force` | Re-embed all messages (e.g., after changing text processing) |
-| `gmail-search embed --batch-api` | Use Gemini Batch API (50% cheaper, for 100k+ messages) |
-| `gmail-search reindex` | Rebuild all indexes: ScaNN, FTS, topics, aliases, contacts, spell dict |
+| `gmail-search sync` | Incremental sync since last download (self-heals when Gmail history expires) |
+| `gmail-search extract` | Extract text/images from attachments (and Drive docs linked from bodies) |
+| `gmail-search embed` | Embed unembedded messages and attachments (`--force` to re-embed, `--batch-api` for 50% cheaper) |
+| `gmail-search reindex` | Rebuild ScaNN, BM25, topics, aliases, contacts, spell dict |
+| `gmail-search summarize` | Generate per-thread LLM summaries via the configured local backend. `--loop` to track the live inbox |
+| `gmail-search crawl-urls` | Crawl URLs linked in emails and fold the page text into attachments |
+| `gmail-search watch` / `start` / `stop` | Continuous email-sync daemon |
+| `gmail-search supervise` | Watchdog that keeps watch/update/summarize/reconcile alive (recommended) |
+| `gmail-search reconcile` | Drift detector — reconciles `thread_summary` against `messages` |
+| `gmail-search reap` | Clean up zombie running jobs (stale `job_progress` rows + orphan PIDs) |
+| `gmail-search prune-artifacts` | Delete deep-analysis artifacts older than the retention window |
 | `gmail-search search "query"` | Search from the command line |
-| `gmail-search serve` | Start the web UI |
+| `gmail-search serve` | Start the FastAPI server (web UI backend) |
+| `gmail-search progress` | Show running jobs and daemon status |
+| `gmail-search logs` | Tail the watch daemon log |
 | `gmail-search status` | Show message count, embeddings, cost |
-| `gmail-search cost --breakdown` | Show embedding spend by operation |
+| `gmail-search cost --breakdown` | Embedding spend by operation |
 
 ## Configuration
 
@@ -232,13 +311,25 @@ Default config is in `config.yaml`. Create `config.local.yaml` (gitignored) for 
 
 ```yaml
 budget:
-  max_usd: 20.00
+  max_usd: 200.00
+
+postgres:
+  dsn: "postgresql://gmail_search@localhost:5432/gmail_search"
+
+embedding:
+  model: gemini-embedding-2-preview
+
+llm:
+  backend: ollama        # or vllm
+  ollama:
+    model: gemma3:12b
+    host: http://localhost:11434
 
 search:
-  rerank: false  # disable LLM reranker for faster results
+  rerank: false           # disable LLM reranker for faster results
 
 server:
-  port: 8081
+  port: 8080
 
 download:
   max_messages: 50000
@@ -248,24 +339,26 @@ download:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `budget.max_usd` | 5.00 | Embedding spend limit |
+| `budget.max_usd` | 200.00 | Embedding spend limit |
 | `embedding.model` | gemini-embedding-2-preview | Gemini model for embeddings |
 | `embedding.dimensions` | 3072 | Vector dimensions |
-| `search.rerank` | true | Enable LLM reranker (adds ~1.3s latency, improves relevance) |
-| `search.default_top_k` | 20 | Default number of search results |
+| `indexing.scann_peak_budget_mb` | 2048 | RAM ceiling for the sharded ScaNN builder |
 | `attachments.max_file_size_mb` | 10 | Skip attachments larger than this |
 | `attachments.max_pdf_pages` | 20 | Max PDF pages to render as images |
-| `download.batch_size` | 25 | Gmail API batch size |
-| `server.port` | 8080 | Web UI port |
+| `attachments.max_attachment_text_tokens` | 50000 | Cap on attachment text fed to embeddings |
+| `download.batch_size` | 100 | Gmail API batch size |
+| `search.rerank` | true | Enable conditional LLM reranker (~1.3s when triggered) |
+| `search.default_top_k` | 20 | Default number of search results |
+| `server.port` | 8080 | API server port |
 
 ## Search ranking
 
-Results are ranked by a weighted blend of signals, with dynamic adjustment based on query intent:
+Results are ranked by a weighted blend, with dynamic adjustment on temporal intent:
 
 | Signal | Weight | Description |
 |--------|--------|-------------|
 | Semantic similarity | 40% (dynamic) | Gemini embedding cosine similarity |
-| BM25 keyword match | 15% | FTS5 phrase match (1.5x boost) + individual terms |
+| BM25 keyword match | 15% | pg_search (Tantivy) phrase + individual terms |
 | Recency | 15% (dynamic) | Exponential decay, 60-day half-life |
 | Gmail labels | 12% | IMPORTANT, PERSONAL boost; PROMOTIONS penalty |
 | Contact frequency | 8% | Log-scaled message count per sender |
@@ -273,13 +366,35 @@ Results are ranked by a weighted blend of signals, with dynamic adjustment based
 | Match density | 6% | Fraction of thread that matched |
 | Thread size | 4% | Multi-message threads preferred |
 
-"Dynamic" means the weight shifts based on temporal intent in the query. "recent invoice" moves up to 35% of the similarity weight into recency.
+"recent invoice" shifts up to 35% of the similarity weight into recency. On top of the blend, the conditional reranker reorders the top 30 with Gemini Flash Lite when the top scores are tightly clustered.
 
-On top of the weighted blend, the LLM reranker reorders the top 30 candidates using Gemini Flash Lite, catching relevance nuances that statistical signals miss.
+## Deep analysis mode
+
+Toggle "Deep" in the chat composer to switch from the single-agent chat path to a multi-agent flow:
+
+```
+Planner ──► Retriever ──► Analyst ──► Writer ──► Critic
+   ▲                          │           │           │
+   │                          ▼           │           │
+   │                   Docker sandbox     │           │
+   │                   (Python + staged   │           │
+   │                    email/attachment  │           │
+   │                    artifacts)        │           │
+   │                                      │           │
+   └──────────── revision loop ◄──────────┴───────────┘
+                 (max 2 critic rounds)
+```
+
+- **Planner / Retriever / Analyst / Writer / Critic** each run as a Gemini-3.1-pro-preview sub-agent. The picker model propagates to all sub-agents.
+- **Sandbox** — `agents/sandbox.py` runs the Analyst's Python in a Docker container with staged JSON evidence, hardened workdir, and an in-image preamble synced at boot. JSON tool output is capped to avoid 1M-token overflow.
+- **Citations** — Writer + Critic are grounded against an explicit allowed-citations list. Refs use collision-free `cite_refs`.
+- **Streaming** — `/api/deep` SSE proxies stream stages into the chat UI under a single AssistantWork disclosure. Each stage emits its cost, and per-turn cost is shown under the assistant response.
+- **Artifacts** — generated artifacts (PDFs, CSVs, images) appear as `[art:…]` chips that open in a right-side preview drawer. `prune-artifacts` GCs them.
+- **Persistence** — every event is in `agent_events`; turns are persisted at the moment they start so mid-stream navigation doesn't drop them.
 
 ## Cost
 
-Embedding uses Gemini's `gemini-embedding-2-preview` model:
+Embedding uses Gemini's `gemini-embedding-2-preview`:
 - Text: $0.20 per 1M tokens
 - Images: $0.0001 per image
 
@@ -289,7 +404,7 @@ Embedding uses Gemini's `gemini-embedding-2-preview` model:
 | 20k messages | ~$5.00 | ~$0.0003/query |
 | 100k messages | ~$25.00 | ~$0.0003/query |
 
-The `--budget` flag sets a hard spending limit. `gmail-search cost --breakdown` shows exactly where money went.
+Per-turn chat cost is shown under each assistant message. Deep-mode tracks per-stage cost. `gmail-search cost --breakdown` shows exactly where money went. `--budget` flags set hard caps.
 
 ## Performance
 
@@ -300,30 +415,40 @@ Benchmarked on 20k messages / 32k embeddings:
 | Median search (clear results, cached query) | 62ms |
 | Median search (clear results, new query) | 250ms |
 | Median search (ambiguous, triggers reranker) | 1.4s |
-| Index build time (ScaNN + FTS + topics + aliases) | ~90s |
+| Index build time (sharded ScaNN + pg_search + topics + aliases) | ~90s |
 | Messages downloaded/sec | ~5 (rate limited by Gmail API) |
-| Embeddings/sec | ~50 (batched) |
+| Embeddings/sec | ~50 (batched), ~2x for Batch API |
 | Spell correction | 0.1ms (local SymSpell) |
 | Topic filter (client-side) | instant |
+| Inbox time-to-glass | instrumented in Settings |
 
 ## Tech stack
 
 - **Gmail API** — message download with OAuth2, batch requests, incremental sync
-- **Gemini embedding-2-preview** — text + multimodal embeddings (3072 dims, 8192 token input)
-- **Gemini Flash Lite** — conditional LLM reranker, topic auto-labeling
-- **ScaNN** — Google's vector similarity search (asymmetric hashing, sub-ms queries)
-- **SQLite + FTS5** — storage, keyword search (BM25), precomputed tables, query cache
-- **SymSpell** — local corpus-trained spell correction (0.1ms per query)
-- **FastAPI** — web UI and API
-- **pymupdf** — PDF text extraction + page rendering
+- **Google Drive API** — body-linked Drive docs ingested as attachments
+- **Gemini embedding-2-preview** — text + multimodal embeddings (3072 dims)
+- **Gemini Flash Lite / 3.1 Pro Preview** — chat agent, conditional reranker, topic auto-labeling, deep-mode sub-agents
+- **ScaNN (sharded)** — Google's vector similarity search, bounded-RAM builder
+- **Postgres + ParadeDB pg_search** — storage + Tantivy BM25, precomputed tables, query cache, job heartbeats
+- **SymSpell** — local corpus-trained spell correction
+- **Ollama / vLLM** — local LLM backend for summaries (gemma-class default)
+- **crawl4ai** — headless URL crawler with denylist + content cleaning
+- **FastAPI** — API server
+- **Next.js 15 + assistant-ui + shadcn/ui** — web app
+- **Docker** — Analyst sandbox in deep mode
+- **Caddy** — reverse proxy for the deployed instance (`gms.i.oursilverfamily.com`)
+- **pymupdf, python-docx, openpyxl, python-pptx, xlrd, pillow-heif, icalendar** — attachment extraction
 
 ## Privacy
 
 Your email stays on your machine. The only data sent externally:
-- **Embedding text** sent to Gemini API (for generating vector representations)
-- **Search queries** sent to Gemini API (for query embedding on cache miss, conditional reranking)
-- **Topic summaries** sent to Gemini Flash Lite (one-time at reindex, for auto-labeling clusters)
 
-Spell correction, abbreviation expansion, and query caching are fully local — no API calls.
+- **Embedding text** to Gemini API (vector representations)
+- **Search queries** to Gemini API (query embedding on cache miss; conditional reranking)
+- **Topic summaries** to Gemini Flash Lite (one-time at reindex)
+- **Chat / deep-mode prompts** to Gemini (only when you use those features)
+- **Crawled URLs** — fetched directly from the originating sites (no third-party proxy)
 
-No email content is stored by Google's API (Gemini API data is not used for training). Credentials and tokens are stored with restricted file permissions (0600). The `data/` directory containing your email database, attachments, and indexes is gitignored.
+Spell correction, abbreviation expansion, query caching, and per-thread summaries (when using Ollama/vLLM) are fully local — no API calls.
+
+No email content is stored by Google's API (Gemini API data is not used for training). OAuth tokens are stored 0600. Postgres lives on your machine. The `data/` directory containing the DB cluster, attachments, indexes, and deep-analysis artifacts is gitignored.
