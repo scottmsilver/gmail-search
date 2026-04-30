@@ -93,6 +93,13 @@ class SessionContext:
     db_dsn: str | None
     conversation_id: str | None = None
     workspace: str | None = None
+    # `user_id`, when set, scopes every tool call this session makes
+    # to that user's data. The runtime adapter passes the deep-mode
+    # turn's user_id at register_session time; tools forward it as
+    # `X-User-Id` to the FastAPI side, where `require_user_id` honors
+    # it iff the request also carries the MCP admin token. None ==
+    # legacy single-pool behavior (resolves to bootstrap user).
+    user_id: str | None = None
     _db_conn: Any = field(default=None, repr=False)
 
     def get_db_conn(self):
@@ -263,6 +270,7 @@ def register_session(
     db_dsn: str | None,
     conversation_id: str | None = None,
     workspace: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Bind a session_id to the evidence + DSN this turn's tool calls
     will see. MUST be called before the LLM is allowed to invoke any
@@ -276,7 +284,11 @@ def register_session(
 
     `workspace`, when set, names the claudebox per-turn workspace dir
     (e.g. `deep-<session_id>`). `publish_artifact` uses it to resolve
-    Claude-supplied file paths."""
+    Claude-supplied file paths.
+
+    `user_id`, when set, scopes every tool call this session makes to
+    that user's data. The orchestrator passes the deep-mode turn's
+    user from the request context."""
     _assert_session_id(session_id)
     if session_id in _SESSIONS:
         _SESSIONS[session_id].close()
@@ -285,6 +297,7 @@ def register_session(
         db_dsn=db_dsn,
         conversation_id=conversation_id,
         workspace=workspace,
+        user_id=user_id,
     )
 
 
@@ -326,52 +339,57 @@ def _get_session(session_id: str) -> SessionContext:
 
 
 async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> dict:
-    """Re-route to `search_emails_batch`. `session_id` threading is
-    documented in the public docstring registered with FastMCP; the
-    impl's only use of session_id is to assert the caller registered
-    before calling — search itself is global."""
-    _get_session(session_id)
+    """Re-route to `search_emails_batch`. Threads `user_id` from the
+    SessionContext into the impl so the resulting HTTP call to
+    /api/* sets the X-User-Id header — FastAPI's `require_user_id`
+    honors it iff the request also carries the MCP admin token,
+    keeping the per-user gate intact even from the MCP path."""
+    ctx = _get_session(session_id)
     args = {"searches": searches}
-    response = await _search_emails_batch_impl(searches)
+    response = await _search_emails_batch_impl(searches, user_id=ctx.user_id)
     _record_call(session_id, "search_emails_batch", args, response)
     return response
 
 
 async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict:
-    _get_session(session_id)
+    ctx = _get_session(session_id)
     args = {"filters": filters}
-    response = await _query_emails_batch_impl(filters)
+    response = await _query_emails_batch_impl(filters, user_id=ctx.user_id)
     _record_call(session_id, "query_emails_batch", args, response)
     return response
 
 
 async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict:
-    _get_session(session_id)
+    ctx = _get_session(session_id)
     args = {"thread_ids": thread_ids}
-    response = await _get_thread_batch_impl(thread_ids)
+    response = await _get_thread_batch_impl(thread_ids, user_id=ctx.user_id)
     _record_call(session_id, "get_thread_batch", args, response)
     return response
 
 
 async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
-    _get_session(session_id)
+    ctx = _get_session(session_id)
     args = {"queries": queries}
-    response = await _sql_query_batch_impl(queries)
+    response = await _sql_query_batch_impl(queries, user_id=ctx.user_id)
     _record_call(session_id, "sql_query_batch", args, response)
     return response
 
 
-async def _tool_describe_schema(session_id: str) -> dict:
-    _get_session(session_id)
-    response = await _describe_schema_impl()
+async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
+    """Re-route to `describe_schema`. Threads `user_id` so the schema
+    response is prepended with a scoping preamble pinning the active
+    user — the LLM uses that to write correct WHERE user_id = ... clauses.
+    """
+    ctx = _get_session(session_id)
+    response = await _describe_schema_impl(user_id=ctx.user_id)
     _record_call(session_id, "describe_schema", {}, response)
     return response
 
 
 async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
-    _get_session(session_id)
+    ctx = _get_session(session_id)
     args = {"items": items}
-    response = await _get_attachment_batch_impl(items)
+    response = await _get_attachment_batch_impl(items, user_id=ctx.user_id)
     _record_call(session_id, "get_attachment_batch", args, response)
     return response
 
@@ -746,6 +764,7 @@ def _register_admin_routes(app) -> None:
             db_dsn=_resolve_server_db_dsn(),
             conversation_id=body.get("conversation_id"),
             workspace=body.get("workspace"),
+            user_id=body.get("user_id"),
         )
         return JSONResponse({"ok": True, "session_id": session_id})
 

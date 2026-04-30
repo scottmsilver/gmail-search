@@ -11,9 +11,12 @@ export const runtime = "nodejs";
 
 export async function POST(req: NextRequest): Promise<Response> {
   const bodyText = await req.text();
+  const cookie = req.headers.get("cookie") ?? "";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (cookie) headers["cookie"] = cookie;
   const upstream = await fetch(`${pythonApiUrl()}/api/agent/analyze`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: bodyText,
   });
   if (!upstream.body) {
@@ -43,7 +46,10 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
   const url = new URL(`${pythonApiUrl()}/api/agent/analyze/${encodeURIComponent(sessionId)}/events`);
   url.searchParams.set("after", after);
-  const upstream = await fetch(url.toString());
+  const cookie = req.headers.get("cookie") ?? "";
+  const upstream = await fetch(url.toString(), {
+    headers: cookie ? { cookie } : undefined,
+  });
   if (!upstream.body) {
     return new Response("upstream returned no body", { status: 502 });
   }

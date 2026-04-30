@@ -4,9 +4,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
+from fastapi import Body, Depends, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from gmail_search.auth import require_user_id
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import _pg_dsn, get_connection
@@ -89,11 +90,25 @@ _SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
 _SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
-def _open_readonly_connection():
+def _open_readonly_connection(*, user_id: str | None = None):
     """Open a Postgres connection in a READ ONLY transaction with a
-    statement-level timeout. Two-layer defense: the gate validator
-    rejects non-SELECT queries, and the server refuses writes at the
-    transaction level.
+    statement-level timeout. When `user_id` is given (the multi-tenant
+    /api/sql path), additionally drops to the non-superuser
+    `gmail_search_reader` role and binds `app.user_id` so the RLS
+    policies installed by pg_schema.sql scope every read to that user.
+
+    Three-layer defense:
+      1. The gate validator rejects non-SELECT queries (regex level).
+      2. The transaction is READ ONLY at the PG transaction level.
+      3. With `user_id` set, RLS policies on every per-user table
+         (messages, attachments, conversations, …) filter rows to
+         `WHERE user_id = current_setting('app.user_id')` — so even
+         `SELECT count(*) FROM messages` returns only the active
+         user's count.
+
+    Daemon callers can pass `user_id=None` and stay on the superuser
+    role (BYPASSRLS), so the watch/update/summarize loops are
+    unaffected.
     """
     import psycopg
 
@@ -105,6 +120,21 @@ def _open_readonly_connection():
         # ourselves, so there's no injection surface.
         timeout_ms = int(SQL_TIMEOUT_SEC * 1000)
         cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+        if user_id is not None:
+            # Drop privileges to the reader role for the duration of
+            # this transaction. The reader has SELECT only on
+            # LLM-facing tables and is NOT BYPASSRLS, so the policy
+            # checks below take effect. After ROLLBACK the connection
+            # is back to the gmail_search role for whatever runs next.
+            cur.execute("SET LOCAL ROLE gmail_search_reader")
+            # `set_config(setting, value, is_local)` is the only form
+            # that accepts a parameterized value — `SET LOCAL …` is
+            # parsed as raw SQL and rejects %s. is_local=true scopes
+            # the setting to this transaction only.
+            cur.execute(
+                "SELECT set_config('app.user_id', %s, true)",
+                (user_id,),
+            )
     return conn
 
 
@@ -184,15 +214,21 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _run_sql_with_timeout(db_path: Path, query: str) -> dict:
+def _run_sql_with_timeout(db_path: Path, query: str, *, user_id: str | None = None) -> dict:
     """Execute a SELECT and capture the first SQL_MAX_ROWS rows.
 
     Enforces the timeout at the PG server via `statement_timeout`, set
     on the transaction by `_open_readonly_connection`. The transaction
     is also READ ONLY, so even a gate bypass cannot mutate state.
     `db_path` is ignored; kept for call-site compatibility.
+
+    When `user_id` is given, the transaction additionally runs as the
+    `gmail_search_reader` role with `app.user_id` bound — RLS policies
+    then scope every per-user table read to that user. This is the
+    /api/sql path. Internal callers can omit user_id to stay on the
+    superuser role.
     """
-    conn = _open_readonly_connection()
+    conn = _open_readonly_connection(user_id=user_id)
     try:
         with conn.cursor() as cursor:
             cursor.execute(query)
@@ -262,7 +298,7 @@ def _thread_ids_matching_filters(
     return [r["thread_id"] for r in rows]
 
 
-def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
+def _load_thread_summaries(conn, thread_ids: list[str], *, user_id: str) -> list[dict]:
     if not thread_ids:
         return []
     import json as _json
@@ -271,11 +307,12 @@ def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
     rows = conn.execute(
         f"""SELECT thread_id, subject, participants, message_count,
             date_first, date_last
-            FROM thread_summary WHERE thread_id IN ({placeholders})""",
-        thread_ids,
+            FROM thread_summary WHERE thread_id IN ({placeholders})
+              AND user_id = %s""",
+        thread_ids + [user_id],
     ).fetchall()
     by_id = {r["thread_id"]: r for r in rows}
-    latest_snippets = _latest_snippet_per_thread(conn, thread_ids)
+    latest_snippets = _latest_snippet_per_thread(conn, thread_ids, user_id=user_id)
     out = []
     for tid in thread_ids:
         r = by_id.get(tid)
@@ -295,7 +332,7 @@ def _load_thread_summaries(conn, thread_ids: list[str]) -> list[dict]:
     return out
 
 
-def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
+def _latest_snippet_per_thread(conn, thread_ids: list[str], *, user_id: str) -> dict[str, str]:
     if not thread_ids:
         return {}
     placeholders = ",".join(["%s"] * len(thread_ids))
@@ -303,10 +340,12 @@ def _latest_snippet_per_thread(conn, thread_ids: list[str]) -> dict[str, str]:
         f"""SELECT m.thread_id, m.body_text FROM messages m
             INNER JOIN (
                 SELECT thread_id, MAX(date) as max_date
-                FROM messages WHERE thread_id IN ({placeholders})
+                FROM messages
+                WHERE user_id = %s AND thread_id IN ({placeholders})
                 GROUP BY thread_id
-            ) latest ON m.thread_id = latest.thread_id AND m.date = latest.max_date""",
-        thread_ids,
+            ) latest ON m.thread_id = latest.thread_id AND m.date = latest.max_date
+            WHERE m.user_id = %s""",
+        [user_id] + thread_ids + [user_id],
     ).fetchall()
     return {r["thread_id"]: (r["body_text"] or "")[:500] for r in rows}
 
@@ -381,12 +420,19 @@ def _run_structured_query(
     has_attachment: bool | None,
     order_by: str,
     limit: int,
+    *,
+    user_id: str,
 ) -> list[dict]:
     conn = get_connection(db_path)
     try:
         clauses, params = _build_query_filters(sender, subject_contains, date_from, date_to, label)
+        # Always scope by user_id — _thread_ids_matching_filters is the
+        # gate for the structured /api/query endpoint, and we don't
+        # want a from:foo filter to surface another user's threads.
+        clauses.append("m.user_id = %s")
+        params.append(user_id)
         thread_ids = _thread_ids_matching_filters(conn, clauses, params, has_attachment, order_by, limit)
-        return _load_thread_summaries(conn, thread_ids)
+        return _load_thread_summaries(conn, thread_ids, user_id=user_id)
     finally:
         conn.close()
 
@@ -397,6 +443,8 @@ def _inbox_rows(
     predicate_params: tuple,
     limit: int,
     offset: int,
+    *,
+    user_id: str | None = None,
 ) -> list[dict]:
     """Return inbox-shaped thread rows whose messages match `predicate_sql`.
 
@@ -406,8 +454,18 @@ def _inbox_rows(
     `predicate_params`. The built query is the same one that used to live
     inside `api_inbox`: take the newest `limit` thread_summary rows where
     the predicate matches, then join the latest message + its summary.
+
+    `user_id` scopes everything so a label-based predicate doesn't leak
+    rows from another user's INBOX/STARRED/etc. None falls back to the
+    bootstrap user (legacy single-pool callers + tests that pre-date
+    the multi-tenant gating).
     """
     import json as _json
+
+    if user_id is None:
+        from gmail_search.auth.write_user import get_bootstrap_user_id
+
+        user_id = get_bootstrap_user_id(conn)
 
     sql = f"""
         WITH priority_threads AS (
@@ -418,9 +476,10 @@ def _inbox_rows(
                    ts.date_first,
                    ts.date_last
             FROM thread_summary ts
-            WHERE EXISTS (
+            WHERE ts.user_id = %s AND EXISTS (
                 SELECT 1 FROM messages m
                 WHERE m.thread_id = ts.thread_id
+                  AND m.user_id = %s
                   AND ({predicate_sql})
             )
             ORDER BY ts.date_last DESC
@@ -433,7 +492,8 @@ def _inbox_rows(
                    m.from_addr AS latest_from_addr,
                    m.body_text AS latest_body
             FROM messages m
-            WHERE m.thread_id IN (SELECT thread_id FROM priority_threads)
+            WHERE m.user_id = %s
+              AND m.thread_id IN (SELECT thread_id FROM priority_threads)
             ORDER BY m.thread_id, m.date DESC
         )
         SELECT pt.thread_id,
@@ -454,7 +514,8 @@ def _inbox_rows(
                ON ms.message_id = lm.latest_message_id
         ORDER BY pt.date_last DESC
     """
-    rows = conn.execute(sql, (*predicate_params, limit, offset)).fetchall()
+    # Bind order: ts.user_id, m.user_id (in EXISTS), predicate params, limit, offset, m.user_id (latest_msg).
+    rows = conn.execute(sql, (user_id, user_id, *predicate_params, limit, offset, user_id)).fetchall()
 
     results: list[dict] = []
     for r in rows:
@@ -600,97 +661,106 @@ def create_app(
             reverse=True,
         )
 
-    # Engine state. Guarded by `_engine_lock` because both the startup
-    # coroutine and the background poller can try to rebuild at the
-    # same time, and the search handler reads from the same slot.
+    # Engine state — now PER-USER. Each user has their own SearchEngine
+    # (own ScaNN index, own contact_freq, own term_aliases, own spell
+    # dict) lazy-loaded on first request. Per the 0c benchmark this
+    # costs ~129 MiB RSS and ~185 ms cold load per user.
     import threading as _threading
 
-    _engine: SearchEngine | None = None
-    _engine_index_dir: Path | None = None
+    _engines: dict[str, SearchEngine] = {}
+    _engine_index_dirs: dict[str, Path] = {}
     _engine_lock = _threading.Lock()
 
-    def _build_engine(path: Path) -> SearchEngine:
+    def _user_index_dir(user_id: str) -> Path:
+        # Per-user fallback dir; resolve_active_index_dir uses the DB
+        # pointer first and only returns this if there's no pointer row.
+        return data_dir / "users" / user_id / "scann_index"
+
+    def _build_engine(user_id: str, path: Path) -> SearchEngine:
         """Synchronous construction — SymSpell dict load + sharded
-        ScaNN load runs here. Called from startup (once) and from the
-        background poller (on pointer flip). The search request path
-        NEVER builds synchronously; it always reads the cached
-        instance via `get_engine()`.
-        """
-        return SearchEngine(db_path, path, config)
+        ScaNN load runs here. Called lazily on first request per user
+        and again whenever the per-user index pointer moves (rebuild
+        watcher). The search request path NEVER builds synchronously
+        on the happy path — once cached, it's a dict lookup."""
+        return SearchEngine(db_path, path, config, user_id=user_id)
 
-    def get_engine() -> SearchEngine:
-        """Return the currently-warm SearchEngine.
+    def get_engine(user_id: str) -> SearchEngine:
+        """Return (or lazy-build) the SearchEngine for this user.
 
-        Reads `_engine` under the lock. If the engine was somehow not
-        warmed yet (e.g. a request raced startup), falls back to a
-        synchronous build so the request still succeeds — but the
-        happy path is "already built, just return it". The background
-        poller swaps `_engine` atomically when the index pointer
-        moves.
-        """
-        nonlocal _engine, _engine_index_dir
+        Cold path is ~185ms (per 0c benchmark) the first time a user
+        hits search. Subsequent requests are dict lookups."""
         with _engine_lock:
-            if _engine is not None:
-                return _engine
-        # Miss — startup hasn't finished yet. Fall back to a sync
-        # build so the request doesn't fail. This path shouldn't hit
-        # in practice once startup completes.
-        current = resolve_active_index_dir(db_path, data_dir / "scann_index")
-        built = _build_engine(current)
+            cached = _engines.get(user_id)
+            if cached is not None:
+                return cached
+        current = resolve_active_index_dir(db_path, _user_index_dir(user_id), user_id=user_id)
+        built = _build_engine(user_id, current)
         with _engine_lock:
-            if _engine is None:
-                _engine = built
-                _engine_index_dir = current
-            return _engine  # another thread may have won the race — return whoever's in the slot
+            # Re-check under lock — another thread may have built it.
+            cached = _engines.get(user_id)
+            if cached is not None:
+                return cached
+            _engines[user_id] = built
+            _engine_index_dirs[user_id] = current
+            return built
 
     async def _prewarm_engine() -> None:
-        """Startup hook: build the initial engine in a worker thread so
-        uvicorn's event loop doesn't block, and log how long it took
-        so the operator can tell if SymSpell / ScaNN is pathological.
-        """
+        """Startup hook: prewarm the bootstrap user's engine so the
+        operator's first search isn't a 185ms cold load. Other users
+        get lazy-loaded on first request."""
         import asyncio as _asyncio
         import time as _time
 
-        nonlocal _engine, _engine_index_dir
+        from gmail_search.auth.write_user import get_bootstrap_user_id
+        from gmail_search.store.db import get_connection as _get_conn
+
+        try:
+            _conn = _get_conn(db_path)
+            try:
+                bootstrap_uid = get_bootstrap_user_id(_conn)
+            finally:
+                _conn.close()
+        except Exception as e:
+            logger.warning(f"engine prewarm: no bootstrap user yet ({e}); deferring")
+            return
         start = _time.time()
-        current = resolve_active_index_dir(db_path, data_dir / "scann_index")
-        built = await _asyncio.to_thread(_build_engine, current)
+        current = resolve_active_index_dir(db_path, _user_index_dir(bootstrap_uid), user_id=bootstrap_uid)
+        built = await _asyncio.to_thread(_build_engine, bootstrap_uid, current)
         with _engine_lock:
-            _engine = built
-            _engine_index_dir = current
-        logger.info(f"engine prewarmed in {_time.time() - start:.1f}s (index={current.name})")
+            _engines[bootstrap_uid] = built
+            _engine_index_dirs[bootstrap_uid] = current
+        logger.info(f"engine prewarmed for {bootstrap_uid} in {_time.time() - start:.1f}s (index={current.name})")
 
     async def _engine_swap_watcher() -> None:
-        """Background task: poll the DB pointer every 10s. When it
-        moves (a reindex landed), build the replacement engine off
-        the event loop, then atomically swap. The old engine keeps
-        serving until the new one is ready, so the swap is invisible
-        to the user — no 10-30s SymSpell stall on the first post-
-        reindex search.
-        """
+        """Background task: poll every cached user's index pointer.
+        When one moves (a reindex landed for that user), build the
+        replacement engine off the event loop, then atomically swap.
+        Old engine keeps serving until the new one is ready."""
         import asyncio as _asyncio
         import time as _time
 
-        nonlocal _engine, _engine_index_dir
         while True:
             try:
                 await _asyncio.sleep(10)
-                current = resolve_active_index_dir(db_path, data_dir / "scann_index")
                 with _engine_lock:
-                    stale = _engine_index_dir is not None and current != _engine_index_dir
-                if not stale:
-                    continue
-                start = _time.time()
-                built = await _asyncio.to_thread(_build_engine, current)
-                with _engine_lock:
-                    _engine = built
-                    _engine_index_dir = current
-                logger.info(f"engine hot-swapped in {_time.time() - start:.1f}s (index={current.name})")
+                    cached_users = list(_engine_index_dirs.items())
+                for user_id, prev_dir in cached_users:
+                    current = resolve_active_index_dir(db_path, _user_index_dir(user_id), user_id=user_id)
+                    if current == prev_dir:
+                        continue
+                    start = _time.time()
+                    built = await _asyncio.to_thread(_build_engine, user_id, current)
+                    with _engine_lock:
+                        _engines[user_id] = built
+                        _engine_index_dirs[user_id] = current
+                    logger.info(
+                        f"engine hot-swapped for {user_id} in {_time.time() - start:.1f}s " f"(index={current.name})"
+                    )
             except _asyncio.CancelledError:
                 raise
             except Exception as e:
-                # Don't let the watcher die — worst case we fall back
-                # to the lazy rebuild in get_engine() next search.
+                # Don't let the watcher die — worst case the next
+                # lazy-build path catches up.
                 logger.warning(f"engine swap watcher error: {e}")
 
     @app.on_event("startup")
@@ -744,10 +814,23 @@ def create_app(
         filter: bool = Query(True, alias="filter"),
         date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
         date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
+        user_id: str = Depends(require_user_id),
     ):
         from gmail_search.summarize import get_summaries_bulk_meta
 
-        engine = get_engine()
+        try:
+            engine = get_engine(user_id)
+        except FileNotFoundError as e:
+            # New user without a built ScaNN index yet — return clean
+            # empty results (with a `pending` flag the UI can surface)
+            # instead of 500ing. Backfill builds the index on its first
+            # reindex pass; this is the window before that completes.
+            logger.info("search before index build for user %s: %s", user_id, e)
+            return {
+                "results": [],
+                "facets": [],
+                "pending_index": True,
+            }
         results = engine.search_threads(
             q,
             top_k=k,
@@ -802,6 +885,7 @@ def create_app(
         has_attachment: bool | None = Query(None),
         order_by: str = Query("date_desc", pattern="^(date_desc|date_asc)$"),
         limit: int = Query(20, le=100),
+        user_id: str = Depends(require_user_id),
     ):
         threads = _run_structured_query(
             db_path,
@@ -813,6 +897,7 @@ def create_app(
             has_attachment=has_attachment,
             order_by=order_by,
             limit=limit,
+            user_id=user_id,
         )
         return {"results": threads}
 
@@ -820,6 +905,7 @@ def create_app(
     async def api_inbox(
         limit: int = Query(50, le=200),
         offset: int = Query(0, ge=0),
+        user_id: str = Depends(require_user_id),
     ):
         """Inbox view. Mirrors Gmail's default web INBOX listing —
         every thread with at least one message carrying the INBOX
@@ -840,6 +926,7 @@ def create_app(
                 ('%"INBOX"%',),
                 limit,
                 offset,
+                user_id=user_id,
             )
             return {"results": results}
         finally:
@@ -849,6 +936,7 @@ def create_app(
     async def api_priority_inbox(
         limit: int = Query(25, le=100),
         offset: int = Query(0, ge=0),
+        user_id: str = Depends(require_user_id),
     ):
         """Gmail-style Priority Inbox — three sections:
 
@@ -870,6 +958,7 @@ def create_app(
                 ('%"IMPORTANT"%', '%"UNREAD"%', '%"INBOX"%'),
                 limit,
                 offset,
+                user_id=user_id,
             )
             starred = _inbox_rows(
                 conn,
@@ -877,6 +966,7 @@ def create_app(
                 ('%"STARRED"%',),
                 limit,
                 offset,
+                user_id=user_id,
             )
             # "Everything else" = INBOX threads NOT already in sections
             # 1 or 2. We exclude by thread_id (not message_id) because a
@@ -887,8 +977,11 @@ def create_app(
                     "m.labels LIKE %s"
                     " AND m.thread_id NOT IN ("
                     "   SELECT m2.thread_id FROM messages m2"
-                    "   WHERE (m2.labels LIKE %s AND m2.labels LIKE %s AND m2.labels LIKE %s)"
-                    "      OR (m2.labels LIKE %s)"
+                    "   WHERE m2.user_id = m.user_id"
+                    "     AND ("
+                    "       (m2.labels LIKE %s AND m2.labels LIKE %s AND m2.labels LIKE %s)"
+                    "       OR (m2.labels LIKE %s)"
+                    "     )"
                     " )"
                 ),
                 (
@@ -900,6 +993,7 @@ def create_app(
                 ),
                 limit,
                 offset,
+                user_id=user_id,
             )
             return {
                 "sections": [
@@ -924,18 +1018,18 @@ def create_app(
             conn.close()
 
     @app.get("/api/thread/{thread_id}")
-    async def api_thread(thread_id: str):
+    async def api_thread(thread_id: str, user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT id FROM messages WHERE thread_id = %s ORDER BY date",
-            (thread_id,),
+            "SELECT id FROM messages WHERE thread_id = %s AND user_id = %s ORDER BY date",
+            (thread_id, user_id),
         ).fetchall()
         messages = []
         for row in rows:
-            msg = get_message(conn, row["id"])
+            msg = get_message(conn, row["id"], user_id=user_id)
             if msg is None:
                 continue
-            attachments = get_attachments_for_message(conn, msg.id)
+            attachments = get_attachments_for_message(conn, msg.id, user_id=user_id)
             messages.append(
                 {
                     "id": msg.id,
@@ -959,10 +1053,12 @@ def create_app(
         return {"thread_id": thread_id, "messages": messages}
 
     @app.get("/api/topics")
-    async def api_topics():
+    async def api_topics(user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT topic_id, parent_id, label, depth, message_count, top_senders FROM topics ORDER BY depth, message_count DESC"
+            "SELECT topic_id, parent_id, label, depth, message_count, top_senders FROM topics "
+            "WHERE user_id = %s ORDER BY depth, message_count DESC",
+            (user_id,),
         ).fetchall()
         conn.close()
         import json as _json
@@ -980,13 +1076,13 @@ def create_app(
         ]
 
     @app.get("/api/message/{message_id}")
-    async def api_message(message_id: str):
+    async def api_message(message_id: str, user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
-        msg = get_message(conn, message_id)
+        msg = get_message(conn, message_id, user_id=user_id)
         if msg is None:
             conn.close()
             return JSONResponse({"error": "Message not found"}, status_code=404)
-        attachments = get_attachments_for_message(conn, message_id)
+        attachments = get_attachments_for_message(conn, message_id, user_id=user_id)
         conn.close()
         return {
             "id": msg.id,
@@ -1001,7 +1097,10 @@ def create_app(
         }
 
     @app.get("/api/thread_lookup")
-    async def api_thread_lookup(cite_ref: str = Query(..., min_length=4, max_length=20)):
+    async def api_thread_lookup(
+        cite_ref: str = Query(..., min_length=4, max_length=20),
+        user_id: str = Depends(require_user_id),
+    ):
         """Resolve a cite_ref (4-20 char prefix) to a real thread_id.
 
         Returns the thread + subject when exactly one thread starts with
@@ -1012,8 +1111,8 @@ def create_app(
             return JSONResponse({"error": "cite_ref must be hex"}, status_code=400)
         conn = get_connection(db_path)
         rows = conn.execute(
-            "SELECT thread_id, subject FROM thread_summary WHERE thread_id LIKE %s LIMIT 5",
-            (f"{prefix}%",),
+            "SELECT thread_id, subject FROM thread_summary " "WHERE thread_id LIKE %s AND user_id = %s LIMIT 5",
+            (f"{prefix}%", user_id),
         ).fetchall()
         conn.close()
         if not rows:
@@ -1029,13 +1128,29 @@ def create_app(
         return {"thread_id": rows[0]["thread_id"], "subject": rows[0]["subject"]}
 
     @app.post("/api/sql")
-    async def api_sql(payload: dict = Body(...)):
+    async def api_sql(
+        payload: dict = Body(...),
+        user_id: str = Depends(require_user_id),
+    ):
         """Run a read-only SQL SELECT (or WITH...SELECT) against the DB.
 
         Hard limits: max 500 rows returned, 10s timeout, 5000 char query.
-        Enforced read-only at the SQLite connection level AND via keyword
+        Enforced read-only at the connection level AND via keyword
         blacklist (defense in depth). Statement must begin with SELECT or
         WITH; multiple statements are rejected.
+
+        Multi-tenant: gated by require_user_id AND scoped by Postgres
+        RLS at the storage layer. The connection drops to the
+        `gmail_search_reader` role and binds `app.user_id` to the
+        caller's user_id before the LLM's query runs, so policies on
+        every per-user table (messages, attachments, conversations…)
+        filter rows automatically — even an unscoped `SELECT count(*)
+        FROM messages` returns only the active user's count.
+
+        The reader role has SELECT only on LLM-facing tables, so an
+        attempt to read `query_cache` / `users` / `embeddings` etc.
+        raises permission-denied rather than leaking. See pg_schema.sql
+        "Phase 3g — Row-Level Security" block.
         """
         import psycopg
 
@@ -1044,7 +1159,7 @@ def create_app(
         if err:
             return JSONResponse({"error": err}, status_code=400)
         try:
-            return _run_sql_with_timeout(db_path, query)
+            return _run_sql_with_timeout(db_path, query, user_id=user_id)
         except psycopg.errors.QueryCanceled as e:
             # statement_timeout tripped — surface as 408 so the UI can
             # tell timeout apart from a syntax error.
@@ -1073,11 +1188,14 @@ def create_app(
         conn = get_connection(db_path)
         # RETURNING id works on SQLite 3.35+ and Postgres; replaces the
         # old cursor.lastrowid which returned None under psycopg's
-        # dict_row factory.
+        # dict_row factory. user_id is required by multi-tenant schema.
+        from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+        uid = _resolve_uid(conn)
         cur = conn.execute(
             """INSERT INTO model_battles
-                 (question, variant_a, variant_b, winner, request_id_a, request_id_b)
-               VALUES (%s, %s, %s, %s, %s, %s)
+                 (question, variant_a, variant_b, winner, request_id_a, request_id_b, user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
                RETURNING id""",
             (
                 question[:1000],
@@ -1086,6 +1204,7 @@ def create_app(
                 winner,
                 payload.get("request_id_a"),
                 payload.get("request_id_b"),
+                uid,
             ),
         )
         row = cur.fetchone()
@@ -1157,15 +1276,19 @@ def create_app(
         return {"leaderboard": leaderboard, "battles": len(rows)}
 
     @app.get("/api/conversations")
-    async def api_conversations_list(limit: int = Query(100, le=500)):
+    async def api_conversations_list(
+        limit: int = Query(100, le=500),
+        user_id: str = Depends(require_user_id),
+    ):
         conn = get_connection(db_path)
         rows = conn.execute(
             """SELECT c.id, c.title, c.created_at, c.updated_at,
                       (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) as message_count
                FROM conversations c
+               WHERE c.user_id = %s
                ORDER BY c.updated_at DESC
                LIMIT %s""",
-            (limit,),
+            (user_id, limit),
         ).fetchall()
         conn.close()
         return {
@@ -1182,7 +1305,10 @@ def create_app(
         }
 
     @app.get("/api/conversations/live")
-    async def api_conversations_live(limit: int = Query(100, le=500)):
+    async def api_conversations_live(
+        limit: int = Query(100, le=500),
+        user_id: str = Depends(require_user_id),
+    ):
         """Sidebar feed: every conversation joined to its latest deep
         turn (if any). The UI polls this every few seconds to render a
         live "what's running where" view across concurrent
@@ -1199,7 +1325,7 @@ def create_app(
                        SELECT DISTINCT ON (conversation_id)
                               conversation_id, id, status, started_at, finished_at
                        FROM agent_sessions
-                       WHERE conversation_id IS NOT NULL
+                       WHERE conversation_id IS NOT NULL AND user_id = %s
                        ORDER BY conversation_id, started_at DESC
                    )
                    SELECT c.id, c.title, c.created_at, c.updated_at,
@@ -1215,9 +1341,10 @@ def create_app(
                    FROM conversations c
                    LEFT JOIN conversation_claude_session ccs ON ccs.conversation_id = c.id
                    LEFT JOIN latest ON latest.conversation_id = c.id
+                   WHERE c.user_id = %s
                    ORDER BY COALESCE(latest.started_at, c.updated_at::timestamptz) DESC
                    LIMIT %s""",
-                (limit,),
+                (user_id, user_id, limit),
             ).fetchall()
             return {
                 "conversations": [
@@ -1247,17 +1374,23 @@ def create_app(
             conn.close()
 
     @app.get("/api/conversations/{conversation_id}")
-    async def api_conversation_get(conversation_id: str):
+    async def api_conversation_get(
+        conversation_id: str,
+        user_id: str = Depends(require_user_id),
+    ):
         import json as _json
 
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = %s",
-            (conversation_id,),
+            "SELECT id, title, created_at, updated_at FROM conversations " "WHERE id = %s AND user_id = %s",
+            (conversation_id, user_id),
         ).fetchone()
         if row is None:
             conn.close()
             return JSONResponse({"error": "not found"}, status_code=404)
+        # conversation_messages joins through conversations.user_id —
+        # the existence check above is the gate, so a direct fetch by
+        # conversation_id here is safe.
         msg_rows = conn.execute(
             """SELECT seq, role, parts FROM conversation_messages
                WHERE conversation_id = %s ORDER BY seq""",
@@ -1273,7 +1406,11 @@ def create_app(
         }
 
     @app.put("/api/conversations/{conversation_id}")
-    async def api_conversation_save(conversation_id: str, payload: dict = Body(...)):
+    async def api_conversation_save(
+        conversation_id: str,
+        payload: dict = Body(...),
+        user_id: str = Depends(require_user_id),
+    ):
         """Upsert conversation + fully replace its message list.
 
         Body: {title?: str, messages: [{role, parts}]}
@@ -1298,13 +1435,17 @@ def create_app(
         conn = get_connection(db_path)
         try:
             now = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+            # Use the auth-resolved user_id (multi-tenant: signed-in
+            # user; legacy: bootstrap). The conversation rows can only
+            # ever belong to the request's owner.
             conn.execute(
-                """INSERT INTO conversations (id, title, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s)
+                """INSERT INTO conversations (id, title, created_at, updated_at, user_id)
+                   VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT(id) DO UPDATE SET
                      title = COALESCE(excluded.title, conversations.title),
-                     updated_at = excluded.updated_at""",
-                (conversation_id, title, now, now),
+                     updated_at = excluded.updated_at
+                   WHERE conversations.user_id = excluded.user_id""",
+                (conversation_id, title, now, now, user_id),
             )
             conn.execute(
                 "DELETE FROM conversation_messages WHERE conversation_id = %s",
@@ -1327,13 +1468,18 @@ def create_app(
         return {"ok": True, "id": conversation_id}
 
     @app.delete("/api/conversations/{conversation_id}")
-    async def api_conversation_delete(conversation_id: str):
+    async def api_conversation_delete(
+        conversation_id: str,
+        user_id: str = Depends(require_user_id),
+    ):
         conn = get_connection(db_path)
-        conn.execute("DELETE FROM conversation_messages WHERE conversation_id = %s", (conversation_id,))
-        # ON DELETE CASCADE on conversation_claude_session FK
-        # automatically clears the per-conversation Claude session
-        # mapping when the parent conversation row goes away.
-        conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
+        # Scope by user_id so user A can't delete user B's conversation.
+        # ON DELETE CASCADE on conversation_messages and
+        # conversation_claude_session FKs cleans up the rest.
+        conn.execute(
+            "DELETE FROM conversations WHERE id = %s AND user_id = %s",
+            (conversation_id, user_id),
+        )
         conn.commit()
         conn.close()
         # Best-effort filesystem cleanup so a deleted-then-recreated
@@ -1350,7 +1496,11 @@ def create_app(
         return {"ok": True}
 
     @app.get("/api/conversations/{conversation_id}/debug")
-    async def api_conversation_debug(conversation_id: str, session_limit: int = Query(20, le=200)):
+    async def api_conversation_debug(
+        conversation_id: str,
+        session_limit: int = Query(20, le=200),
+        user_id: str = Depends(require_user_id),
+    ):
         """Per-conversation debug pane payload. Returns sessions
         (turns) with their tool-call timeline + artifacts + workspace
         path + JSONL path. UI renders as a collapsible-by-turn view.
@@ -1366,8 +1516,8 @@ def create_app(
         conn = get_connection(db_path)
         try:
             conv = conn.execute(
-                "SELECT id, title FROM conversations WHERE id = %s",
-                (conversation_id,),
+                "SELECT id, title FROM conversations WHERE id = %s AND user_id = %s",
+                (conversation_id, user_id),
             ).fetchone()
             if conv is None:
                 return JSONResponse({"error": "conversation not found"}, status_code=404)
@@ -1442,7 +1592,10 @@ def create_app(
             conn.close()
 
     @app.get("/api/conversations/{conversation_id}/workspace/tree")
-    async def api_conversation_workspace_tree(conversation_id: str):
+    async def api_conversation_workspace_tree(
+        conversation_id: str,
+        user_id: str = Depends(require_user_id),
+    ):
         """Workspace directory listing for the debug pane. Recursive
         but bounded so a runaway agent that wrote 100k files can't
         blow up the response. Each entry: relative path, size, mtime,
@@ -1452,6 +1605,17 @@ def create_app(
                 {"error": "conversation_id must match ^[A-Za-z0-9_-]{1,64}$"},
                 status_code=400,
             )
+        # Ownership gate: user A can't list user B's workspace tree.
+        _conn = get_connection(db_path)
+        try:
+            owner = _conn.execute(
+                "SELECT 1 FROM conversations WHERE id = %s AND user_id = %s",
+                (conversation_id, user_id),
+            ).fetchone()
+        finally:
+            _conn.close()
+        if owner is None:
+            return JSONResponse({"error": "conversation not found"}, status_code=404)
         ws_dir = Path("deploy/claudebox/workspaces") / f"deep-conv-{conversation_id}"
         if not ws_dir.is_dir():
             return JSONResponse({"error": "workspace dir not present"}, status_code=404)
@@ -1500,7 +1664,10 @@ def create_app(
         }
 
     @app.get("/api/conversations/{conversation_id}/jsonl")
-    async def api_conversation_jsonl(conversation_id: str):
+    async def api_conversation_jsonl(
+        conversation_id: str,
+        user_id: str = Depends(require_user_id),
+    ):
         """Raw Claude Code JSONL transcript for the conversation.
         After Phase 0 confirmed `--resume` appends to the same file,
         the conversation maps to ONE JSONL identified by the pinned
@@ -1516,9 +1683,13 @@ def create_app(
             )
         conn = get_connection(db_path)
         try:
+            # Ownership gate first — JOIN through conversations.user_id
+            # so user A can't see user B's transcript.
             row = conn.execute(
-                "SELECT claude_session_uuid FROM conversation_claude_session WHERE conversation_id = %s",
-                (conversation_id,),
+                """SELECT ccs.claude_session_uuid FROM conversation_claude_session ccs
+                   JOIN conversations c ON c.id = ccs.conversation_id
+                   WHERE ccs.conversation_id = %s AND c.user_id = %s""",
+                (conversation_id, user_id),
             ).fetchone()
         finally:
             conn.close()
@@ -1555,7 +1726,10 @@ def create_app(
         return FileResponse(str(jsonl_resolved), media_type="application/jsonl")
 
     @app.get("/api/attachment/{attachment_id}/meta")
-    async def api_attachment_meta(attachment_id: int):
+    async def api_attachment_meta(
+        attachment_id: int,
+        user_id: str = Depends(require_user_id),
+    ):
         """Cheap metadata-only lookup for attachment citation chips.
         Returns enough to render a chip (filename, mime, size) and to
         wire its click to the thread drawer (thread_id, message_id).
@@ -1568,8 +1742,8 @@ def create_app(
                           a.message_id, m.thread_id
                    FROM attachments a
                    JOIN messages m ON m.id = a.message_id
-                   WHERE a.id = %s""",
-                (attachment_id,),
+                   WHERE a.id = %s AND a.user_id = %s""",
+                (attachment_id, user_id),
             ).fetchone()
             if row is None:
                 return JSONResponse({"error": "Attachment not found"}, status_code=404)
@@ -1585,12 +1759,15 @@ def create_app(
             conn.close()
 
     @app.get("/api/attachment/{attachment_id}/text")
-    async def api_attachment_text(attachment_id: int):
+    async def api_attachment_text(
+        attachment_id: int,
+        user_id: str = Depends(require_user_id),
+    ):
         conn = get_connection(db_path)
         try:
             row = conn.execute(
-                "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = %s",
-                (attachment_id,),
+                "SELECT filename, mime_type, extracted_text FROM attachments WHERE id = %s AND user_id = %s",
+                (attachment_id, user_id),
             ).fetchone()
             if row is None:
                 return JSONResponse({"error": "Attachment not found"}, status_code=404)
@@ -1650,6 +1827,7 @@ def create_app(
         ),
         max_pages: int = Query(8, ge=1, le=40),
         dpi: int = Query(150, ge=72, le=300),
+        user_id: str = Depends(require_user_id),
     ):
         """Rasterize PDF pages to PNG so the model can inline them as
         images. Used by the `get_attachment({as: "rendered_pages"})`
@@ -1676,8 +1854,8 @@ def create_app(
 
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT raw_path, mime_type FROM attachments WHERE id = %s",
-            (attachment_id,),
+            "SELECT raw_path, mime_type FROM attachments WHERE id = %s AND user_id = %s",
+            (attachment_id, user_id),
         ).fetchone()
         conn.close()
         if row is None or not row["raw_path"]:
@@ -1738,11 +1916,14 @@ def create_app(
             return JSONResponse({"error": f"render failed: {e}"}, status_code=500)
 
     @app.get("/api/attachment/{attachment_id}")
-    async def api_attachment(attachment_id: int):
+    async def api_attachment(
+        attachment_id: int,
+        user_id: str = Depends(require_user_id),
+    ):
         conn = get_connection(db_path)
         row = conn.execute(
-            "SELECT raw_path, mime_type, filename FROM attachments WHERE id = %s",
-            (attachment_id,),
+            "SELECT raw_path, mime_type, filename FROM attachments WHERE id = %s AND user_id = %s",
+            (attachment_id, user_id),
         ).fetchone()
         conn.close()
         if row is None or not row["raw_path"]:
@@ -1768,32 +1949,55 @@ def create_app(
         return JobProgress.get(db_path) or []
 
     @app.get("/api/sql_schema")
-    async def api_sql_schema():
+    async def api_sql_schema(user_id: str = Depends(require_user_id)):
         # Markdown description of every queryable table — surfaced to the
         # chat LLM so the sql_query tool knows the real column shapes.
+        # Prepends a multi-tenant preamble so the LLM always scopes its
+        # SQL to the active user — without this the model writes
+        # `SELECT count(*) FROM messages` and silently sees other users'
+        # rows. Phase 3g (RLS) will enforce this at the connection layer.
         from gmail_search.store.db import describe_schema_for_llm
 
-        return {"markdown": describe_schema_for_llm()}
+        preamble = (
+            "## Multi-tenant scoping (CRITICAL)\n\n"
+            f"The active user_id is `{user_id}`. EVERY SELECT against the\n"
+            "tables below MUST include `WHERE user_id = '" + user_id + "'`\n"
+            "(or a join that propagates this filter). Every per-user table\n"
+            "has a `user_id` column. Forgetting this filter returns rows\n"
+            "from other household members, which is wrong.\n\n"
+            "Examples:\n"
+            "  -- correct (scopes to active user):\n"
+            "  SELECT COUNT(*) FROM messages WHERE user_id = '" + user_id + "';\n"
+            "  -- correct (joins keep the scope):\n"
+            "  SELECT m.subject FROM messages m\n"
+            "    JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id\n"
+            "   WHERE m.user_id = '" + user_id + "' AND m.id @@@ 'subject:invoice';\n\n"
+            "---\n\n"
+        )
+        return {"markdown": preamble + describe_schema_for_llm()}
 
     @app.get("/api/status")
-    async def api_status():
+    async def api_status(user_id: str = Depends(require_user_id)):
         from gmail_search.store.db import JobProgress
 
         conn = get_connection(db_path)
-        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,)).fetchone()[0]
+        emb_count = conn.execute("SELECT COUNT(*) FROM embeddings WHERE user_id = %s", (user_id,)).fetchone()[0]
         # All dates are now UTC so string sort works correctly
-        dates = conn.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM messages").fetchone()
-        total_cost = get_total_spend(conn)
-        ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"])
-        # Search-side cost: query_cache tells us how many distinct
-        # search embeds we've paid for; the costs table (operation=
-        # 'embed_query') tells us how much they totalled. Both are
-        # tiny at our volume but worth surfacing so users can see
-        # search-as-you-type isn't silently expensive.
-        query_count_row = conn.execute("SELECT COUNT(*) FROM query_cache").fetchone()
-        query_cost_row = conn.execute(
-            "SELECT COALESCE(SUM(estimated_cost_usd), 0) FROM costs WHERE operation = 'embed_query'"
+        dates = conn.execute(
+            "SELECT MIN(date) as oldest, MAX(date) as newest FROM messages WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+        total_cost = get_total_spend(conn, user_id=user_id)
+        ok, spent, remaining = check_budget(conn, config["budget"]["max_usd"], user_id=user_id)
+        # Search-side cost: count + sum cost from this user's `costs`
+        # rows where operation='embed_query'. We can't read query_cache
+        # for this — it's intentionally cross-user (same query text →
+        # same vector, dedupe paid embeds across the household).
+        query_stats_row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(estimated_cost_usd), 0) AS spent "
+            "FROM costs WHERE operation = 'embed_query' AND user_id = %s",
+            (user_id,),
         ).fetchone()
         # Backlog surface for the current prompt version. `DEFAULT_MODEL`
         # combines backend.model_id + PROMPT_VERSION, so a prompt bump
@@ -1805,15 +2009,16 @@ def create_app(
         pending_row = conn.execute(
             """SELECT COUNT(*) FROM messages m
                LEFT JOIN message_summaries s
-                 ON s.message_id = m.id AND s.model = %s
-               WHERE s.message_id IS NULL""",
-            (_SUMMARY_KEY,),
+                 ON s.message_id = m.id AND s.user_id = m.user_id AND s.model = %s
+               WHERE m.user_id = %s AND s.message_id IS NULL""",
+            (_SUMMARY_KEY, user_id),
         ).fetchone()
         rate_row = conn.execute(
             """SELECT COUNT(*) FROM message_summaries
                WHERE model = %s
+                 AND user_id = %s
                  AND created_at::timestamptz > NOW() - INTERVAL '10 minutes'""",
-            (_SUMMARY_KEY,),
+            (_SUMMARY_KEY, user_id),
         ).fetchone()
         summary_pending = int(pending_row[0] or 0)
         summary_rate_per_sec = round((int(rate_row[0] or 0)) / 600.0, 3)
@@ -1830,8 +2035,8 @@ def create_app(
             "date_newest": dates["newest"],
             "total_cost_usd": round(total_cost, 4),
             "budget_remaining_usd": round(remaining, 4),
-            "query_embeds": int(query_count_row[0] or 0),
-            "query_embed_cost_usd": round(float(query_cost_row[0] or 0.0), 6),
+            "query_embeds": int(query_stats_row["n"] or 0),
+            "query_embed_cost_usd": round(float(query_stats_row["spent"] or 0.0), 6),
             "summary_pending": summary_pending,
             "summary_rate_per_sec": summary_rate_per_sec,
             "summary_eta_seconds": summary_eta_seconds,
@@ -1854,14 +2059,30 @@ def create_app(
     # one-shot, not a daemon — it never writes job_progress.
     _DAEMON_STALE_SECONDS = 90
 
-    # Map API-surface key → `job_progress.job_id`. Keeps the UI contract
-    # ("frontfill/backfill/summarize") while the DB uses the CLI's
-    # subcommand names ("watch/update/summarize").
+    # Map API-surface key → `job_progress.job_id` *prefix*. The actual
+    # row key in multi-tenant mode is "{prefix}:{user_id}" so each user
+    # gets their own job_progress row + log file, and concurrent runs
+    # across users don't collide. Keeps the UI contract ("frontfill/
+    # backfill/summarize") while the DB uses the CLI's subcommand names
+    # ("watch/update/summarize") under per-user keys.
     _DAEMON_JOB_IDS = {
         "frontfill": "watch",
         "backfill": "update",
         "summarize": "summarize",
     }
+
+    def _user_job_id(job_key: str, user_id: str) -> str:
+        return f"{_DAEMON_JOB_IDS[job_key]}:{user_id}"
+
+    def _user_email(user_id: str) -> str | None:
+        """Look up a user's email by user_id. Used to thread --email
+        into the spawned daemon so it picks the right broker entry."""
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute("SELECT email FROM users WHERE id = %s", (user_id,)).fetchone()
+        finally:
+            conn.close()
+        return row["email"] if row else None
 
     def _daemon_status(job_id: str) -> dict:
         """Read the latest `job_progress` row for `job_id` and derive
@@ -1980,17 +2201,25 @@ def create_app(
             pid_path.unlink(missing_ok=True)
             return {"ok": True, "detail": "process was already gone"}
 
-    def _spawn_daemon(job_key: str, log_filename: str, extra_args: list[str]):
-        """Spawn a detached daemon subprocess. Liveness is checked via
-        `_daemon_status(job_id)` (heartbeat on `job_progress`); no pid
-        file is written — the daemon itself records `pid` via
-        `JobProgress.__init__` on startup. 409 if already running.
+    def _spawn_daemon(job_key: str, log_filename: str, extra_args: list[str], user_id: str):
+        """Spawn a detached daemon subprocess for a specific user.
+        Threads `--email <user>` into the CLI so the subprocess pulls
+        from the right broker entry, and uses a per-user job_progress
+        key so two users' daemons don't collide on a single global row.
+        409 if a daemon is already running for THIS user.
         """
         from fastapi.responses import JSONResponse
 
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
-        job_id = _DAEMON_JOB_IDS[job_key]
+        email = _user_email(user_id)
+        if not email:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": f"no user row for {user_id}"},
+            )
+
+        job_id = _user_job_id(job_key, user_id)
         status = _daemon_status(job_id)
         if status["running"]:
             return JSONResponse(
@@ -1998,21 +2227,25 @@ def create_app(
                 content={"ok": False, "error": f"already running (pid {status['pid']})"},
             )
 
-        argv = gmail_search_command() + extra_args + ["--data-dir", str(data_dir)]
-        pid = spawn_detached(argv, data_dir / log_filename)
-        return {"ok": True, "pid": pid}
+        # Prefix the log filename with the user_id so simultaneous
+        # backfills land in separate files (and cleanup is per-user).
+        log_path = data_dir / f"{user_id}-{log_filename}"
+        argv = gmail_search_command() + extra_args + ["--email", email, "--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, log_path)
+        return {"ok": True, "pid": pid, "user_id": user_id, "email": email}
 
-    def _stop_daemon(job_key: str):
+    def _stop_daemon(job_key: str, user_id: str):
         """SIGTERM the pid recorded in `job_progress.pid` for this
-        daemon. Idempotent: 404 when the heartbeat says not running,
-        200 otherwise (even if the OS says the process is already gone).
+        user's daemon. Idempotent: 404 when the heartbeat says not
+        running, 200 otherwise (even if the OS says the process is
+        already gone).
         """
         import os
         import signal
 
         from fastapi.responses import JSONResponse
 
-        job_id = _DAEMON_JOB_IDS[job_key]
+        job_id = _user_job_id(job_key, user_id)
         status = _daemon_status(job_id)
         if not status["running"] or not status["pid"]:
             return JSONResponse(status_code=404, content={"ok": False, "error": "not running"})
@@ -2052,19 +2285,31 @@ def create_app(
         }
 
     @app.get("/api/jobs/running")
-    async def api_jobs_running():
-        """Everything /settings needs: all running job_progress rows +
-        disk usage + per-daemon (frontfill/backfill/summarize)
-        authoritative liveness derived from `job_progress.updated_at`.
-        Running rows are enriched with rate_per_sec + eta_seconds when
-        the baseline + elapsed time permit it.
+    async def api_jobs_running(user_id: str = Depends(require_user_id)):
+        """Everything /settings needs: this user's running job_progress
+        rows + disk usage + per-daemon (frontfill/backfill/summarize)
+        authoritative liveness derived from this user's per-key rows
+        ("watch:<uid>", "update:<uid>", "summarize:<uid>"). Running
+        rows are enriched with rate_per_sec + eta_seconds when the
+        baseline + elapsed time permit it.
         """
         import shutil as _shutil
 
         from gmail_search.store.db import JobProgress
 
         jobs = JobProgress.get(db_path) or []
-        enriched = [_enrich_with_eta(j) for j in jobs]
+        # Show only this user's per-key rows + the legacy global rows
+        # (no `:` suffix) for back-compat with daemons that haven't been
+        # restarted yet. Once everything's per-user we can drop the
+        # legacy filter — for now it's belt-and-braces.
+        suffix = f":{user_id}"
+
+        def _belongs(j: dict) -> bool:
+            jid = j.get("job_id", "")
+            return jid.endswith(suffix) or ":" not in jid
+
+        scoped = [j for j in jobs if _belongs(j)]
+        enriched = [_enrich_with_eta(j) for j in scoped]
         running = [j for j in enriched if j["status"] == "running"]
         usage = _shutil.disk_usage(str(data_dir))
         return {
@@ -2075,9 +2320,9 @@ def create_app(
                 "used_bytes": usage.used,
                 "free_bytes": usage.free,
             },
-            "frontfill": _daemon_status(_DAEMON_JOB_IDS["frontfill"]),
-            "backfill": _daemon_status(_DAEMON_JOB_IDS["backfill"]),
-            "summarize": _daemon_status(_DAEMON_JOB_IDS["summarize"]),
+            "frontfill": _daemon_status(_user_job_id("frontfill", user_id)),
+            "backfill": _daemon_status(_user_job_id("backfill", user_id)),
+            "summarize": _daemon_status(_user_job_id("summarize", user_id)),
         }
 
     # ── OAuth status + re-auth ──────────────────────────────────────────
@@ -2135,44 +2380,55 @@ def create_app(
         )
 
     @app.post("/api/jobs/frontfill")
-    async def api_jobs_frontfill(interval: int = Query(120, ge=10, le=86400)):
-        """Start the continuous watch daemon: sync new messages every
-        `interval` seconds, then extract/embed/reindex. Liveness is
-        tracked via the `watch` row in `job_progress` (heartbeat).
+    async def api_jobs_frontfill(
+        interval: int = Query(120, ge=10, le=86400),
+        user_id: str = Depends(require_user_id),
+    ):
+        """Start this user's continuous watch daemon: sync new messages
+        every `interval` seconds, then extract/embed/reindex. Liveness
+        is tracked via the `watch:<user_id>` row in `job_progress`.
         """
         return _spawn_daemon(
             job_key="frontfill",
             log_filename="watch.log",
             extra_args=["watch", "--interval", str(interval)],
+            user_id=user_id,
         )
 
     @app.post("/api/jobs/frontfill/stop")
-    async def api_jobs_frontfill_stop():
-        return _stop_daemon("frontfill")
+    async def api_jobs_frontfill_stop(user_id: str = Depends(require_user_id)):
+        return _stop_daemon("frontfill", user_id)
 
     @app.post("/api/jobs/backfill")
-    async def api_jobs_backfill(min_free_gb: float = Query(5.0, ge=0.1, le=10000.0)):
-        """Pull older messages through the full pipeline. Runs forever
-        via `--loop`: once caught up (or if a cycle crashes), sleeps 5
-        min and resumes. Pauses batches when free disk < min_free_gb.
+    async def api_jobs_backfill(
+        min_free_gb: float = Query(5.0, ge=0.1, le=10000.0),
+        user_id: str = Depends(require_user_id),
+    ):
+        """Pull this user's older messages through the full pipeline.
+        Runs forever via `--loop`: once caught up (or if a cycle
+        crashes), sleeps 5 min and resumes. Pauses batches when free
+        disk < min_free_gb.
         """
         return _spawn_daemon(
             job_key="backfill",
             log_filename="backfill.log",
             extra_args=["update", "--min-free-gb", str(min_free_gb), "--loop"],
+            user_id=user_id,
         )
 
     @app.post("/api/jobs/backfill/stop")
-    async def api_jobs_backfill_stop():
-        return _stop_daemon("backfill")
+    async def api_jobs_backfill_stop(user_id: str = Depends(require_user_id)):
+        return _stop_daemon("backfill", user_id)
 
     @app.post("/api/jobs/summarize")
     async def api_jobs_summarize(
         concurrency: int = Query(12, ge=1, le=64),
         batch_size: int = Query(1, ge=1, le=16),
+        user_id: str = Depends(require_user_id),
     ):
-        """Run `gmail-search summarize` in the background. Rate + ETA
-        land in /api/jobs/running via the `summarize` job_progress row.
+        """Run `gmail-search summarize` for this user in the background.
+        Rate + ETA land in /api/jobs/running via the
+        `summarize:<user_id>` row.
         """
         return _spawn_daemon(
             job_key="summarize",
@@ -2184,10 +2440,11 @@ def create_app(
                 "--batch-size",
                 str(batch_size),
             ],
+            user_id=user_id,
         )
 
     @app.post("/api/jobs/summarize/stop")
-    async def api_jobs_summarize_stop():
-        return _stop_daemon("summarize")
+    async def api_jobs_summarize_stop(user_id: str = Depends(require_user_id)):
+        return _stop_daemon("summarize", user_id)
 
     return app

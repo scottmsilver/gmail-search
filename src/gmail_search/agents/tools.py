@@ -58,13 +58,40 @@ def _clip(text: str, cap: int) -> str:
     return text[: cap - 32] + f"… [truncated: original {len(text)} chars]"
 
 
-async def _get(path: str, *, params: dict | None = None, base_url: str | None = None) -> dict:
+def _service_headers(user_id: str | None) -> dict[str, str]:
+    """Build the headers MCP/agent tools attach to /api/* calls so
+    `require_user_id` on the FastAPI side scopes the request to the
+    deep-mode session's user. The admin-token check is constant-time
+    on the receiving end; without the token, X-User-Id is ignored
+    (raises 401), so the bearer + X-User-Id pair is what unlocks the
+    cross-user scoping path."""
+    if user_id is None:
+        return {}
+    admin = os.environ.get("GMAIL_MCP_ADMIN_TOKEN")
+    if not admin:
+        # No admin token configured — fall through with no scoping
+        # headers so /api/* falls back to the bootstrap user. This
+        # matches single-pool behaviour.
+        return {"X-User-Id": user_id}
+    return {"X-User-Id": user_id, "Authorization": f"Bearer {admin}"}
+
+
+async def _get(
+    path: str,
+    *,
+    params: dict | None = None,
+    base_url: str | None = None,
+    user_id: str | None = None,
+) -> dict:
     """ASYNC httpx call. Critical: the retrieval tools run INSIDE the
     same FastAPI process that serves /api/search + friends. A sync
     client call from an async request handler deadlocks the event
     loop (tool waits on the socket, uvicorn can't accept the new
     inbound request because its event loop is blocked). Async
     yields while waiting, so the inbound handler runs and replies.
+
+    `user_id`, when given, scopes the call to that user via the
+    service-token + X-User-Id pair. None => single-pool fallback.
 
     4xx / 5xx responses are NOT raised — they're returned as
     `{error: "<body>"}` so the LLM sees the server's message as a
@@ -73,16 +100,22 @@ async def _get(path: str, *, params: dict | None = None, base_url: str | None = 
     """
     url = (base_url or _default_base_url()) + path
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.get(url, params=params or {})
+        resp = await client.get(url, params=params or {}, headers=_service_headers(user_id))
         if resp.status_code >= 400:
             return _error_payload(resp)
         return resp.json()
 
 
-async def _post(path: str, *, json: dict, base_url: str | None = None) -> dict:
+async def _post(
+    path: str,
+    *,
+    json: dict,
+    base_url: str | None = None,
+    user_id: str | None = None,
+) -> dict:
     url = (base_url or _default_base_url()) + path
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.post(url, json=json)
+        resp = await client.post(url, json=json, headers=_service_headers(user_id))
         if resp.status_code >= 400:
             return _error_payload(resp)
         return resp.json()
@@ -104,7 +137,14 @@ def _error_payload(resp) -> dict:
 # ── search_emails ──────────────────────────────────────────────────
 
 
-async def search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int = 10) -> dict:
+async def search_emails(
+    query: str,
+    date_from: str = "",
+    date_to: str = "",
+    top_k: int = 10,
+    *,
+    user_id: str | None = None,
+) -> dict:
     """Search for messages by relevance (semantic + BM25 blend).
 
     Use this for "what did we decide about X" / "find messages
@@ -121,7 +161,7 @@ async def search_emails(query: str, date_from: str = "", date_to: str = "", top_
         params["date_from"] = date_from
     if date_to:
         params["date_to"] = date_to
-    data = await _get("/api/search", params=params)
+    data = await _get("/api/search", params=params, user_id=user_id)
     # cite_ref = full thread_id. Earlier we used the first 8 hex chars
     # as a shorter shorthand, but that's a 32-bit namespace and
     # collisions occur in real mailboxes (e.g. two emails arriving in
@@ -144,6 +184,8 @@ async def query_emails(
     has_attachment: bool | None = None,
     order_by: str = "date_desc",
     limit: int = 20,
+    *,
+    user_id: str | None = None,
 ) -> dict:
     """Filter messages by structured metadata. Use when you know WHAT
     fields to filter on — no relevance ranking. Returns a list of
@@ -171,7 +213,7 @@ async def query_emails(
         params["label"] = label
     if has_attachment is not None:
         params["has_attachment"] = str(has_attachment).lower()
-    data = await _get("/api/query", params=params)
+    data = await _get("/api/query", params=params, user_id=user_id)
     for row in data.get("results", []):
         row.setdefault("cite_ref", row.get("thread_id") or "")
     return data
@@ -180,12 +222,12 @@ async def query_emails(
 # ── get_thread ─────────────────────────────────────────────────────
 
 
-async def get_thread(thread_id: str) -> dict:
+async def get_thread(thread_id: str, *, user_id: str | None = None) -> dict:
     """Fetch every message in a thread with body text + attachment
     manifest. Bodies clipped to 20k chars (an `original_chars` field
     tells you how much was dropped). Use AFTER search/query when you
     need the actual words a message contained."""
-    data = await _get(f"/api/thread/{thread_id}")
+    data = await _get(f"/api/thread/{thread_id}", user_id=user_id)
     for msg in data.get("messages", []):
         original = msg.get("body_text") or ""
         clipped = _clip(original, THREAD_BODY_CHAR_CAP)
@@ -205,7 +247,7 @@ async def get_thread(thread_id: str) -> dict:
 BATCH_MAX_ITEMS = 100
 
 
-async def search_emails_batch(searches: list[dict]) -> dict:
+async def search_emails_batch(searches: list[dict], *, user_id: str | None = None) -> dict:
     """Run many semantic searches concurrently. Each item is a dict
     matching `search_emails`'s signature: `{query, date_from?,
     date_to?, top_k?}`. Use this whenever you have ≥1 search to
@@ -222,11 +264,11 @@ async def search_emails_batch(searches: list[dict]) -> dict:
         return {"error": "searches must be a non-empty list of dicts"}
     if len(searches) > BATCH_MAX_ITEMS:
         return {"error": f"searches cap is {BATCH_MAX_ITEMS}; got {len(searches)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[search_emails(**s) for s in searches])
+    results = await _asyncio.gather(*[search_emails(**s, user_id=user_id) for s in searches])
     return {"results": [{"input": s, "result": r} for s, r in zip(searches, results)]}
 
 
-async def query_emails_batch(filters: list[dict]) -> dict:
+async def query_emails_batch(filters: list[dict], *, user_id: str | None = None) -> dict:
     """Run many structured filters concurrently. Each item is a dict
     matching `query_emails`'s signature: any of `{sender,
     subject_contains, date_from, date_to, label, has_attachment,
@@ -242,11 +284,11 @@ async def query_emails_batch(filters: list[dict]) -> dict:
         return {"error": "filters must be a non-empty list of dicts"}
     if len(filters) > BATCH_MAX_ITEMS:
         return {"error": f"filters cap is {BATCH_MAX_ITEMS}; got {len(filters)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[query_emails(**f) for f in filters])
+    results = await _asyncio.gather(*[query_emails(**f, user_id=user_id) for f in filters])
     return {"results": [{"input": f, "result": r} for f, r in zip(filters, results)]}
 
 
-async def get_thread_batch(thread_ids: list[str]) -> dict:
+async def get_thread_batch(thread_ids: list[str], *, user_id: str | None = None) -> dict:
     """Fetch many threads concurrently in a single tool call. Use
     this — not N sequential `get_thread` calls — whenever you need
     multiple threads' bodies. Same per-thread response shape as
@@ -265,14 +307,14 @@ async def get_thread_batch(thread_ids: list[str]) -> dict:
         return {"error": "thread_ids must be a non-empty list of strings"}
     if len(thread_ids) > BATCH_MAX_ITEMS:
         return {"error": f"thread_ids cap is {BATCH_MAX_ITEMS}; got {len(thread_ids)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[get_thread(tid) for tid in thread_ids])
+    results = await _asyncio.gather(*[get_thread(tid, user_id=user_id) for tid in thread_ids])
     return {"results": [{"thread_id": tid, "result": r} for tid, r in zip(thread_ids, results)]}
 
 
 # ── sql_query ──────────────────────────────────────────────────────
 
 
-async def sql_query(query: str) -> dict:
+async def sql_query(query: str, *, user_id: str | None = None) -> dict:
     """Run a read-only SELECT against the messages DB (Postgres +
     ParadeDB). Same safety gate as chat mode: only SELECT/WITH, no
     DDL/DML, no introspection of pg_catalog / information_schema,
@@ -303,7 +345,7 @@ async def sql_query(query: str) -> dict:
     Use for aggregations, multi-field OR, JOINs, NOT EXISTS, relative-
     date arithmetic — anything search_emails / query_emails can't
     express. Cells longer than 8000 chars are clipped."""
-    data = await _post("/api/sql", json={"query": query})
+    data = await _post("/api/sql", json={"query": query}, user_id=user_id)
     # Clip huge cells so one row with a mega body_text doesn't blow
     # the model's context. Match the TS-side cap for consistency.
     clipped_rows: list[list] = []
@@ -319,7 +361,7 @@ async def sql_query(query: str) -> dict:
     return data
 
 
-async def sql_query_batch(queries: list[str]) -> dict:
+async def sql_query_batch(queries: list[str], *, user_id: str | None = None) -> dict:
     """Run many independent SELECT queries concurrently in a single
     tool call. Use this — not N sequential `sql_query` calls — when
     you have multiple independent queries (different time windows,
@@ -341,21 +383,25 @@ async def sql_query_batch(queries: list[str]) -> dict:
         return {"error": "queries must be a non-empty list of SQL strings"}
     if len(queries) > BATCH_MAX_ITEMS:
         return {"error": f"queries cap is {BATCH_MAX_ITEMS}; got {len(queries)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[sql_query(q) for q in queries])
+    results = await _asyncio.gather(*[sql_query(q, user_id=user_id) for q in queries])
     return {"results": [{"query": q, "result": r} for q, r in zip(queries, results)]}
 
 
 # ── describe_schema ────────────────────────────────────────────────
 
 
-async def describe_schema() -> dict:
+async def describe_schema(*, user_id: str | None = None) -> dict:
     """Return the markdown schema documentation for every table the
     `sql_query` tool can read. Use this BEFORE writing a non-trivial
     `sql_query` if you're unsure about a column name — the docs include
     canonical names (e.g. `from_addr` not `sender`, `body_text` not
     `body`, `id` not `message_id`), per-column notes, and BM25
-    guidance. Cheap call; result is short (~few KB)."""
-    return await _get("/api/sql_schema")
+    guidance. Cheap call; result is short (~few KB).
+
+    Multi-tenant: forwards the session's user_id so the response
+    includes a preamble pinning the active user_id — the LLM uses
+    this to scope every SELECT it writes."""
+    return await _get("/api/sql_schema", user_id=user_id)
 
 
 # ── get_attachment ─────────────────────────────────────────────────
@@ -364,7 +410,7 @@ async def describe_schema() -> dict:
 _ATTACHMENT_VALID_MODES = ("meta", "text", "rendered_pages")
 
 
-async def get_attachment(attachment_id: int, mode: str = "text") -> dict:
+async def get_attachment(attachment_id: int, mode: str = "text", *, user_id: str | None = None) -> dict:
     """Fetch an email attachment in one of three shapes:
 
     - `meta`: filename + mime_type + size_bytes + thread_id, no body.
@@ -381,13 +427,13 @@ async def get_attachment(attachment_id: int, mode: str = "text") -> dict:
     if mode not in _ATTACHMENT_VALID_MODES:
         return {"error": f"invalid mode {mode!r}; must be one of {list(_ATTACHMENT_VALID_MODES)}"}
     if mode == "meta":
-        return await _get(f"/api/attachment/{attachment_id}/meta")
+        return await _get(f"/api/attachment/{attachment_id}/meta", user_id=user_id)
     if mode == "text":
-        return await _get(f"/api/attachment/{attachment_id}/text")
-    return await _get(f"/api/attachment/{attachment_id}/render_pages")
+        return await _get(f"/api/attachment/{attachment_id}/text", user_id=user_id)
+    return await _get(f"/api/attachment/{attachment_id}/render_pages", user_id=user_id)
 
 
-async def get_attachment_batch(items: list[dict]) -> dict:
+async def get_attachment_batch(items: list[dict], *, user_id: str | None = None) -> dict:
     """Fetch many attachments concurrently. Each item is a dict
     matching `get_attachment`'s signature: `{attachment_id, mode?}`
     where `mode` defaults to `"text"`.
@@ -402,7 +448,7 @@ async def get_attachment_batch(items: list[dict]) -> dict:
         return {"error": "items must be a non-empty list of dicts"}
     if len(items) > BATCH_MAX_ITEMS:
         return {"error": f"items cap is {BATCH_MAX_ITEMS}; got {len(items)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[get_attachment(**it) for it in items])
+    results = await _asyncio.gather(*[get_attachment(**it, user_id=user_id) for it in items])
     return {"results": [{"input": it, "result": r} for it, r in zip(items, results)]}
 
 

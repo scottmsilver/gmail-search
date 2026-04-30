@@ -240,54 +240,89 @@ CREATE INDEX CONCURRENTLY idx_embeddings_user ON embeddings (user_id);
 #### Step 5: ParadeDB BM25 index — partition or filter?
 **Concern (review #3)**: `messages_bm25_idx` is a `pg_search` BM25 index. Adding a `user_id` column doesn't break the index, but our BM25 queries (`WHERE id @@@ '...'`) need to add `AND user_id = $1`. ParadeDB supports compound predicates; verify in Phase 0d that this works without a recall hit, or partition the index per user (more work, real isolation).
 
-### 3b. Per-user OAuth tokens
+### 3b. Per-user Gmail OAuth — broker-simplified version (REVISED 2026-04-29)
 
-```sql
-CREATE TABLE IF NOT EXISTS user_gmail_tokens (
-    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    token_ciphertext BYTEA NOT NULL,         -- AES-256-GCM ciphertext
-    nonce BYTEA NOT NULL,                    -- 12-byte GCM nonce
-    aad TEXT NOT NULL,                       -- = user_id (binds ciphertext to row)
-    scope TEXT NOT NULL,
-    encryption_key_version INT NOT NULL DEFAULT 1,
-    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
+The original design had us running our own OAuth client per app, storing
+encrypted refresh tokens in `user_gmail_tokens`, and rotating an
+AES-256-GCM KEK across versions. **That whole pile evaporates** now
+that the silver-oauth broker (../silver-oauth) is doing identity
+already — the broker is the OAuth client for the entire homelab and
+already supports `scope=gmail.readonly,gmail.compose,drive.file,...`
+(see `../silver-oauth/docs/consumer-integration.md`).
 
-**Module `src/gmail_search/auth/token_vault.py`**:
-- `wrap(plaintext: bytes, *, user_id: str, key_version: int = LATEST) -> tuple[bytes, bytes]` → `(ciphertext, nonce)`.
-- `unwrap(ciphertext: bytes, nonce: bytes, *, user_id: str, key_version: int) -> bytes`.
-- Uses `cryptography.hazmat.primitives.ciphers.aead.AESGCM` with `user_id` as additional_authenticated_data. Copying ciphertext between rows fails decryption (review #9).
-- KEK lookup table by version: `_KEKS = {1: bytes_from_env("USER_TOKEN_KEK_V1"), 2: ...}`. Rotation = add new env var, set new version as LATEST, re-wrap on next auth.
+**The whole 3b becomes:**
+- New endpoint `/api/auth/connect-gmail?return_url=…` — same shape as
+  /api/auth/login but with `scope=gmail.readonly` (or whatever scopes
+  we need). 302s to broker /start.
+- Broker callback hits our existing `/api/auth/callback` (idempotent —
+  the broker stores the granted scopes server-side, no per-call work
+  on our end).
+- `src/gmail_search/gmail/auth.py` rewrite: drop
+  `InstalledAppFlow.run_local_server`. Replace with one function:
+  ```python
+  def gmail_credentials_for(email: str) -> google.oauth2.Credentials:
+      r = requests.get(
+          f"{BROKER_URL}/token",
+          params={"email": email, "scope": "gmail.readonly"},
+          headers={"Authorization": f"Bearer {SILVER_OAUTH_BEARER}"},
+          timeout=15,
+      )
+      if r.status_code == 404: raise PermissionError(...)
+      r.raise_for_status()
+      return Credentials(token=r.json()["access_token"])
+  ```
+- **No `user_gmail_tokens` table.** Broker owns the refresh token,
+  scopes, expiry — we never see them, never store them. Don't cache
+  the access token (60-min ttl, broker refreshes on demand).
+- New env: `SILVER_OAUTH_BEARER` (broker's app-bearer token; fetch
+  via `firebase functions:secrets:access APP_BEARER_TOKEN
+  --project=silver-oauth-broker`).
 
-**Replace `src/gmail_search/gmail/auth.py`** (review #6):
-- Current code calls `InstalledAppFlow.run_local_server(port=0)` — opens a browser ON THE HOST. Useless for web flow.
-- Rewrite as web OAuth: `/api/auth/connect-gmail` initiates auth code flow (returns Google's authorization URL), `/api/auth/connect-gmail/callback` exchanges code → tokens → wraps + stores in `user_gmail_tokens`.
-- The CLI flow stays for dev (`gmail-search auth --user <email>` does the local-server flow + writes to DB instead of file).
+**What this kills:**
+- Module `auth/token_vault.py` — never written.
+- AES-GCM, KEK rotation, ciphertext-binding-via-AAD — moot.
+- `USER_TOKEN_KEK*` env vars — moot.
+- Risk #5 from "Risks left on the table" (USER_TOKEN_KEK lifecycle) — gone.
 
-### 3c. Sync scheduler (review #7 — Gmail quota is per-Cloud-Project)
+**What remains:**
+- We still need to *trigger* the connect-Gmail flow on first sign-in
+  for a new user (broker only stores the scopes the user has actually
+  granted, so a sign-in-only invitee has no Gmail tokens until they
+  click "Connect Gmail").
+- A small UI surface: a "Connect Gmail" button + a "Gmail connected"
+  status pill in Settings, both proxied through us so we can hand the
+  user a single domain.
+
+### 3c. Sync scheduler — broker-simplified (REVISED 2026-04-29)
+
+The original design carried a project-level `TokenBucket` because we
+were the OAuth client; the Cloud Project quota was ours and N
+concurrent users would thunder-herd into 429s. **Broker pivot moves
+that quota to the broker's Cloud Project**, not ours — every
+per-user sync calls `broker /token`, which uses broker-side
+credentials, against broker's quota. We just back off when the
+broker's `/token` or the resulting Gmail call returns 429.
 
 ```python
 # src/gmail_search/sync/supervisor.py
 class SyncSupervisor:
-    """One process that fans out per-user sync jobs across all users.
-
-    The Gmail API quota is per-Cloud-Project (250 quota units/sec for
-    messages.get, etc.). N concurrent users hammering the API would
-    thundering-herd into 429s. Use a project-level token bucket that
-    every per-user sync acquires from before each Gmail API call.
-    Per-user backoff (existing in client.py) handles transient errors;
-    the bucket handles steady-state quota."""
-    def __init__(self, max_concurrent_users=3, project_quota_per_sec=200):
-        self.bucket = TokenBucket(rate=project_quota_per_sec)
+    """Round-robins per-user sync jobs. Concurrency-capped so we don't
+    fan out unboundedly; rate-limited via response-driven backoff
+    rather than a token bucket because broker owns the project quota."""
+    def __init__(self, max_concurrent_users: int = 3):
         self.semaphore = asyncio.Semaphore(max_concurrent_users)
+
     async def run_forever(self):
         while True:
             for user in users_due_for_sync():
                 async with self.semaphore:
-                    await sync_one_user(user, bucket=self.bucket)
+                    await sync_one_user(user)
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 ```
+
+If the broker quota becomes the bottleneck (likely at 5+ active
+users syncing concurrently), the lever is "give the broker its own
+GCP project tier upgrade" — operational, not architectural.
 
 ### 3d. Per-user ScaNN indexes
 
@@ -345,7 +380,7 @@ async def sql_query_batch(queries, *, user_id):
                        headers={"X-User-Id": user_id})
 ```
 
-**The FastAPI backend MUST NOT trust `X-User-Id` blindly** — it's set by the MCP server, but the MCP server is in the same trust domain. Real auth happens at FastAPI's edge (Bearer JWT from NextAuth). For MCP-originated requests: a **service token** scheme — the MCP server has its own bearer token; FastAPI verifies it AND honors `X-User-Id` only when the service token is present. Otherwise → 401.
+**The FastAPI backend MUST NOT trust `X-User-Id` blindly** — it's set by the MCP server, but the MCP server is in the same trust domain. Real auth happens at FastAPI's edge (session cookie from the broker round-trip). For MCP-originated requests: a **service token** scheme — the MCP server has its own bearer token (we already have `GMAIL_MCP_ADMIN_TOKEN` for the same purpose), FastAPI verifies it AND honors `X-User-Id` only when the service token is present. Otherwise → 401.
 
 This is the biggest failure mode in v1. Without it, any leaked MCP admin token = full corpus access for all tenants.
 

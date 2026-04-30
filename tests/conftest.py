@@ -111,10 +111,51 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
     monkeypatch.setenv("DB_BACKEND", "postgres")
     monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(schema_name))
 
+    # Multi-tenant Phase 2/3: every per-user table requires a non-NULL
+    # user_id and `resolve_write_user_id` looks up `users` by email.
+    # Tests don't sign anyone in, so seed a bootstrap row so write
+    # paths don't blow up with "bootstrap user not found." Clear the
+    # process-level cache too — a previous test in this process may
+    # have memo'd a user_id that doesn't exist in this fresh schema.
+    from gmail_search.auth import write_user as _write_user_mod
+
+    _write_user_mod._BOOTSTRAP_CACHE.clear()
+    _seed_bootstrap_user(schema_name)
+
     try:
         yield {"kind": "postgres", "schema": schema_name}
     finally:
+        _write_user_mod._BOOTSTRAP_CACHE.clear()
         _drop_pg_schema(schema_name)
+
+
+def _seed_bootstrap_user(schema_name: str) -> None:
+    """Insert a `users` row matching `GMS_BOOTSTRAP_EMAIL` (default
+    scott) so `resolve_write_user_id` succeeds in tests that touch any
+    write path. Uses init_db (which runs pg_schema.sql) via the
+    project's get_connection helper — same path tests use, same
+    transaction handling. Idempotent: ON CONFLICT keeps one row."""
+    import os
+    from pathlib import Path
+
+    from gmail_search.store.db import get_connection, init_db
+
+    # init_db is the canonical schema applier. Tests typically call it
+    # themselves; doing it here too is a harmless no-op (idempotent
+    # CREATE TABLE IF NOT EXISTS) but ensures the bootstrap insert
+    # below has `users` to write to even for tests that never call
+    # init_db directly.
+    init_db(Path("unused.db"))
+    email = os.environ.get("GMS_BOOTSTRAP_EMAIL", "scottmsilver@gmail.com").lower()
+    conn = get_connection(Path("unused.db"))
+    try:
+        conn.execute(
+            "INSERT INTO users (id, email) VALUES (%s, %s) ON CONFLICT (email) DO NOTHING",
+            ("u_test_bootstrap", email),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.fixture

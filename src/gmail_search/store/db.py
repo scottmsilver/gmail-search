@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Optional
 
 # The canonical schema now lives in `pg_schema.sql`. The SQLite `SCHEMA`
 # string constant — and its inline DDL branch below — was removed during
@@ -273,17 +274,32 @@ def _init_db_pg() -> None:
                 return
 
 
-def rebuild_thread_summary(db_path: Path) -> int:
-    """Precompute thread metadata for fast search ranking. Returns thread count."""
+def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> int:
+    """Precompute thread metadata for fast search ranking. Returns thread count.
+
+    Per-user: rebuilds only the given user's thread_summary rows. Daemon
+    callers pass `user_id=None` and the bootstrap user is resolved.
+    Phase 3c per-user sync passes the syncing user's id explicitly.
+    """
     import json
 
+    from gmail_search.auth.write_user import resolve_write_user_id
+
     conn = get_connection(db_path)
+    uid = resolve_write_user_id(conn, user_id=user_id)
 
-    conn.execute("DELETE FROM thread_summary")
+    conn.execute("DELETE FROM thread_summary WHERE user_id = %s", (uid,))
 
+    # Pull user_id along with the thread fields — every thread is
+    # owned by the user whose messages compose it. The (user_id,
+    # thread_id) tuple is what makes the rebuilt rows multi-tenant
+    # safe: if two users somehow share a thread_id (shouldn't happen
+    # — Gmail thread_ids are per-account), they'd land in distinct
+    # thread_summary rows once the PK gets promoted in a follow-up.
     rows = conn.execute(
-        """SELECT thread_id, from_addr, date, labels, subject
-           FROM messages ORDER BY date"""
+        """SELECT thread_id, from_addr, date, labels, subject, user_id
+           FROM messages WHERE user_id = %s ORDER BY date""",
+        (uid,),
     ).fetchall()
 
     threads: dict[str, dict] = {}
@@ -295,6 +311,7 @@ def rebuild_thread_summary(db_path: Path) -> int:
                 "from_addrs": [],
                 "all_labels": set(),
                 "dates": [],
+                "user_id": r["user_id"],
             }
         t = threads[tid]
         t["from_addrs"].append(r["from_addr"])
@@ -307,8 +324,8 @@ def rebuild_thread_summary(db_path: Path) -> int:
         conn.execute(
             """INSERT INTO thread_summary
                (thread_id, subject, participants, all_from_addrs, all_labels,
-                message_count, date_first, date_last)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                message_count, date_first, date_last, user_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 tid,
                 t["subject"],
@@ -318,6 +335,7 @@ def rebuild_thread_summary(db_path: Path) -> int:
                 len(t["dates"]),
                 t["dates"][0],
                 t["dates"][-1],
+                t["user_id"],
             ),
         )
 
@@ -327,19 +345,30 @@ def rebuild_thread_summary(db_path: Path) -> int:
     return count
 
 
-def _load_message_embeddings(conn, limit=50000):
-    """Load message embeddings with metadata for clustering."""
+def _load_message_embeddings(conn, limit=50000, *, user_id: Optional[str] = None):
+    """Load message embeddings with metadata for clustering. Per-user
+    when `user_id` is given (the normal call path); otherwise loads
+    everything across users (legacy / dev-only)."""
     import struct
 
     import numpy as np
 
-    rows = conn.execute(
-        """SELECT e.message_id, e.embedding, m.subject, m.from_addr
-           FROM embeddings e JOIN messages m ON e.message_id = m.id
-           WHERE e.chunk_type = 'message'
-           ORDER BY m.date DESC LIMIT %s""",
-        (limit,),
-    ).fetchall()
+    if user_id is None:
+        rows = conn.execute(
+            """SELECT e.message_id, e.embedding, m.subject, m.from_addr
+               FROM embeddings e JOIN messages m ON e.message_id = m.id
+               WHERE e.chunk_type = 'message'
+               ORDER BY m.date DESC LIMIT %s""",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT e.message_id, e.embedding, m.subject, m.from_addr
+               FROM embeddings e JOIN messages m ON e.message_id = m.id
+               WHERE e.chunk_type = 'message' AND e.user_id = %s
+               ORDER BY m.date DESC LIMIT %s""",
+            (user_id, limit),
+        ).fetchall()
 
     return {
         "msg_ids": [r["message_id"] for r in rows],
@@ -507,18 +536,29 @@ def _auto_label_topics(conn):
         conn.commit()
 
 
-def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50) -> int:
-    """Build hierarchical topic tree using recursive bisecting k-means. Returns node count."""
+def rebuild_topics(
+    db_path: Path,
+    max_depth: int = 4,
+    min_cluster_size: int = 50,
+    *,
+    user_id: Optional[str] = None,
+) -> int:
+    """Build hierarchical topic tree using recursive bisecting k-means.
+    Per-user: clusters only the given user's messages, replaces only
+    that user's `topics` + `message_topics` rows. Returns node count."""
     import json
     import logging
 
     import numpy as np
 
+    from gmail_search.auth.write_user import resolve_write_user_id
+
     logger = logging.getLogger(__name__)
 
     conn = get_connection(db_path)
+    uid = resolve_write_user_id(conn, user_id=user_id)
 
-    data = _load_message_embeddings(conn)
+    data = _load_message_embeddings(conn, user_id=uid)
     n_msgs = len(data["msg_ids"])
     if n_msgs < min_cluster_size * 2:
         logger.warning(f"Not enough messages ({n_msgs}) for topic hierarchy")
@@ -540,20 +580,20 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
         min_cluster_size=min_cluster_size,
     )
 
-    conn.execute("DELETE FROM message_topics")
-    conn.execute("DELETE FROM topics")
+    conn.execute("DELETE FROM message_topics WHERE user_id = %s", (uid,))
+    conn.execute("DELETE FROM topics WHERE user_id = %s", (uid,))
 
     for topic_id, parent_id, depth, indices in nodes:
         top_senders, sample_subjects = _summarize_cluster(indices, data["subjects"], data["senders"])
         conn.execute(
-            "INSERT INTO topics (topic_id, parent_id, label, depth, message_count, top_senders, sample_subjects) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (topic_id, parent_id, "", depth, len(indices), json.dumps(top_senders), json.dumps(sample_subjects)),
+            "INSERT INTO topics (topic_id, parent_id, label, depth, message_count, top_senders, sample_subjects, user_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (topic_id, parent_id, "", depth, len(indices), json.dumps(top_senders), json.dumps(sample_subjects), uid),
         )
         # Messages belong to their leaf node and all ancestors
         for idx in indices:
             conn.execute(
-                "INSERT INTO message_topics (message_id, topic_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (data["msg_ids"][idx], topic_id),
+                "INSERT INTO message_topics (message_id, topic_id, user_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (data["msg_ids"][idx], topic_id, uid),
             )
 
     conn.commit()
@@ -566,11 +606,18 @@ def rebuild_topics(db_path: Path, max_depth: int = 4, min_cluster_size: int = 50
     return count
 
 
-def _extract_terms_from_messages(conn):
-    """Build a reverse index: lowercase term → set of message indices."""
+def _extract_terms_from_messages(conn, *, user_id: Optional[str] = None):
+    """Build a reverse index: lowercase term → set of message indices.
+    Per-user when `user_id` is given (the normal call path)."""
     import re
 
-    rows = conn.execute("SELECT id, subject, body_text, from_addr FROM messages").fetchall()
+    if user_id is None:
+        rows = conn.execute("SELECT id, subject, body_text, from_addr FROM messages").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, subject, body_text, from_addr FROM messages WHERE user_id = %s",
+            (user_id,),
+        ).fetchall()
 
     term_to_msgs: dict[str, set[int]] = {}
     abbrev_to_msgs: dict[str, set[int]] = {}
@@ -637,11 +684,22 @@ def _find_nearest_terms(query_centroid, candidate_centroids, candidate_terms, to
     return results
 
 
-def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occurrences=3, min_similarity=0.75) -> int:
+def rebuild_term_aliases(
+    db_path: Path,
+    min_term_len=2,
+    max_term_len=5,
+    min_occurrences=3,
+    min_similarity=0.75,
+    *,
+    user_id: Optional[str] = None,
+) -> int:
     """Discover term aliases using embedding nearest neighbors.
 
     For short terms (likely abbreviations), finds longer terms whose message
     embeddings cluster nearby — indicating they refer to the same concept.
+
+    Per-user: scans only the given user's messages + embeddings, replaces
+    only that user's `term_aliases` rows.
     """
     import json
     import logging
@@ -649,12 +707,18 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
 
     import numpy as np
 
+    from gmail_search.auth.write_user import resolve_write_user_id
+
     logger = logging.getLogger(__name__)
 
     conn = get_connection(db_path)
+    uid = resolve_write_user_id(conn, user_id=user_id)
 
-    # Load embeddings
-    emb_rows = conn.execute("SELECT message_id, embedding FROM embeddings WHERE chunk_type = 'message'").fetchall()
+    # Load embeddings (per-user)
+    emb_rows = conn.execute(
+        "SELECT message_id, embedding FROM embeddings WHERE chunk_type = 'message' AND user_id = %s",
+        (uid,),
+    ).fetchall()
     if not emb_rows:
         conn.close()
         return 0
@@ -668,8 +732,9 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
     vectors = np.array(vectors_list, dtype=np.float32)
     logger.info(f"Loaded {len(vectors)} embeddings for alias discovery")
 
-    # Build term → message index mapping (all terms + uppercase abbreviations)
-    term_to_msgs, abbrev_to_msgs, _, msg_ids = _extract_terms_from_messages(conn)
+    # Build term → message index mapping (all terms + uppercase abbreviations).
+    # Pass uid through so the term extractor scans only this user's messages.
+    term_to_msgs, abbrev_to_msgs, _, msg_ids = _extract_terms_from_messages(conn, user_id=uid)
 
     def _remap_to_emb_indices(term_map):
         result = {}
@@ -703,7 +768,7 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
 
     # For each short term, find long terms that co-occur via the reverse index
     logger.info("Discovering aliases via co-occurrence + embedding similarity...")
-    conn.execute("DELETE FROM term_aliases")
+    conn.execute("DELETE FROM term_aliases WHERE user_id = %s", (uid,))
     alias_count = 0
     from collections import Counter
 
@@ -734,23 +799,23 @@ def rebuild_term_aliases(db_path: Path, min_term_len=2, max_term_len=5, min_occu
         expansions = candidates[:3]
         if expansions:
             conn.execute(
-                "INSERT INTO term_aliases (term, expansions, similarity) VALUES (%s, %s, %s)",
-                (term, json.dumps([t for t, _ in expansions]), expansions[0][1]),
+                "INSERT INTO term_aliases (term, expansions, similarity, user_id) VALUES (%s, %s, %s, %s)",
+                (term, json.dumps([t for t, _ in expansions]), expansions[0][1], uid),
             )
             alias_count += 1
 
     conn.commit()
     logger.info(f"Discovered {alias_count} candidate aliases, validating with Gemini...")
 
-    _validate_aliases_with_llm(conn)
+    _validate_aliases_with_llm(conn, user_id=uid)
 
-    final_count = conn.execute("SELECT COUNT(*) FROM term_aliases").fetchone()[0]
+    final_count = conn.execute("SELECT COUNT(*) FROM term_aliases WHERE user_id = %s", (uid,)).fetchone()[0]
     conn.close()
     logger.info(f"Validated {final_count} term aliases")
     return final_count
 
 
-def _validate_aliases_with_llm(conn):
+def _validate_aliases_with_llm(conn, *, user_id: Optional[str] = None):
     """Use Gemini to filter out noise from candidate aliases.
 
     Sends all candidates in batches and removes ones Gemini marks as bad.
@@ -761,7 +826,13 @@ def _validate_aliases_with_llm(conn):
 
     logger = logging.getLogger(__name__)
 
-    rows = conn.execute("SELECT term, expansions, similarity FROM term_aliases").fetchall()
+    if user_id is None:
+        rows = conn.execute("SELECT term, expansions, similarity FROM term_aliases").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT term, expansions, similarity FROM term_aliases WHERE user_id = %s",
+            (user_id,),
+        ).fetchall()
     if not rows:
         return
 
@@ -813,13 +884,25 @@ def _validate_aliases_with_llm(conn):
         if bad_terms:
             protected = set()
             for term in bad_terms:
-                row = conn.execute("SELECT similarity FROM term_aliases WHERE term = %s", (term,)).fetchone()
+                if user_id is None:
+                    row = conn.execute("SELECT similarity FROM term_aliases WHERE term = %s", (term,)).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT similarity FROM term_aliases WHERE user_id = %s AND term = %s",
+                        (user_id, term),
+                    ).fetchone()
                 if row and row["similarity"] >= 0.25:
                     protected.add(term)
 
             removable = bad_terms - protected
             for term in removable:
-                conn.execute("DELETE FROM term_aliases WHERE term = %s", (term,))
+                if user_id is None:
+                    conn.execute("DELETE FROM term_aliases WHERE term = %s", (term,))
+                else:
+                    conn.execute(
+                        "DELETE FROM term_aliases WHERE user_id = %s AND term = %s",
+                        (user_id, term),
+                    )
             conn.commit()
             logger.info(
                 f"Removed {len(removable)} noise aliases via LLM validation"
@@ -830,25 +913,33 @@ def _validate_aliases_with_llm(conn):
         logger.warning(f"LLM alias validation failed, keeping all candidates: {e}")
 
 
-def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
-    """Build a word frequency dictionary from the email corpus for spell correction."""
+def rebuild_spell_dictionary(db_path: Path, data_dir: Path, *, user_id: Optional[str] = None) -> int:
+    """Build a word frequency dictionary from the email corpus for spell correction.
+
+    Per-user: scans only the given user's messages and writes to
+    `data/users/<user_id>/spell_dictionary.txt`. Falls back to the
+    legacy `data/spell_dictionary.txt` location when called without
+    a user_id (legacy single-pool path)."""
     import re
     from collections import Counter
 
+    from gmail_search.auth.write_user import resolve_write_user_id
+
     conn = get_connection(db_path)
+    uid = resolve_write_user_id(conn, user_id=user_id)
 
     word_counts: Counter = Counter()
 
-    # Extract words from subjects and body text
-    rows = conn.execute("SELECT subject, body_text FROM messages").fetchall()
+    # Extract words from subjects and body text (per-user)
+    rows = conn.execute("SELECT subject, body_text FROM messages WHERE user_id = %s", (uid,)).fetchall()
     for r in rows:
         for field in [r["subject"], r["body_text"]]:
             if field:
                 words = re.findall(r"[a-zA-Z]+", field.lower())
                 word_counts.update(w for w in words if len(w) >= 2)
 
-    # Also extract from sender names
-    rows = conn.execute("SELECT DISTINCT from_addr FROM messages").fetchall()
+    # Also extract from sender names (per-user)
+    rows = conn.execute("SELECT DISTINCT from_addr FROM messages WHERE user_id = %s", (uid,)).fetchall()
     for r in rows:
         addr = r["from_addr"]
         # Extract name part from "Name <email>"
@@ -862,8 +953,13 @@ def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
 
     conn.close()
 
-    # Write dictionary file (word\tfrequency format for SymSpell)
-    dict_path = data_dir / "spell_dictionary.txt"
+    # Write dictionary file (word\tfrequency format for SymSpell). Per-user
+    # path under data/users/<user_id>/ so two users don't trample each
+    # other's vocabulary. The reader resolves the same path; legacy
+    # data/spell_dictionary.txt is left in place for older deployments.
+    user_dir = data_dir / "users" / uid
+    user_dir.mkdir(parents=True, exist_ok=True)
+    dict_path = user_dir / "spell_dictionary.txt"
     with open(dict_path, "w") as f:
         for word, count in word_counts.most_common():
             f.write(f"{word} {count}\n")
@@ -871,14 +967,24 @@ def rebuild_spell_dictionary(db_path: Path, data_dir: Path) -> int:
     return len(word_counts)
 
 
-def rebuild_contact_frequency(db_path: Path) -> int:
-    """Precompute contact frequency scores. Returns contact count."""
+def rebuild_contact_frequency(db_path: Path, *, user_id: Optional[str] = None) -> int:
+    """Precompute contact frequency scores. Returns contact count.
+
+    Per-user: scans only the given user's messages and replaces only
+    that user's contact_frequency rows. The composite PK
+    (user_id, email) makes ON CONFLICT a clean per-user upsert."""
+    from gmail_search.auth.write_user import resolve_write_user_id
+
     conn = get_connection(db_path)
+    uid = resolve_write_user_id(conn, user_id=user_id)
 
-    conn.execute("DELETE FROM contact_frequency")
+    conn.execute("DELETE FROM contact_frequency WHERE user_id = %s", (uid,))
 
-    # Count messages per sender email
-    rows = conn.execute("SELECT from_addr, COUNT(*) as c FROM messages GROUP BY from_addr ORDER BY c DESC").fetchall()
+    # Count messages per sender email (per-user)
+    rows = conn.execute(
+        "SELECT from_addr, COUNT(*) as c FROM messages WHERE user_id = %s GROUP BY from_addr ORDER BY c DESC",
+        (uid,),
+    ).fetchall()
 
     if not rows:
         conn.close()
@@ -897,16 +1003,16 @@ def rebuild_contact_frequency(db_path: Path) -> int:
             addr = addr.split("<")[1].rstrip(">")
         score = math.log(r["c"] + 1) / log_max if log_max > 0 else 0.0
         conn.execute(
-            """INSERT INTO contact_frequency (email, message_count, score)
-               VALUES (%s, %s, %s)
-               ON CONFLICT(email) DO UPDATE SET
+            """INSERT INTO contact_frequency (user_id, email, message_count, score)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT(user_id, email) DO UPDATE SET
                  message_count = excluded.message_count,
                  score = excluded.score""",
-            (addr, r["c"], score),
+            (uid, addr, r["c"], score),
         )
 
     conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM contact_frequency").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM contact_frequency WHERE user_id = %s", (uid,)).fetchone()[0]
     conn.close()
     return count
 

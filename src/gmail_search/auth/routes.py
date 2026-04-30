@@ -159,10 +159,19 @@ def _clear_state_cookie(response) -> None:
 def register_auth_routes(app: FastAPI, db_path: Path) -> None:
 
     @app.get("/api/auth/login")
-    async def login(request: Request, return_url: str = "/"):
+    async def login(
+        request: Request,
+        return_url: str = "/",
+        prompt: str = "",
+    ):
         """Bounce the user to the broker. Issues a state cookie + state
         query param so /callback can prove this completion belongs to
-        the same browser that started the flow."""
+        the same browser that started the flow.
+
+        `prompt`, when set to `select_account`, forwards that hint to
+        Google via the broker so the user sees the account picker
+        instead of getting auto-logged-in as the previously-used
+        account. Used by the avatar menu's "Switch account" action."""
         if not is_multi_tenant_enabled():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -199,7 +208,26 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
             f"?return={quote(safe_return, safe='')}"
             f"&{STATE_QUERY_PARAM}={quote(state, safe='')}"
         )
-        qs = urlencode({"return_url": our_callback, "scope": "openid,profile"})
+        # Bundle Gmail + Drive scopes into the sign-in flow. Every
+        # invited user is going to need them anyway (the app's whole
+        # job is searching their mail), and Google shows one
+        # consolidated consent screen instead of two — so a fresh
+        # invitee sees a single "approve" instead of having to also
+        # click Connect Gmail in Settings post-sign-in.
+        # Connect Gmail (Settings → /api/auth/connect-gmail) stays as
+        # the explicit re-grant path for when a scope was unchecked.
+        broker_params: dict[str, str] = {
+            "return_url": our_callback,
+            "scope": "openid,profile,gmail.readonly,drive.readonly",
+        }
+        # Forward the OAuth `prompt` hint when set. Google honors
+        # `select_account` (force account chooser) and `consent`
+        # (force re-consent screen). Omitting it lets Google auto-
+        # use the cached account, which is what we want for the
+        # default sign-in flow.
+        if prompt in ("select_account", "consent"):
+            broker_params["prompt"] = prompt
+        qs = urlencode(broker_params)
         response = RedirectResponse(url=f"{broker_url()}/start?{qs}")
         _set_state_cookie(response, request, state)
         return response
@@ -296,3 +324,70 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
         """Public diagnostic. Reports auth posture without ever reading
         the cookie. Lets ops confirm the env flag is active."""
         return {"multi_tenant_enabled": is_multi_tenant_enabled()}
+
+    @app.get("/api/auth/connect-gmail")
+    async def connect_gmail(
+        request: Request,
+        return_url: str = "/",
+        user: Optional[User] = Depends(require_user),
+    ):
+        """Bounce the user to the broker with Gmail+Drive scopes so
+        their refresh token gets stored broker-side. Same flow as
+        /api/auth/login but with a richer scope. After the user
+        approves, the broker redirects back to /api/auth/callback,
+        which already handles the handoff JWT and sets our session
+        cookie. The Gmail credential itself stays broker-side — we
+        fetch fresh access tokens via `gmail/auth.py`'s broker path
+        on every sync."""
+        if not is_multi_tenant_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="multi-tenant auth is disabled (GMAIL_MULTI_TENANT != 1)",
+            )
+        if user is None:
+            raise HTTPException(status_code=401, detail="must sign in before connecting Gmail")
+        safe_return = safe_relative_return_url(return_url)
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host", "")).lower()
+        if host not in _allowed_hosts():
+            raise HTTPException(status_code=400, detail=f"host {host!r} is not in GMS_ALLOWED_HOSTS")
+        scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else request.url.scheme
+        state = secrets.token_urlsafe(24)
+        # Reuse /api/auth/callback for the handoff — it's idempotent
+        # and the broker stores the granted scopes server-side, so the
+        # callback doesn't need to know whether this was sign-in or
+        # connect-Gmail. The user just lands back on `safe_return`.
+        our_callback = (
+            f"{scheme}://{host}/api/auth/callback"
+            f"?return={quote(safe_return, safe='')}"
+            f"&{STATE_QUERY_PARAM}={quote(state, safe='')}"
+        )
+        # `gmail.readonly,drive.readonly` matches the scope our
+        # `gmail/auth.py` requests when fetching access tokens — broker
+        # records this set on the user's account.
+        qs = urlencode(
+            {
+                "return_url": our_callback,
+                "scope": "openid,profile,gmail.readonly,drive.readonly",
+            }
+        )
+        response = RedirectResponse(url=f"{broker_url()}/start?{qs}")
+        _set_state_cookie(response, request, state)
+        return response
+
+    @app.get("/api/auth/gmail-status")
+    async def gmail_status(user: Optional[User] = Depends(require_user)) -> dict[str, Any]:
+        """Probe whether the broker has Gmail tokens for the signed-in
+        user. UI uses this to show "Connect Gmail" vs. "Connected ✓"
+        in Settings. Hits broker /token with a no-op call; 200 = have
+        tokens, 404 = haven't connected yet."""
+        if not is_multi_tenant_enabled():
+            return {"multi_tenant": False, "connected": True}
+        if user is None:
+            raise HTTPException(status_code=401, detail="not signed in")
+        from gmail_search.gmail.auth import _broker_credentials_for
+
+        try:
+            creds = _broker_credentials_for(user.email)
+        except PermissionError:
+            return {"multi_tenant": True, "connected": False, "scope_problem": True}
+        return {"multi_tenant": True, "connected": creds is not None}

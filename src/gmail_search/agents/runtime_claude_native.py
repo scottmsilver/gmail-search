@@ -390,6 +390,7 @@ async def native_run(
     cost_sink: CostSink | None,
     resume: str | None = None,
     on_session_uuid: Callable[[str], None] | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Run one deep-mode turn through a single Claude Code invocation.
 
@@ -419,6 +420,7 @@ async def native_run(
             evidence_records=None,
             conversation_id=conversation_id,
             workspace=workspace,
+            user_id=user_id,
         )
         registered = True
         _emit_plan_event(conn, session_id)

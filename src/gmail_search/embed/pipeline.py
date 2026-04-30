@@ -49,7 +49,14 @@ def run_embedding_pipeline(
     db_path: Path,
     config: dict[str, Any],
     embedder: GeminiEmbedder | Any = None,
+    *,
+    user_id: str | None = None,
 ) -> int:
+    """Embed all unembedded messages and attachments. When `user_id`
+    is given, scopes BOTH phases (messages + attachments) to that
+    user — required for per-user daemons so silvershabbat's pass
+    doesn't try to embed scott's 410k messages and OOM the box.
+    """
     conn = get_connection(db_path)
     model = config["embedding"]["model"]
     max_budget = config["budget"]["max_usd"]
@@ -64,7 +71,7 @@ def run_embedding_pipeline(
     batch_size = 1000 if isinstance(embedder, BatchGeminiEmbedder) else TEXT_BATCH_SIZE
 
     # Phase 1: Embed messages
-    messages = get_messages_without_embeddings(conn, model=model)
+    messages = get_messages_without_embeddings(conn, model=model, user_id=user_id)
     logger.info(f"{len(messages)} messages to embed (batch_size={batch_size})")
 
     total_embedded = 0
@@ -136,8 +143,15 @@ def run_embedding_pipeline(
             )
             total_embedded += 1
 
-    # Phase 2: Embed attachments
-    all_messages = conn.execute("SELECT id, subject FROM messages").fetchall()
+    # Phase 2: Embed attachments. Scope to the active user when given
+    # — same OOM concern as Phase 1.
+    if user_id is not None:
+        all_messages = conn.execute(
+            "SELECT id, subject FROM messages WHERE user_id = %s",
+            (user_id,),
+        ).fetchall()
+    else:
+        all_messages = conn.execute("SELECT id, subject FROM messages").fetchall()
     max_images_per_msg = att_config.get("max_images_per_message", 10)
 
     for row in tqdm(all_messages, desc="Processing attachments"):

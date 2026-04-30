@@ -48,6 +48,15 @@ from fastapi import HTTPException, Request, Response, status
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "gms_session"
+
+# Service-token header constants used by `require_user_id` to recognise
+# trusted internal callers (the MCP server passing X-User-Id +
+# Authorization: Bearer <admin token>). Starlette's Headers map is
+# case-insensitive on lookup but normalises lookups via lowercase
+# internally, so we keep the constants lowercase to match `.lower()`
+# comparisons below.
+_AUTH_HEADER = "authorization"
+_BEARER_PREFIX = "bearer "
 HANDOFF_QUERY_PARAM = "silver_oauth"
 
 # Algorithm pinning — accepting a list is how libraries get tricked into
@@ -303,6 +312,56 @@ def require_user(request: Request) -> Optional[User]:
         name=row["name"],
         picture=payload.get("picture"),
     )
+
+
+def require_user_id(request: Request) -> str:
+    """FastAPI dependency: returns the user_id every per-user query
+    should scope on. Three resolution paths:
+
+    1. **Service-token + X-User-Id**: a trusted internal caller (the
+       MCP server, identified by `Authorization: Bearer <admin token>`)
+       passes `X-User-Id` to scope its tool calls to a particular
+       user's data. Bypasses the cookie path because MCP doesn't have
+       one. The service-token check is constant-time.
+    2. **Multi-tenant signed-in user**: cookie-based, via require_user.
+    3. **Single-pool fallback**: bootstrap user (legacy / multi-tenant off).
+    """
+    # 1. Service token? MCP server uses GMAIL_MCP_ADMIN_TOKEN to call
+    #    /api/* endpoints on behalf of a session's user_id, sent via
+    #    X-User-Id. This is the same trust model as the prior plan's
+    #    INTERNAL_SERVICE_TOKEN — we reuse the MCP admin token to
+    #    avoid a fourth secret.
+    forwarded_uid = request.headers.get("x-user-id")
+    if forwarded_uid:
+        import hmac
+        import os as _os
+
+        expected = _os.environ.get("GMAIL_MCP_ADMIN_TOKEN") or ""
+        raw_auth = request.headers.get(_AUTH_HEADER) or ""
+        if expected and raw_auth.lower().startswith(_BEARER_PREFIX):
+            presented = raw_auth[len(_BEARER_PREFIX) :].strip()
+            if hmac.compare_digest(presented, expected):
+                return forwarded_uid
+        # X-User-Id without a valid service token is a phishing attempt
+        # — fail loud rather than silently downgrade to the cookie path.
+        raise AuthError("X-User-Id requires a valid service token")
+
+    # 2. Cookie path (multi-tenant on).
+    user = require_user(request)
+    if user is not None:
+        return user.id
+
+    # 3. Single-pool fallback.
+    from gmail_search.store.db import get_connection
+
+    db_path = _resolve_db_path(request)
+    conn = get_connection(db_path)
+    try:
+        from gmail_search.auth.write_user import get_bootstrap_user_id
+
+        return get_bootstrap_user_id(conn)
+    finally:
+        conn.close()
 
 
 def issue_handoff_jwt_for_test(*, email: str, name: Optional[str] = None, ttl_seconds: int = 60) -> str:

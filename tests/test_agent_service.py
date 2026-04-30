@@ -134,7 +134,9 @@ def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypat
         )
         return StageResult(text="{}", tool_calls=[])
 
-    async def fake_register_session(session_id, *, evidence_records, db_dsn, conversation_id=None, workspace=None):
+    async def fake_register_session(
+        session_id, *, evidence_records, db_dsn, conversation_id=None, workspace=None, user_id=None
+    ):
         events.append(f"register:{session_id}:conv={conversation_id}:ws={workspace}")
 
     async def fake_unregister_session(session_id):
@@ -247,6 +249,7 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
         cost_sink,
         resume=None,
         on_session_uuid=None,
+        user_id=None,
     ):
         native_calls.append(
             {
@@ -259,6 +262,7 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
                 "has_cost_sink": cost_sink is not None,
                 "resume": resume,
                 "has_session_uuid_callback": on_session_uuid is not None,
+                "user_id": user_id,
             }
         )
 

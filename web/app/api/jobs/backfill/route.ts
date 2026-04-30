@@ -10,7 +10,11 @@ export async function POST(req: NextRequest) {
   for (const [k, v] of req.nextUrl.searchParams.entries()) {
     url.searchParams.set(k, v);
   }
-  const upstream = await fetch(url.toString(), { method: "POST" });
+  const cookie = req.headers.get("cookie") ?? "";
+  const upstream = await fetch(url.toString(), {
+    method: "POST",
+    headers: cookie ? { cookie } : undefined,
+  });
   const body = await upstream.text();
   return new NextResponse(body, {
     status: upstream.status,

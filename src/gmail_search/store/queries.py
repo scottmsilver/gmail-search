@@ -1,14 +1,17 @@
 import json
 from datetime import datetime
+from typing import Optional
 
+from gmail_search.auth.write_user import resolve_write_user_id
 from gmail_search.store.models import Attachment, EmbeddingRecord, Message
 
 
-def upsert_message(conn, msg: Message) -> None:
+def upsert_message(conn, msg: Message, *, user_id: Optional[str] = None) -> None:
+    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
         """INSERT INTO messages (id, thread_id, from_addr, to_addr, subject,
-           body_text, body_html, date, labels, history_id, raw_json)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           body_text, body_html, date, labels, history_id, raw_json, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              to_addr=excluded.to_addr, subject=excluded.subject,
@@ -27,21 +30,24 @@ def upsert_message(conn, msg: Message) -> None:
             json.dumps(msg.labels),
             msg.history_id,
             msg.raw_json,
+            uid,
         ),
     )
-    _touch_thread_summary(conn, msg)
+    _touch_thread_summary(conn, msg, user_id=uid)
     conn.commit()
 
 
-def _touch_thread_summary(conn, msg: Message) -> None:
+def _touch_thread_summary(conn, msg: Message, *, user_id: Optional[str] = None) -> None:
     """Fast-path inline refresh fired from `upsert_message`. Wraps
     `recompute_thread_summary` so the reconciler and the ingest hot
     path share one implementation.
     """
-    recompute_thread_summary(conn, msg.thread_id, fallback_subject=msg.subject)
+    recompute_thread_summary(conn, msg.thread_id, fallback_subject=msg.subject, user_id=user_id)
 
 
-def recompute_thread_summary(conn, thread_id: str, fallback_subject: str = "") -> bool:
+def recompute_thread_summary(
+    conn, thread_id: str, fallback_subject: str = "", *, user_id: Optional[str] = None
+) -> bool:
     """Refresh the thread_summary row for one thread from the current
     `messages` content. Returns True on a write, False when the
     thread has no messages (deleted / race).
@@ -79,11 +85,12 @@ def recompute_thread_summary(conn, thread_id: str, fallback_subject: str = "") -
         except Exception:
             continue
     from_addrs = list(row["from_addrs"] or [])
+    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
         """INSERT INTO thread_summary
              (thread_id, subject, participants, all_from_addrs, all_labels,
-              message_count, date_first, date_last)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+              message_count, date_first, date_last, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(thread_id) DO UPDATE SET
              subject = excluded.subject,
              participants = excluded.participants,
@@ -101,13 +108,21 @@ def recompute_thread_summary(conn, thread_id: str, fallback_subject: str = "") -
             row["message_count"],
             row["date_first"],
             row["date_last"],
+            uid,
         ),
     )
     return True
 
 
-def get_message(conn, message_id: str) -> Message | None:
-    row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
+def get_message(conn, message_id: str, *, user_id: Optional[str] = None) -> Message | None:
+    """Fetch a message by id. When `user_id` is given, the lookup is
+    scoped to that user — returns None if the message exists but
+    belongs to a different user (treats it as not-found rather than
+    leaking existence)."""
+    if user_id is None:
+        row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM messages WHERE id = %s AND user_id = %s", (message_id, user_id)).fetchone()
     if row is None:
         return None
     return Message(
@@ -125,15 +140,31 @@ def get_message(conn, message_id: str) -> Message | None:
     )
 
 
-def get_messages_without_embeddings(conn, model: str) -> list[Message]:
-    rows = conn.execute(
-        """SELECT m.* FROM messages m
-           WHERE m.id NOT IN (
-             SELECT DISTINCT message_id FROM embeddings
-             WHERE chunk_type = 'message' AND model = %s
-           )""",
-        (model,),
-    ).fetchall()
+def get_messages_without_embeddings(conn, model: str, *, user_id: Optional[str] = None) -> list[Message]:
+    """Messages that have no embedding row for `model` yet. When
+    `user_id` is given, scopes to that user — required for per-user
+    daemons so silvershabbat's embed pass doesn't try to embed
+    scott's 410k messages too (and OOM the box).
+    """
+    if user_id is not None:
+        rows = conn.execute(
+            """SELECT m.* FROM messages m
+               WHERE m.user_id = %s
+                 AND m.id NOT IN (
+                   SELECT DISTINCT message_id FROM embeddings
+                   WHERE chunk_type = 'message' AND model = %s AND user_id = %s
+                 )""",
+            (user_id, model, user_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT m.* FROM messages m
+               WHERE m.id NOT IN (
+                 SELECT DISTINCT message_id FROM embeddings
+                 WHERE chunk_type = 'message' AND model = %s
+               )""",
+            (model,),
+        ).fetchall()
     return [
         Message(
             id=r["id"],
@@ -152,18 +183,28 @@ def get_messages_without_embeddings(conn, model: str) -> list[Message]:
     ]
 
 
-def upsert_attachment(conn, att: Attachment) -> int:
+def upsert_attachment(conn, att: Attachment, *, user_id: Optional[str] = None) -> int:
     # `RETURNING id` — portable across SQLite 3.35+ and Postgres, and the
     # only reliable way to get the newly-generated BIGSERIAL from psycopg.
+    uid = resolve_write_user_id(conn, user_id=user_id)
     cursor = conn.execute(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
-           extracted_text, image_path, raw_path)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           extracted_text, image_path, raw_path, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(message_id, filename) DO UPDATE SET
              mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
              raw_path=excluded.raw_path
            RETURNING id""",
-        (att.message_id, att.filename, att.mime_type, att.size_bytes, att.extracted_text, att.image_path, att.raw_path),
+        (
+            att.message_id,
+            att.filename,
+            att.mime_type,
+            att.size_bytes,
+            att.extracted_text,
+            att.image_path,
+            att.raw_path,
+            uid,
+        ),
     )
     row = cursor.fetchone()
     conn.commit()
@@ -175,8 +216,14 @@ def upsert_attachment(conn, att: Attachment) -> int:
         return int(row[0])
 
 
-def get_attachments_for_message(conn, message_id: str) -> list[Attachment]:
-    rows = conn.execute("SELECT * FROM attachments WHERE message_id = %s", (message_id,)).fetchall()
+def get_attachments_for_message(conn, message_id: str, *, user_id: Optional[str] = None) -> list[Attachment]:
+    if user_id is None:
+        rows = conn.execute("SELECT * FROM attachments WHERE message_id = %s", (message_id,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM attachments WHERE message_id = %s AND user_id = %s",
+            (message_id, user_id),
+        ).fetchall()
     return [
         Attachment(
             id=r["id"],
@@ -192,7 +239,7 @@ def get_attachments_for_message(conn, message_id: str) -> list[Attachment]:
     ]
 
 
-def get_pending_extraction_message_ids(conn) -> list[str]:
+def get_pending_extraction_message_ids(conn, *, user_id: Optional[str] = None) -> list[str]:
     """Return distinct message ids that have at least one local-file
     attachment still awaiting extraction (`extracted_text IS NULL`,
     `image_path IS NULL`, `raw_path IS NOT NULL`), ordered so that
@@ -206,19 +253,28 @@ def get_pending_extraction_message_ids(conn) -> list[str]:
     `watch` daemon sit unextracted. Callers iterate the list and pass
     each id through `get_attachments_for_message` to dispatch the
     actual extractor.
+
+    Multi-tenant: when `user_id` is given, only that user's pending
+    attachments are returned. WITHOUT this filter a per-user daemon
+    silently extracts every other user's backlog too — silvershabbat's
+    daemon was OOM-killed after pulling 14k of scott's pending
+    attachments into memory before getting to embed its own 118.
     """
     # GROUP BY (not DISTINCT) so we can reference MAX(m.date) in ORDER
     # BY — Postgres forbids `SELECT DISTINCT … ORDER BY <expr not in
     # select list>`. A given m.id has exactly one m.date, so MAX is a
     # no-op aggregation, just a syntactic bridge.
+    user_clause = "AND m.user_id = %s" if user_id is not None else ""
+    params = (user_id,) if user_id is not None else ()
     rows = conn.execute(
-        """
+        f"""
         SELECT m.id
         FROM messages m
         JOIN attachments a ON a.message_id = m.id
         WHERE a.extracted_text IS NULL
           AND a.image_path IS NULL
           AND a.raw_path IS NOT NULL
+          {user_clause}
         GROUP BY m.id
         ORDER BY
           -- Frontfill wins over backfill: anything received in the
@@ -227,7 +283,8 @@ def get_pending_extraction_message_ids(conn) -> list[str]:
           -- older unextracted backlog.
           (MAX(m.date::timestamptz) > NOW() - INTERVAL '1 day') DESC,
           MAX(m.date) DESC
-        """
+        """,
+        params,
     ).fetchall()
     return [r["id"] for r in rows]
 
@@ -306,40 +363,44 @@ def upsert_drive_stub(
     message_id: str,
     drive_id: str,
     mime_type: str,
+    user_id: Optional[str] = None,
 ) -> int:
     """Insert a stub row for a Drive-linked doc. Returns the number
     of new rows inserted (0 if the stub already existed; the
     `(message_id, filename)` dedup index enforces idempotency).
     """
     filename = f"Drive: [{drive_id}]"
+    uid = resolve_write_user_id(conn, user_id=user_id)
     cursor = conn.execute(
         """INSERT INTO attachments
-           (message_id, filename, mime_type, size_bytes)
-           VALUES (%s, %s, %s, 0)
+           (message_id, filename, mime_type, size_bytes, user_id)
+           VALUES (%s, %s, %s, 0, %s)
            ON CONFLICT (message_id, filename) DO NOTHING""",
-        (message_id, filename, mime_type),
+        (message_id, filename, mime_type, uid),
     )
     return cursor.rowcount
 
 
-def set_active_index_dir(conn, path: str) -> None:
-    """Flip the one-row `scann_index_pointer` to a new on-disk path.
-    Readers resolve the active index through this row so a reindex
-    swap is atomic at the DB layer — no reliance on filesystem rename
-    semantics. See `build_index_sharded` for the writer side.
+def set_active_index_dir(conn, path: str, *, user_id: Optional[str] = None) -> None:
+    """Flip the per-user `scann_index_pointer` row to a new on-disk
+    path. Readers resolve the active index through this row so a
+    reindex swap is atomic at the DB layer — no reliance on filesystem
+    rename semantics. See `build_index_sharded` for the writer side.
     """
+    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
-        """INSERT INTO scann_index_pointer (id, current_dir, updated_at)
-           VALUES (1, %s, CURRENT_TIMESTAMP)
-           ON CONFLICT(id) DO UPDATE SET
+        """INSERT INTO scann_index_pointer (user_id, current_dir, updated_at)
+           VALUES (%s, %s, CURRENT_TIMESTAMP)
+           ON CONFLICT(user_id) DO UPDATE SET
              current_dir = excluded.current_dir,
              updated_at = CURRENT_TIMESTAMP""",
-        (path,),
+        (uid, path),
     )
 
 
-def get_active_index_dir(conn) -> str | None:
-    row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
+def get_active_index_dir(conn, *, user_id: Optional[str] = None) -> str | None:
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE user_id = %s", (uid,)).fetchone()
     return row["current_dir"] if row else None
 
 
@@ -383,7 +444,7 @@ def _url_stub_filename(url: str) -> str:
     return base[:_URL_STUB_FILENAME_CAP]
 
 
-def upsert_url_stub(conn, *, message_id: str, url: str) -> int:
+def upsert_url_stub(conn, *, message_id: str, url: str, user_id: Optional[str] = None) -> int:
     """Insert a stub row for a URL linked from the message body.
 
     Returns the number of rows inserted (0 if the stub already
@@ -391,12 +452,13 @@ def upsert_url_stub(conn, *, message_id: str, url: str) -> int:
     shape of `upsert_drive_stub`.
     """
     filename = _url_stub_filename(url)
+    uid = resolve_write_user_id(conn, user_id=user_id)
     cursor = conn.execute(
         """INSERT INTO attachments
-           (message_id, filename, mime_type, size_bytes)
-           VALUES (%s, %s, 'text/html', 0)
+           (message_id, filename, mime_type, size_bytes, user_id)
+           VALUES (%s, %s, 'text/html', 0, %s)
            ON CONFLICT (message_id, filename) DO NOTHING""",
-        (message_id, filename),
+        (message_id, filename, uid),
     )
     return cursor.rowcount
 
@@ -515,16 +577,17 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     return out
 
 
-def insert_embedding(conn, rec: EmbeddingRecord) -> int:
+def insert_embedding(conn, rec: EmbeddingRecord, *, user_id: Optional[str] = None) -> int:
     # `RETURNING id` — portable across SQLite 3.35+ and Postgres, and
     # the only reliable way to get the newly-generated BIGSERIAL from
     # psycopg.
+    uid = resolve_write_user_id(conn, user_id=user_id)
     cursor = conn.execute(
         """INSERT INTO embeddings (message_id, attachment_id, chunk_type,
-           chunk_text, embedding, model)
-           VALUES (%s, %s, %s, %s, %s, %s)
+           chunk_text, embedding, model, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)
            RETURNING id""",
-        (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model),
+        (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model, uid),
     )
     row = cursor.fetchone()
     conn.commit()
@@ -619,6 +682,8 @@ def search_fts(
     query: str,
     limit: int = 200,
     candidate_ids: list[str] | None = None,
+    *,
+    user_id: Optional[str] = None,
 ) -> dict[str, float]:
     """Search messages + attachments via pg_search BM25, return {message_id: score}.
 
@@ -630,12 +695,16 @@ def search_fts(
 
     ``candidate_ids`` optionally restricts BM25 to a pre-filtered set of
     message IDs (see SearchEngine._resolve_candidate_msg_ids). ``None``
-    means no restriction (full corpus). ``[]`` means "filters matched
-    zero rows" — short-circuit to an empty result.
+    means no restriction within the user's corpus. ``[]`` means "filters
+    matched zero rows" — short-circuit to an empty result.
+
+    ``user_id`` scopes the BM25 to a single user's corpus. The 0d
+    benchmark confirmed ParadeDB BM25 composes cleanly with
+    ``AND user_id = $1`` — no recall hit, ~75ms latency.
     """
     if candidate_ids is not None and len(candidate_ids) == 0:
         return {}
-    return _search_fts_postgres(conn, query, limit, candidate_ids)
+    return _search_fts_postgres(conn, query, limit, candidate_ids, user_id=user_id)
 
 
 def _pg_bm25_messages(
@@ -644,6 +713,8 @@ def _pg_bm25_messages(
     limit: int,
     logger,
     candidate_ids: list[str] | None = None,
+    *,
+    user_id: Optional[str] = None,
 ) -> dict[str, float]:
     """BM25 pass against the `messages` table via pg_search.
 
@@ -659,21 +730,28 @@ def _pg_bm25_messages(
     """
     scores: dict[str, float] = {}
     try:
+        # Per the 0d benchmark, ParadeDB BM25 (`@@@`) composes cleanly
+        # with `AND user_id = $1` — same recall, ~75ms latency. We add
+        # the user filter into every BM25 SQL even when candidate_ids
+        # is set, since candidate_ids may have come from a different
+        # path that didn't itself filter by user.
+        user_clause = " AND user_id = %s" if user_id else ""
+        user_param: list = [user_id] if user_id else []
         if candidate_ids is None:
             rows = conn.execute(
                 "SELECT id AS message_id, paradedb.score(id) AS rank "
                 "FROM messages "
-                "WHERE messages @@@ %s "
+                f"WHERE messages @@@ %s{user_clause} "
                 "ORDER BY rank DESC LIMIT %s",
-                (bm25_query, limit),
+                [bm25_query] + user_param + [limit],
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT id AS message_id, paradedb.score(id) AS rank "
                 "FROM messages "
-                "WHERE messages @@@ %s AND id = ANY(%s::text[]) "
+                f"WHERE messages @@@ %s AND id = ANY(%s::text[]){user_clause} "
                 "ORDER BY rank DESC LIMIT %s",
-                (bm25_query, list(candidate_ids), limit),
+                [bm25_query, list(candidate_ids)] + user_param + [limit],
             ).fetchall()
         for r in rows:
             mid = r["message_id"]
@@ -691,6 +769,8 @@ def _pg_bm25_attachments(
     limit: int,
     logger,
     candidate_ids: list[str] | None = None,
+    *,
+    user_id: Optional[str] = None,
 ) -> dict[str, float]:
     """BM25 pass against `attachments`. Returns `{message_id: score}` by
     joining the attachment row's `message_id`. `paradedb.score(id)` keys
@@ -703,21 +783,23 @@ def _pg_bm25_attachments(
     """
     scores: dict[str, float] = {}
     try:
+        user_clause = " AND user_id = %s" if user_id else ""
+        user_param: list = [user_id] if user_id else []
         if candidate_ids is None:
             rows = conn.execute(
                 "SELECT message_id, paradedb.score(id) AS rank "
                 "FROM attachments "
-                "WHERE attachments @@@ %s "
+                f"WHERE attachments @@@ %s{user_clause} "
                 "ORDER BY rank DESC LIMIT %s",
-                (bm25_query, limit),
+                [bm25_query] + user_param + [limit],
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT message_id, paradedb.score(id) AS rank "
                 "FROM attachments "
-                "WHERE attachments @@@ %s AND message_id = ANY(%s::text[]) "
+                f"WHERE attachments @@@ %s AND message_id = ANY(%s::text[]){user_clause} "
                 "ORDER BY rank DESC LIMIT %s",
-                (bm25_query, list(candidate_ids), limit),
+                [bm25_query, list(candidate_ids)] + user_param + [limit],
             ).fetchall()
         for r in rows:
             mid = r["message_id"]
@@ -766,6 +848,8 @@ def _search_fts_postgres(
     query: str,
     limit: int,
     candidate_ids: list[str] | None = None,
+    *,
+    user_id: Optional[str] = None,
 ) -> dict[str, float]:
     """Postgres BM25 path via pg_search (paradedb / Tantivy).
 
@@ -796,8 +880,8 @@ def _search_fts_postgres(
     # Strategy 1: Phrase match (words must appear in order, adjacent).
     if msg_phrase is not None:
         for tbl_scores in (
-            _pg_bm25_messages(conn, msg_phrase, limit, logger, candidate_ids),
-            _pg_bm25_attachments(conn, att_phrase, limit, logger, candidate_ids),
+            _pg_bm25_messages(conn, msg_phrase, limit, logger, candidate_ids, user_id=user_id),
+            _pg_bm25_attachments(conn, att_phrase, limit, logger, candidate_ids, user_id=user_id),
         ):
             for mid, raw in tbl_scores.items():
                 boosted = raw * 1.5
@@ -806,8 +890,8 @@ def _search_fts_postgres(
 
     # Strategy 2: Individual terms (any word matches — broader recall).
     for tbl_scores in (
-        _pg_bm25_messages(conn, msg_disj, limit, logger, candidate_ids),
-        _pg_bm25_attachments(conn, att_disj, limit, logger, candidate_ids),
+        _pg_bm25_messages(conn, msg_disj, limit, logger, candidate_ids, user_id=user_id),
+        _pg_bm25_attachments(conn, att_disj, limit, logger, candidate_ids, user_id=user_id),
     ):
         for mid, raw in tbl_scores.items():
             if mid not in scores or raw > scores[mid]:

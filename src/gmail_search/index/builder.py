@@ -215,8 +215,12 @@ def _clean_old_shard_dirs(index_dir: Path) -> None:
             shutil.rmtree(entry)
 
 
-def _count_embeddings(conn, model: str) -> int:
-    return conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = %s", (model,)).fetchone()[0]
+def _count_embeddings(conn, model: str, *, user_id: str | None = None) -> int:
+    if user_id is None:
+        return conn.execute("SELECT COUNT(*) FROM embeddings WHERE model = %s", (model,)).fetchone()[0]
+    return conn.execute(
+        "SELECT COUNT(*) FROM embeddings WHERE model = %s AND user_id = %s", (model, user_id)
+    ).fetchone()[0]
 
 
 def _build_one_shard(
@@ -305,6 +309,7 @@ def build_index_sharded(
     manual_rerank: bool = False,
     ah_dim: int = 1536,
     reorder_pool: int = 100,
+    user_id: str | None = None,
 ) -> Path:
     """Build N ScaNN indexes into a fresh timestamped sibling of
     `index_dir` and record it in a DB pointer row so readers always
@@ -378,15 +383,24 @@ def build_index_sharded(
 
     conn = get_connection(db_path)
     try:
-        total = _count_embeddings(conn, model)
+        # Per-user scoping: when `user_id` is given, count + iterate
+        # only that user's embeddings. Daemon callers pass the
+        # bootstrap user via the pipeline.reindex resolution.
+        total = _count_embeddings(conn, model, user_id=user_id)
         if total == 0:
             _write_empty_index(target_dir)
             if use_pointer:
-                _promote_and_gc(conn, index_dir, target_dir)
+                _promote_and_gc(conn, index_dir, target_dir, user_id=user_id)
             conn.close()
             return target_dir
 
-        cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
+        if user_id is None:
+            cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
+        else:
+            cursor = conn.execute(
+                "SELECT id, embedding FROM embeddings WHERE model = %s AND user_id = %s ORDER BY id",
+                (model, user_id),
+            )
         all_ids: list[int] = []
         shard_idx = 0
         buffer: list[tuple[int, bytes]] = []
@@ -440,7 +454,7 @@ def build_index_sharded(
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
 
         if use_pointer:
-            _promote_and_gc(conn, index_dir, target_dir)
+            _promote_and_gc(conn, index_dir, target_dir, user_id=user_id)
     finally:
         conn.close()
 
@@ -486,18 +500,20 @@ def _pointer_table_exists(db_path: Path) -> bool:
         conn.close()
 
 
-def _promote_and_gc(conn, live_name: Path, new_dir: Path) -> None:
+def _promote_and_gc(conn, live_name: Path, new_dir: Path, *, user_id: str | None = None) -> None:
     """Update the DB pointer to the new dir and remove every sibling
     `{live_name.name}__*` directory other than the one we just wrote.
     `live_name` itself (if it exists as a legacy path) is left alone
     so a reader that still opens it directly keeps working until it
     learns about the pointer.
-    """
+
+    `user_id` flows through to `set_active_index_dir` so the per-user
+    pointer row gets flipped — the table is keyed (user_id) post-Phase-3a."""
     import shutil
 
     from gmail_search.store.queries import set_active_index_dir
 
-    set_active_index_dir(conn, str(new_dir))
+    set_active_index_dir(conn, str(new_dir), user_id=user_id)
     conn.commit()
 
     prefix = f"{live_name.name}__"

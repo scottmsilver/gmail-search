@@ -91,13 +91,16 @@ const saveConversation = async (
   conversationId: string,
   messages: Array<{ role: string; parts: unknown[] }>,
   title: string | null,
+  cookie: string,
 ): Promise<void> => {
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (cookie) headers["cookie"] = cookie;
     const res = await fetch(
       `${pythonApiUrl()}/api/conversations/${encodeURIComponent(conversationId)}`,
       {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ title, messages }),
       },
     );
@@ -268,6 +271,9 @@ type DeepStreamArgs = {
   // "claude_code" (claudebox + orchestrator), or "claude_native"
   // (single-agent claudebox loop). Forwarded as `backend`.
   deepBackend?: "adk" | "claude_code" | "claude_native";
+  // Inbound session cookie — forwarded to FastAPI so require_user_id
+  // can resolve which user this turn belongs to.
+  cookie: string;
 };
 
 const createDeepModeStream = (args: DeepStreamArgs) =>
@@ -298,12 +304,14 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
           role: "assistant",
           parts: [{ type: "text", text: assistantText }],
         });
-        await saveConversation(args.conversationId, persisted, deriveTitle(args.messages));
+        await saveConversation(args.conversationId, persisted, deriveTitle(args.messages), args.cookie);
       };
 
+      const upstreamHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (args.cookie) upstreamHeaders["cookie"] = args.cookie;
       const upstream = await fetch(`${pythonApiUrl()}/api/agent/analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: upstreamHeaders,
         body: JSON.stringify({
           question: args.question,
           conversation_id: args.conversationId,
@@ -553,6 +561,7 @@ export async function POST(req: NextRequest) {
   const logger = new ChatLogger();
   const question = lastUserText(messages);
   const conversationId = body.conversation_id || null;
+  const cookie = req.headers.get("cookie") ?? "";
 
   // Persist the user-side messages IMMEDIATELY, before any LLM work
   // starts. Without this, navigating away mid-stream meant the user's
@@ -568,7 +577,7 @@ export async function POST(req: NextRequest) {
       role: m.role,
       parts: m.parts as unknown[],
     }));
-    void saveConversation(conversationId, initialPersist, deriveTitle(messages));
+    void saveConversation(conversationId, initialPersist, deriveTitle(messages), cookie);
   }
 
   // Deep-mode fork: when the picker toggle is on, forward to the
@@ -586,6 +595,7 @@ export async function POST(req: NextRequest) {
       messages,
       model,
       deepBackend,
+      cookie,
     });
     return createUIMessageStreamResponse({ stream });
   }
@@ -747,7 +757,7 @@ export async function POST(req: NextRequest) {
               },
             ],
           });
-          await saveConversation(conversationId, persisted, deriveTitle(messages));
+          await saveConversation(conversationId, persisted, deriveTitle(messages), cookie);
         }
       },
       onError: (error) => {
@@ -927,7 +937,7 @@ export async function POST(req: NextRequest) {
               role: "assistant",
               parts: [{ type: "text", text: humanMsg }],
             });
-            await saveConversation(conversationId, persisted, deriveTitle(messages));
+            await saveConversation(conversationId, persisted, deriveTitle(messages), cookie);
           }
           emitTurnCost();
           return;
@@ -970,7 +980,7 @@ export async function POST(req: NextRequest) {
               role: "assistant",
               parts: [{ type: "text", text: finalText }],
             });
-            await saveConversation(conversationId, persisted, deriveTitle(messages));
+            await saveConversation(conversationId, persisted, deriveTitle(messages), cookie);
           }
           emitTurnCost();
           return;

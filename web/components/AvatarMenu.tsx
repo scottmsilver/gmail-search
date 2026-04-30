@@ -115,19 +115,46 @@ export function AvatarMenu() {
               Settings
             </Link>
             {isSignedIn ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setOpen(false);
-                  void signOut();
-                }}
-                className={cn(
-                  "w-full rounded px-2 py-1.5 text-left text-xs",
-                  "transition hover:bg-accent hover:text-accent-foreground",
-                )}
-              >
-                Sign out (and switch account)
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    // Switch account: clear our cookie, then bounce
+                    // to /login with prompt=select_account so Google
+                    // shows the account chooser instead of auto-using
+                    // the previously-signed-in account.
+                    void (async () => {
+                      try {
+                        await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+                      } catch {
+                        // Ignore — even if the logout POST fails, our
+                        // cookie can be overwritten by a fresh callback.
+                      }
+                      window.location.assign("/api/auth/login?prompt=select_account&return_url=/");
+                    })();
+                  }}
+                  className={cn(
+                    "w-full rounded px-2 py-1.5 text-left text-xs",
+                    "transition hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  Switch account
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    void signOut();
+                  }}
+                  className={cn(
+                    "w-full rounded px-2 py-1.5 text-left text-xs",
+                    "transition hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  Sign out
+                </button>
+              </>
             ) : null}
           </div>
         </div>

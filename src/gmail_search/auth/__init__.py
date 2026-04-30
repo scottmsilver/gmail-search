@@ -16,6 +16,7 @@ from gmail_search.auth.session import (
     is_multi_tenant_enabled,
     issue_handoff_jwt_for_test,
     require_user,
+    require_user_id,
     set_session_cookie,
     verify_handoff_jwt,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "is_multi_tenant_enabled",
     "issue_handoff_jwt_for_test",
     "require_user",
+    "require_user_id",
     "set_session_cookie",
     "verify_handoff_jwt",
 ]

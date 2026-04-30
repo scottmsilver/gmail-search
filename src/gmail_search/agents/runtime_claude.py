@@ -91,6 +91,7 @@ async def register_session_via_admin(
     db_dsn: str | None = None,
     conversation_id: str | None = None,
     workspace: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Register a turn's session_id with the out-of-process MCP server.
 
@@ -108,7 +109,11 @@ async def register_session_via_admin(
     `mcp_tools_server.post_session` + `_resolve_server_db_dsn`.
 
     `conversation_id`, when supplied, opts the session into the
-    per-conversation persistent sandbox /work mount on the server."""
+    per-conversation persistent sandbox /work mount on the server.
+
+    `user_id`, when supplied, scopes every tool call this session
+    makes to that user's data via X-User-Id + service-token on the
+    backend /api/* calls."""
     if db_dsn:
         logger.debug("register_session_via_admin: ignoring db_dsn (resolved server-side)")
     url = f"{_mcp_admin_url()}/admin/sessions"
@@ -117,6 +122,8 @@ async def register_session_via_admin(
         body["conversation_id"] = conversation_id
     if workspace is not None:
         body["workspace"] = workspace
+    if user_id is not None:
+        body["user_id"] = user_id
     headers = {"Content-Type": "application/json", **_build_mcp_admin_headers()}
     async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(url, json=body, headers=headers)

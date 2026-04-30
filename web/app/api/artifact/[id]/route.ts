@@ -9,9 +9,13 @@ import { pythonApiUrl } from "@/lib/config";
 // images render inline and CSVs download.
 export const runtime = "nodejs";
 
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await ctx.params;
-  const upstream = await fetch(`${pythonApiUrl()}/api/artifact/${encodeURIComponent(id)}`);
+  const cookie = req.headers.get("cookie") ?? "";
+  const upstream = await fetch(`${pythonApiUrl()}/api/artifact/${encodeURIComponent(id)}`, {
+    cache: "no-store",
+    headers: cookie ? { cookie } : undefined,
+  });
   if (!upstream.ok) {
     return new Response(`artifact ${id} not found`, { status: upstream.status });
   }

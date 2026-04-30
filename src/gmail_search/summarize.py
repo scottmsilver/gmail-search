@@ -665,14 +665,17 @@ def _repair_broken_markdown_links(text: str) -> str:
 
 
 def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
+    # user_id is denormalized from the parent messages row via subquery
+    # so the summarizer's call site stays unchanged. The subquery hits
+    # the messages PK index — sub-millisecond.
     conn.execute(
-        """INSERT INTO message_summaries (message_id, summary, model)
-           VALUES (%s, %s, %s)
+        """INSERT INTO message_summaries (message_id, summary, model, user_id)
+           VALUES (%s, %s, %s, (SELECT user_id FROM messages WHERE id = %s))
            ON CONFLICT(message_id) DO UPDATE SET
              summary = excluded.summary,
              model = excluded.model,
              created_at = CURRENT_TIMESTAMP""",
-        (message_id, summary, model),
+        (message_id, summary, model, message_id),
     )
 
 
@@ -690,14 +693,14 @@ def _record_summary_failure(conn, message_id: str, model: str, error: str) -> No
     # known failure modes (context overflow, parse failures, backend
     # 5xx) from new ones.
     conn.execute(
-        """INSERT INTO summary_failures (message_id, model, error, attempts)
-           VALUES (%s, %s, %s, 1)
+        """INSERT INTO summary_failures (message_id, model, error, attempts, user_id)
+           VALUES (%s, %s, %s, 1, (SELECT user_id FROM messages WHERE id = %s))
            ON CONFLICT (message_id) DO UPDATE SET
              model = EXCLUDED.model,
              error = EXCLUDED.error,
              attempts = summary_failures.attempts + 1,
              last_seen = NOW()""",
-        (message_id, model, (error or "unknown")[:400]),
+        (message_id, model, (error or "unknown")[:400], message_id),
     )
 
 

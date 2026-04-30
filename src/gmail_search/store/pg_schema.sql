@@ -428,6 +428,205 @@ CREATE TABLE IF NOT EXISTS invited_emails (
 );
 
 -- ─────────────────────────────────────────────────────────────────────
+-- Multi-tenant Phase 2 + 3 — per-user data scoping
+-- ─────────────────────────────────────────────────────────────────────
+-- Adds `user_id TEXT REFERENCES users(id) ON DELETE CASCADE` to every
+-- table that holds per-user data. Phased rollout:
+--   1. (this file) add columns NULLABLE — old rows are NULL, new rows
+--      written by Phase 3 code carry the writer's user_id.
+--   2. (scripts/migrate_phase23.py) chunked backfill: assign all
+--      existing rows to the bootstrap user (scott).
+--   3. (also in migrate_phase23.py) SET NOT NULL on critical hot paths
+--      once the backfill is verified — invariant against silently
+--      writing NULL user_id from a missed write site.
+--   4. (Phase 3 code) every read path adds WHERE user_id = $current.
+--
+-- Denormalized columns (added directly even though derivable via JOIN)
+-- are flagged in the comment — added so the hot-path search filter
+-- doesn't have to JOIN the parent for every candidate. The bench in
+-- §3a Step 5 confirmed BM25 composes cleanly with `AND user_id = $1`.
+--
+-- Tables intentionally kept SHARED across users:
+--   * query_cache — cache hit = saved embedding cost; the query
+--     embedding is opaque (just a vector) and exposes nothing about
+--     other users.
+--   * pg_ivm_immv (extension), spatial / postgis tables.
+--   * job_progress — per-process daemon tracking, not per-user data.
+--     If we want per-user job rows later, key by (user_id, job_id).
+
+ALTER TABLE messages          ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE embeddings        ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+ALTER TABLE attachments       ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+ALTER TABLE costs             ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE message_summaries ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+ALTER TABLE summary_failures  ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+ALTER TABLE thread_summary    ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE topics            ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE message_topics    ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+ALTER TABLE contact_frequency ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE term_aliases      ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE model_battles     ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE conversations     ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE agent_sessions    ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;  -- denormalized
+
+-- PK changes for tables with existing rows (contact_frequency,
+-- term_aliases, topics) are NOT done here — they require user_id NOT
+-- NULL, which depends on backfill. See scripts/migrate_phase23.py.
+--
+-- scann_index_pointer is special: a fresh schema has zero rows in it
+-- (the row only gets created on the first reindex), so we CAN promote
+-- it to per-user shape inline. This makes test fixtures work without
+-- having to also run migrate_phase23.py — the production migration
+-- script handles the case where existing rows need backfill.
+ALTER TABLE scann_index_pointer ADD COLUMN IF NOT EXISTS user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'scann_index_pointer' AND column_name = 'id'
+    ) THEN
+        -- Only safe if the table is empty; production rows are
+        -- backfilled first by migrate_phase23.py before this runs.
+        IF (SELECT COUNT(*) FROM scann_index_pointer WHERE user_id IS NULL) = 0 THEN
+            ALTER TABLE scann_index_pointer ALTER COLUMN user_id SET NOT NULL;
+            ALTER TABLE scann_index_pointer DROP CONSTRAINT IF EXISTS scann_index_pointer_pkey;
+            ALTER TABLE scann_index_pointer DROP COLUMN id;
+            ALTER TABLE scann_index_pointer ADD PRIMARY KEY (user_id);
+        END IF;
+    END IF;
+END $$;
+
+-- Per-user query indexes — created CONCURRENTLY in the migration
+-- script (CREATE INDEX CONCURRENTLY can't run inside a transaction,
+-- and pg_schema.sql is applied as one). The ones below are safe to
+-- declare here because they're index-creation-on-empty-or-new tables
+-- that complete in microseconds.
+CREATE INDEX IF NOT EXISTS idx_messages_user_date          ON messages          (user_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_embeddings_user             ON embeddings        (user_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_user            ON attachments       (user_id);
+CREATE INDEX IF NOT EXISTS idx_costs_user_ts               ON costs             (user_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_thread_summary_user         ON thread_summary    (user_id);
+CREATE INDEX IF NOT EXISTS idx_message_summaries_user      ON message_summaries (user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_updated  ON conversations    (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_user         ON agent_sessions   (user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_battles_user          ON model_battles    (user_id, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Phase 3g — Row-Level Security for the /api/sql analyst sandbox
+-- ─────────────────────────────────────────────────────────────────────
+-- The deep-mode planner can write SQL like `SELECT count(*) FROM
+-- messages` with no `WHERE user_id = ...` and silently see other
+-- household members' rows. Instruction-only mitigations don't hold:
+-- the planner's prompt is static, doesn't fetch our schema preamble,
+-- and Gemini is happy to write unscoped SQL when the question is
+-- "how many emails total?".
+--
+-- This block locks it down at the storage layer:
+--   1. A non-superuser role `gmail_search_reader` (NOLOGIN — entered
+--      via SET LOCAL ROLE inside the /api/sql transaction). It has
+--      SELECT only on the LLM-facing tables (the same set documented
+--      in TABLE_DOCS / describe_schema_for_llm). Internal tables
+--      (query_cache, sync_state, agent_*, scann_*, invited_emails,
+--      users, job_progress, embeddings, spatial_ref_sys) are
+--      intentionally NOT granted, so `SELECT * FROM query_cache` from
+--      the LLM raises "permission denied" rather than leaking.
+--   2. ENABLE + FORCE ROW LEVEL SECURITY on every per-user table.
+--      A single policy reads `current_setting('app.user_id', true)`
+--      — the second arg makes a missing setting return NULL instead
+--      of erroring, and NULL fails the equality so no rows are
+--      visible. That's the safe default for any code path that
+--      forgets to set the variable.
+--   3. /api/sql opens its psycopg connection, then inside one
+--      transaction does:
+--         SET LOCAL ROLE gmail_search_reader;
+--         SET LOCAL app.user_id = <active user>;
+--         <the LLM's query>;
+--      ROLLBACK at end (or COMMIT — the query is read-only). After
+--      the transaction the connection's role/setting reset.
+--
+-- Daemon writes (the bootstrap user, the watch/update/summarize
+-- daemons) keep connecting as `gmail_search` (superuser, BYPASSRLS),
+-- so RLS doesn't get in their way. The lockdown is specifically for
+-- the LLM-driven /api/sql endpoint — the one place a hostile or
+-- forgetful prompt can run free-form SELECT.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gmail_search_reader') THEN
+        CREATE ROLE gmail_search_reader NOLOGIN;
+    END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA public TO gmail_search_reader;
+-- LLM-facing tables only. Keep this list in sync with TABLE_DOCS in
+-- src/gmail_search/store/db.py — anything documented for the LLM
+-- needs SELECT here; anything in `_INTERNAL_TABLES` must NOT.
+GRANT SELECT ON
+    messages,
+    attachments,
+    contact_frequency,
+    conversations,
+    conversation_messages,
+    costs,
+    job_progress,
+    message_summaries,
+    message_topics,
+    model_battles,
+    summary_failures,
+    term_aliases,
+    thread_summary,
+    topics
+TO gmail_search_reader;
+
+-- Per-user RLS for the tables that have a `user_id` column directly.
+DO $$
+DECLARE
+    tbl TEXT;
+BEGIN
+    FOREACH tbl IN ARRAY ARRAY[
+        'messages',
+        'attachments',
+        'contact_frequency',
+        'conversations',
+        'costs',
+        'message_summaries',
+        'message_topics',
+        'model_battles',
+        'summary_failures',
+        'term_aliases',
+        'thread_summary',
+        'topics'
+    ]
+    LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', tbl);
+        -- FORCE so the policy applies to the table owner too, not just
+        -- to other roles. Combined with the reader role's lack of
+        -- BYPASSRLS, this is what makes the gate effective.
+        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation ON %I '
+            'USING (user_id::text = current_setting(''app.user_id'', true)) '
+            'WITH CHECK (user_id::text = current_setting(''app.user_id'', true))',
+            tbl
+        );
+    END LOOP;
+END $$;
+
+-- conversation_messages doesn't have its own user_id — scope through
+-- the parent conversation. Subquery RLS is slower per row but at
+-- household scale (2-5 users) it's unmeasurable.
+ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_messages FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON conversation_messages;
+CREATE POLICY tenant_isolation ON conversation_messages
+    USING (EXISTS (
+        SELECT 1 FROM conversations c
+         WHERE c.id = conversation_messages.conversation_id
+           AND c.user_id::text = current_setting('app.user_id', true)
+    ));
+
+-- ─────────────────────────────────────────────────────────────────────
 -- Delta vs SQLite
 -- ─────────────────────────────────────────────────────────────────────
 -- Tables intentionally DROPPED relative to SQLite:

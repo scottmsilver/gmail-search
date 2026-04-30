@@ -42,7 +42,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SCANN_BUDGET_MB = 2048
 
 
-def reindex(db_path: Path, data_dir: Path, cfg: dict[str, Any], *, light: bool = False) -> None:
+def reindex(
+    db_path: Path,
+    data_dir: Path,
+    cfg: dict[str, Any],
+    *,
+    light: bool = False,
+    user_id: Optional[str] = None,
+) -> None:
     """Rebuild the on-disk surfaces that back /api/search.
 
     light=True  → hot-path rebuilds only (ScaNN + FTS + thread summary).
@@ -50,12 +57,31 @@ def reindex(db_path: Path, data_dir: Path, cfg: dict[str, Any], *, light: bool =
     light=False → adds the slower rebuilds (contact, spell, topics,
                   aliases) and wipes the query embedding cache.
                   What the `reindex` CLI + post-backfill path run.
+
+    Per-user: rebuilds only the given user's surfaces. Daemon callers
+    pass `user_id=None` and the bootstrap user is resolved. Phase 3c
+    per-user sync iterates and passes each syncing user's id explicitly.
     """
-    # `index_dir` is the canonical PREFIX. `build_index_sharded` writes
-    # a timestamped sibling and flips the DB pointer row; readers
-    # resolve through `resolve_active_index_dir` so a mid-reindex
-    # query always lands on a fully-written build.
-    index_dir = Path(data_dir) / "scann_index"
+    # Resolve user_id once at the top — every downstream rebuild_*
+    # accepts it explicitly so the bootstrap-vs-real-user decision is
+    # made in one place, not threaded through each call.
+    from gmail_search.auth.write_user import resolve_write_user_id
+    from gmail_search.store.db import get_connection as _get_conn
+
+    _conn = _get_conn(db_path)
+    try:
+        uid = resolve_write_user_id(_conn, user_id=user_id)
+    finally:
+        _conn.close()
+
+    # `index_dir` is the canonical PREFIX. Per-user index lives under
+    # `data/users/<user_id>/scann_index` so two users' indexes never
+    # share files. `build_index_sharded` writes a timestamped sibling
+    # and flips the DB pointer row; readers resolve through
+    # `resolve_active_index_dir` so a mid-reindex query always lands
+    # on a fully-written build.
+    index_dir = Path(data_dir) / "users" / uid / "scann_index"
+    index_dir.parent.mkdir(parents=True, exist_ok=True)
     dimensions = int(cfg["embedding"]["dimensions"])
     budget_mb = int(cfg.get("indexing", {}).get("scann_peak_budget_mb", _DEFAULT_SCANN_BUDGET_MB))
     shard_size = shard_size_from_budget(budget_mb, dimensions)
@@ -101,18 +127,22 @@ def reindex(db_path: Path, data_dir: Path, cfg: dict[str, Any], *, light: bool =
         manual_rerank=manual_rerank,
         ah_dim=ah_dim,
         reorder_pool=reorder_pool,
+        user_id=uid,
     )
-    logger.info("reindex: active ScaNN index now at %s", written_to)
+    logger.info("reindex: active ScaNN index for user %s now at %s", uid, written_to)
     rebuild_fts(db_path)
-    rebuild_thread_summary(db_path)
+    rebuild_thread_summary(db_path, user_id=uid)
 
     if light:
         return
 
-    rebuild_contact_frequency(db_path)
-    rebuild_spell_dictionary(db_path, data_dir)
-    rebuild_topics(db_path)
-    rebuild_term_aliases(db_path)
+    rebuild_contact_frequency(db_path, user_id=uid)
+    rebuild_spell_dictionary(db_path, data_dir, user_id=uid)
+    rebuild_topics(db_path, user_id=uid)
+    rebuild_term_aliases(db_path, user_id=uid)
     # Cached query embeddings can now point at stale term-alias
     # expansions; wipe so the next query re-expands + re-embeds.
+    # query_cache is intentionally shared across users (cache hit =
+    # saved embedding cost; the query embedding is opaque) so the
+    # clear is global, not per-user.
     clear_query_cache(db_path)

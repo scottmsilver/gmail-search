@@ -97,7 +97,7 @@ def _install_fakes(
     register_calls: list[str] = []
     unregister_calls: list[str] = []
 
-    async def fake_register(session_id, *, evidence_records, conversation_id=None, workspace=None):
+    async def fake_register(session_id, *, evidence_records, conversation_id=None, workspace=None, user_id=None):
         register_calls.append(session_id)
 
     async def fake_unregister(session_id):

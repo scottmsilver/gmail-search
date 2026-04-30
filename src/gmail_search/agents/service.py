@@ -27,7 +27,7 @@ import logging
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -39,6 +39,7 @@ from gmail_search.agents.session import (
     get_artifact,
     new_session_id,
 )
+from gmail_search.auth import require_user_id
 from gmail_search.store.db import get_connection
 
 
@@ -535,6 +536,7 @@ async def _real_run(
     default_model: str | None = None,
     backend: str | None = None,
     conversation_id: str | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Live pipeline: fire the Orchestrator as a background task while
     this generator polls the session's event log and streams every
@@ -730,6 +732,7 @@ async def _real_run(
                 cost_sink=_record_cost,
                 resume=resume_uuid,
                 on_session_uuid=_persist_first_uuid,
+                user_id=user_id,
             )
         )
         last_seq = 0
@@ -800,6 +803,7 @@ async def _real_run(
             db_dsn=None,
             conversation_id=conversation_id,
             workspace=workspace,
+            user_id=user_id,
         )
         claude_session_active = True
 
@@ -1126,11 +1130,15 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
             logger.exception("claudebox streaming probe raised unexpectedly")
 
     @app.post("/api/agent/analyze")
-    async def analyze(req: AnalyzeRequest) -> Response:
+    async def analyze(
+        req: AnalyzeRequest,
+        user_id: str = Depends(require_user_id),
+    ) -> Response:
         """Start a deep-mode turn. Creates the session row, then
         streams SSE as each sub-agent emits events. `question` is
         required; conversation_id is optional (links the session back
-        to the chat thread in the UI)."""
+        to the chat thread in the UI). user_id flows through so MCP
+        tool calls scope to the requesting user's data."""
         session_id = new_session_id()
         conn = get_connection(db_path)
         try:
@@ -1140,6 +1148,7 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
                 conversation_id=req.conversation_id,
                 mode="deep",
                 question=req.question,
+                user_id=user_id,
             )
         finally:
             conn.close()
@@ -1159,6 +1168,7 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
                     default_model=req.model,
                     backend=req.backend,
                     conversation_id=req.conversation_id,
+                    user_id=user_id,
                 ):
                     yield frame
             else:

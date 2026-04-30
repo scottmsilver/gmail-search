@@ -160,9 +160,22 @@ class SearchEngine:
         index_dir: Path,
         config: dict[str, Any],
         embedder: GeminiEmbedder | Any = None,
+        *,
+        user_id: str | None = None,
     ):
         self.db_path = db_path
         self.config = config
+        # Per-user scoping: every DB query against per-user tables is
+        # filtered by `self.user_id`. None = bootstrap user (single-pool
+        # install, daemon writes). Multi-tenant callers construct one
+        # engine per signed-in user via the server's per-user cache.
+        from gmail_search.auth.write_user import resolve_write_user_id
+
+        _conn = get_connection(db_path)
+        try:
+            self.user_id = resolve_write_user_id(_conn, user_id=user_id)
+        finally:
+            _conn.close()
         dims = config["embedding"]["dimensions"]
         self.searcher = ScannSearcher(index_dir, dimensions=dims)
         self.embedder = embedder or GeminiEmbedder(config)
@@ -188,11 +201,14 @@ class SearchEngine:
         self._load_term_aliases()
 
     def _detect_user_email(self):
-        """Find the most frequent sender — that's the user."""
+        """Find the most frequent sender of THIS user's messages —
+        that's their own email."""
         try:
             conn = get_connection(self.db_path)
             row = conn.execute(
-                "SELECT from_addr, COUNT(*) as c FROM messages GROUP BY from_addr ORDER BY c DESC LIMIT 1"
+                "SELECT from_addr, COUNT(*) as c FROM messages WHERE user_id = %s "
+                "GROUP BY from_addr ORDER BY c DESC LIMIT 1",
+                (self.user_id,),
             ).fetchone()
             conn.close()
             if row:
@@ -208,19 +224,27 @@ class SearchEngine:
     def _load_contact_frequency(self):
         try:
             conn = get_connection(self.db_path)
-            rows = conn.execute("SELECT email, score FROM contact_frequency").fetchall()
+            rows = conn.execute(
+                "SELECT email, score FROM contact_frequency WHERE user_id = %s",
+                (self.user_id,),
+            ).fetchall()
             conn.close()
             self.contact_freq = {r["email"]: r["score"] for r in rows}
         except Exception:
             self.contact_freq = {}
 
     def _load_spell_dictionary(self):
-        """Load SymSpell dictionary built from email corpus."""
+        """Load SymSpell dictionary built from email corpus. Per-user
+        path under `data/users/<user_id>/spell_dictionary.txt`; falls
+        back to legacy global `data/spell_dictionary.txt` if the
+        per-user one hasn't been built yet (fresh install)."""
         try:
             from symspellpy import SymSpell, Verbosity  # noqa: F401
 
             data_dir = Path(self.config.get("data_dir", "data"))
-            dict_path = data_dir / "spell_dictionary.txt"
+            user_dict = data_dir / "users" / self.user_id / "spell_dictionary.txt"
+            legacy_dict = data_dir / "spell_dictionary.txt"
+            dict_path = user_dict if user_dict.exists() else legacy_dict
             if dict_path.exists():
                 self._spell = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
                 self._spell.load_dictionary(str(dict_path), term_index=0, count_index=1)
@@ -238,7 +262,10 @@ class SearchEngine:
 
         try:
             conn = get_connection(self.db_path)
-            rows = conn.execute("SELECT term, expansions FROM term_aliases").fetchall()
+            rows = conn.execute(
+                "SELECT term, expansions FROM term_aliases WHERE user_id = %s",
+                (self.user_id,),
+            ).fetchall()
             conn.close()
             self._aliases = {r["term"]: json.loads(r["expansions"]) for r in rows}
             if self._aliases:
@@ -411,8 +438,12 @@ class SearchEngine:
         if not has_any_filter:
             return None
 
-        where: list[str] = []
-        params: list = []
+        # ALWAYS scope by user_id — the structured-filter resolver is
+        # the gate for the message ID list that BM25 / vector search
+        # then operates on. Without this, a from:/subject: query would
+        # return matches across every user's corpus.
+        where: list[str] = ["m.user_id = %s"]
+        params: list = [self.user_id]
 
         if pq.from_filter:
             where.append("m.from_addr ILIKE %s")
@@ -430,9 +461,9 @@ class SearchEngine:
             where.append("m.date <= %s")
             params.append(f"{date_to}T23:59:59")
         if pq.has_attachment is True:
-            where.append("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)")
+            where.append("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id AND a.user_id = m.user_id)")
 
-        where_sql = " AND ".join(where) if where else "TRUE"
+        where_sql = " AND ".join(where)
         # Cap +1 so we can detect overflow and warn.
         sql = f"SELECT m.id FROM messages m WHERE {where_sql} LIMIT {CANDIDATE_ID_CAP + 1}"
         rows = conn.execute(sql, params).fetchall()
@@ -473,8 +504,9 @@ class SearchEngine:
             rows = conn.execute(
                 f"""SELECT id, message_id, embedding
                     FROM embeddings
-                    WHERE message_id IN ({placeholders}) AND model = %s""",
-                list(candidate_msg_ids) + [model],
+                    WHERE message_id IN ({placeholders}) AND model = %s
+                      AND user_id = %s""",
+                list(candidate_msg_ids) + [model, self.user_id],
             ).fetchall()
         finally:
             conn.close()
@@ -540,8 +572,8 @@ class SearchEngine:
         try:
             placeholders = ",".join(["%s"] * len(emb_ids))
             rows = conn.execute(
-                f"SELECT id, message_id FROM embeddings WHERE id IN ({placeholders})",
-                emb_ids,
+                f"SELECT id, message_id FROM embeddings WHERE id IN ({placeholders}) AND user_id = %s",
+                emb_ids + [self.user_id],
             ).fetchall()
         finally:
             conn.close()
@@ -762,10 +794,22 @@ class SearchEngine:
         # only within that restricted corpus (SQL-level `id = ANY(...)`),
         # so the date-window SQL post-filter below becomes redundant.
         bm25_limit = 2000 if has_date_filter else 200
-        bm25_scores = search_fts(conn, pq.text or expanded_query, limit=bm25_limit, candidate_ids=candidate_ids)
+        bm25_scores = search_fts(
+            conn,
+            pq.text or expanded_query,
+            limit=bm25_limit,
+            candidate_ids=candidate_ids,
+            user_id=self.user_id,
+        )
         if expanded_query.lower() != query.lower():
             original_pq = parse_query(query)
-            original_bm25 = search_fts(conn, original_pq.text or query, limit=bm25_limit, candidate_ids=candidate_ids)
+            original_bm25 = search_fts(
+                conn,
+                original_pq.text or query,
+                limit=bm25_limit,
+                candidate_ids=candidate_ids,
+                user_id=self.user_id,
+            )
             for mid, score in original_bm25.items():
                 if mid not in bm25_scores or score > bm25_scores[mid]:
                     bm25_scores[mid] = score
@@ -780,8 +824,8 @@ class SearchEngine:
             placeholders = ",".join(["%s"] * len(bm25_only_ids))
             bm25_rows = conn.execute(
                 f"""SELECT id, thread_id, subject, from_addr, date, body_text
-                    FROM messages WHERE id IN ({placeholders})""",
-                bm25_only_ids,
+                    FROM messages WHERE id IN ({placeholders}) AND user_id = %s""",
+                bm25_only_ids + [self.user_id],
             ).fetchall()
             for r in bm25_rows:
                 thread_id = r["thread_id"]
@@ -820,8 +864,8 @@ class SearchEngine:
         thread_ids = list(threads.keys())
         placeholders = ",".join(["%s"] * len(thread_ids))
         summary_rows = conn.execute(
-            f"SELECT * FROM thread_summary WHERE thread_id IN ({placeholders})",
-            thread_ids,
+            f"SELECT * FROM thread_summary WHERE thread_id IN ({placeholders}) AND user_id = %s",
+            thread_ids + [self.user_id],
         ).fetchall()
         summary_map = {r["thread_id"]: r for r in summary_rows}
 

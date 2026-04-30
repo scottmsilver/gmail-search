@@ -9,16 +9,21 @@ import scann
 logger = logging.getLogger(__name__)
 
 
-def resolve_active_index_dir(db_path: Path, fallback: Path) -> Path:
+def resolve_active_index_dir(db_path: Path, fallback: Path, *, user_id: str | None = None) -> Path:
     """Return the active on-disk ScaNN index directory, consulting the
     `scann_index_pointer` row in SQLite first and falling back to
-    `fallback` (typically `data/scann_index`) when the pointer is
-    absent or points at a missing path.
+    `fallback` when the pointer is absent or points at a missing path.
+
+    Per-user: Phase 3a moved the pointer table from the legacy single-row
+    (CHECK(id=1)) shape to one row per user (PK = user_id). The lookup
+    here resolves the bootstrap user when no `user_id` is passed, so
+    daemon callers keep working unchanged.
 
     Every search-path caller (server, CLI query, battle mode) should
     route through this instead of hard-coding `data_dir / "scann_index"`
     so a reindex swap is picked up without a process restart.
     """
+    from gmail_search.auth.write_user import resolve_write_user_id
     from gmail_search.store.db import get_connection
 
     try:
@@ -26,15 +31,19 @@ def resolve_active_index_dir(db_path: Path, fallback: Path) -> Path:
     except Exception:
         return fallback
     try:
-        # SELECT against the pointer table directly, catching the
-        # "no such table" failure for the case where a caller hands us
-        # a DB that predates the pointer schema. This is backend-agnostic:
-        # SQLite raises `OperationalError("no such table")`, Postgres
-        # raises `UndefinedTable`. Either way we fall through to the
-        # default path. Replaces the old `sqlite_master` probe which
-        # didn't exist on Postgres.
+        # Resolve the pointer's user_id. The `users` table may not exist
+        # in test fixtures / un-migrated installs; in that case fall
+        # back to the legacy single-row lookup so older callers keep
+        # working unchanged.
         try:
-            row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE id = 1").fetchone()
+            uid = resolve_write_user_id(conn, user_id=user_id)
+        except Exception:
+            uid = None
+        try:
+            if uid is None:
+                row = conn.execute("SELECT current_dir FROM scann_index_pointer LIMIT 1").fetchone()
+            else:
+                row = conn.execute("SELECT current_dir FROM scann_index_pointer WHERE user_id = %s", (uid,)).fetchone()
         except Exception:
             return fallback
     finally:

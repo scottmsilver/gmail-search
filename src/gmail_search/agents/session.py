@@ -47,13 +47,21 @@ def create_session(
     conversation_id: str | None,
     mode: str,
     question: str,
+    user_id: str | None = None,
 ) -> None:
     """Insert the row that anchors this turn's events. Status stays
-    `running` until `finalize_session` flips it to `done` or `error`."""
+    `running` until `finalize_session` flips it to `done` or `error`.
+
+    `user_id` is required by the multi-tenant schema. Callers from a
+    request context pass `request.user.id`; daemon callers (none today
+    for deep-mode but possible) get the bootstrap user."""
+    from gmail_search.auth.write_user import resolve_write_user_id
+
+    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
-        """INSERT INTO agent_sessions (id, conversation_id, mode, question, status)
-           VALUES (%s, %s, %s, %s, 'running')""",
-        (session_id, conversation_id, mode, question),
+        """INSERT INTO agent_sessions (id, conversation_id, mode, question, status, user_id)
+           VALUES (%s, %s, %s, %s, 'running', %s)""",
+        (session_id, conversation_id, mode, question, uid),
     )
     conn.commit()
 

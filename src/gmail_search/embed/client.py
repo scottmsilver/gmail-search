@@ -146,15 +146,27 @@ class GeminiEmbedder:
     def embed_texts_batch(self, texts: list[str], task_type: str | None = None) -> list[list[float]]:
         if task_type is None:
             task_type = self.task_type_document
-        result = self.client.models.embed_content(
-            model=self.model,
-            contents=texts,
-            config={
-                "task_type": task_type,
-                "output_dimensionality": self.dimensions,
-            },
-        )
-        return [e.values for e in result.embeddings]
+        # The google-genai SDK's `embed_content` with `contents=<list>`
+        # treats the list as a multi-part *single* content and returns
+        # ONE averaged embedding — not N. Diagnosed when 50 texts in
+        # produced 1 vector out, breaking `zip(chunk_owners, vectors)`
+        # and quietly dropping 49/50 inserts. Iterate one-at-a-time:
+        # slower but correct. The Batch API path in BatchGeminiEmbedder
+        # is the right way to do bulk; this regular client now matches
+        # the contract its callers rely on (one vector per text).
+        return [
+            self.client.models.embed_content(
+                model=self.model,
+                contents=t,
+                config={
+                    "task_type": task_type,
+                    "output_dimensionality": self.dimensions,
+                },
+            )
+            .embeddings[0]
+            .values
+            for t in texts
+        ]
 
     def embed_image(self, image_path: Path, task_type: str | None = None) -> list[float]:
         if task_type is None:

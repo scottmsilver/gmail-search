@@ -337,7 +337,7 @@ def reindex(ctx):
     click.echo("Index rebuilt (ScaNN + FTS + thread summary + contacts + spell + topics + aliases).")
 
 
-def _extract_pending_attachments(conn, att_config: dict) -> int:
+def _extract_pending_attachments(conn, att_config: dict, *, user_id: str | None = None) -> int:
     """Run the extractor against every attachment still awaiting text —
     in frontfill-first order so today's arrivals drain before the
     multi-year backfill. Returns the number of rows updated.
@@ -349,7 +349,7 @@ def _extract_pending_attachments(conn, att_config: dict) -> int:
     from gmail_search.extract import dispatch
     from gmail_search.store.queries import get_attachments_for_message, get_pending_extraction_message_ids
 
-    message_ids = get_pending_extraction_message_ids(conn)
+    message_ids = get_pending_extraction_message_ids(conn, user_id=user_id)
     extracted = 0
     for message_id in message_ids:
         for att in get_attachments_for_message(conn, message_id):
@@ -366,7 +366,11 @@ def _extract_pending_attachments(conn, att_config: dict) -> int:
                 continue
             updates: dict = {}
             if result.text:
-                updates["extracted_text"] = result.text
+                # PG TEXT columns reject NUL bytes — some PDFs / docs
+                # extract control bytes that would otherwise crash the
+                # whole cycle on UPDATE. Strip them so one bad PDF
+                # doesn't take down the daemon.
+                updates["extracted_text"] = result.text.replace("\x00", "")
             if result.images:
                 updates["image_path"] = str(result.images[0].parent if len(result.images) > 1 else result.images[0])
             if updates:
@@ -403,9 +407,16 @@ def _extract_pending_attachments(conn, att_config: dict) -> int:
     default=300,
     help="Seconds to sleep between loop iterations when caught up. Default 5 min.",
 )
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account to sync. Defaults to GMS_BOOTSTRAP_EMAIL env. "
+    "In multi-tenant mode the API spawns one daemon per user with --email set.",
+)
 @common_options
 @click.pass_context
-def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep):
+def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep, email):
     import time as _time
 
     from gmail_search.embed.pipeline import run_embedding_pipeline
@@ -423,9 +434,31 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
     if budget:
         cfg["budget"]["max_usd"] = budget
 
-    service = build_gmail_service(data_dir)
+    # Surface the email to downstream code (gmail/auth.py reads this
+    # env to pick the broker entry; the API spawns subprocesses with
+    # --email and we mirror it into the env so all the per-user
+    # write_user lookups (resolve_write_user_id, etc.) line up too.
+    import os as _os
+
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+    service = build_gmail_service(data_dir, email=email)
     max_msg = max_messages or cfg["download"].get("max_messages")
     index_dir = data_dir / "scann_index"  # noqa: F841
+
+    # Resolve the active user_id once. With GMS_BOOTSTRAP_EMAIL set
+    # above, this picks up `email` (or the env default for legacy
+    # single-pool installs). Used for per-user job_progress keys + to
+    # scope the message COUNTs we report to the UI so silvershabbat's
+    # progress bar doesn't include scottmsilver's messages.
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+    _conn = get_connection(db_path)
+    try:
+        active_user_id = _resolve_uid(_conn)
+    finally:
+        _conn.close()
+    job_id = f"update:{active_user_id}"
 
     def _one_cycle() -> None:
         """Run the full download→extract→embed→reindex loop once, then
@@ -437,9 +470,9 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
         # relative to this cycle's start, not the first one, so the
         # UI rate/ETA reflects what's happening right now.
         conn = get_connection(db_path)
-        start_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        start_count = conn.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (active_user_id,)).fetchone()[0]
         conn.close()
-        progress = JobProgress(db_path, "update", start_completed=start_count)
+        progress = JobProgress(db_path, job_id, start_completed=start_count)
 
         total_downloaded = 0
         total_extracted = 0
@@ -515,7 +548,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
                 progress.update("extract", start_count + total_downloaded, progress_total, f"+{dl_count} downloaded")
                 click.echo("Extracting attachments...")
                 conn = get_connection(db_path)
-                extracted = _extract_pending_attachments(conn, att_config)
+                extracted = _extract_pending_attachments(conn, att_config, user_id=active_user_id)
                 conn.close()
                 total_extracted += extracted
                 click.echo(f"Extracted {extracted} attachments.")
@@ -549,26 +582,32 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
                 progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
                 click.echo("Embedding...")
                 conn = get_connection(db_path)
-                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"], user_id=active_user_id)
                 conn.close()
                 if not ok:
                     click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
                     break
-                emb_count = run_embedding_pipeline(db_path, cfg)
+                emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id)
                 total_embedded += emb_count
                 click.echo(f"Embedded {emb_count} chunks.")
 
                 # Reindex so search is live. light=True because heavy
                 # rebuilds (aliases, query cache wipe) run once at the
-                # end of the full update, not per-batch.
+                # end of the full update, not per-batch. user_id ensures
+                # we rebuild THIS user's ScaNN/FTS surfaces, not a
+                # different user's.
                 progress.update("reindex", start_count + total_downloaded, progress_total, f"+{emb_count} embedded")
                 click.echo("Reindexing...")
-                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
+                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True, user_id=active_user_id)
 
                 conn = get_connection(db_path)
-                msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-                emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-                cost = get_total_spend(conn)
+                msg_count = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE user_id = %s", (active_user_id,)
+                ).fetchone()[0]
+                emb_total = conn.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE user_id = %s", (active_user_id,)
+                ).fetchone()[0]
+                cost = get_total_spend(conn, user_id=active_user_id)
                 conn.close()
                 click.echo(f"Status: {msg_count:,} messages | {emb_total:,} embeddings | ${cost:.2f} spent")
 
@@ -593,9 +632,9 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
             f"Cycle done! +{total_downloaded} downloaded, +{total_extracted} extracted, +{total_embedded} embedded"
         )
         conn = get_connection(db_path)
-        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-        total_cost = get_total_spend(conn)
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (active_user_id,)).fetchone()[0]
+        emb_total = conn.execute("SELECT COUNT(*) FROM embeddings WHERE user_id = %s", (active_user_id,)).fetchone()[0]
+        total_cost = get_total_spend(conn, user_id=active_user_id)
         conn.close()
         click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
 
@@ -622,7 +661,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
             try:
                 from gmail_search.store.db import JobProgress as _JP
 
-                _JP(db_path, "update", start_completed=0).update(
+                _JP(db_path, job_id, start_completed=0).update(
                     "error", 0, 0, f"crash: {type(e).__name__}: {str(e)[:120]}"
                 )
             except Exception:
@@ -635,7 +674,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep)
         try:
             from gmail_search.store.db import JobProgress as _JP
 
-            idle = _JP(db_path, "update", start_completed=0)
+            idle = _JP(db_path, job_id, start_completed=0)
             idle.update("idle", 0, 0, "waiting for next cycle")
         except Exception:
             idle = None
@@ -732,10 +771,18 @@ def stop(ctx):
 @click.option("--interval", type=int, default=120, help="Seconds between sync checks")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
 @click.option("--max-cycles", type=int, default=None, help="Exit after N cycles (for one-shot 'frontfill' runs)")
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account to watch. Defaults to GMS_BOOTSTRAP_EMAIL env. "
+    "API spawns one daemon per user with --email set.",
+)
 @common_options
 @click.pass_context
-def watch(ctx, interval, budget, max_cycles):
+def watch(ctx, interval, budget, max_cycles, email):
     """Poll for new emails, extract, embed, and reindex continuously."""
+    import os as _os
     import signal
     import time as _time
 
@@ -756,8 +803,21 @@ def watch(ctx, interval, budget, max_cycles):
     if budget:
         cfg["budget"]["max_usd"] = budget
 
-    service = build_gmail_service(data_dir)
-    progress = JobProgress(db_path, "watch")
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+    service = build_gmail_service(data_dir, email=email)
+
+    # Per-user job_progress key so two users' watch daemons don't
+    # collide on a single global "watch" row.
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+    _conn = get_connection(db_path)
+    try:
+        active_user_id = _resolve_uid(_conn)
+    finally:
+        _conn.close()
+    job_id = f"watch:{active_user_id}"
+    progress = JobProgress(db_path, job_id)
     running = True
 
     def handle_stop(sig, frame):
@@ -805,10 +865,15 @@ def watch(ctx, interval, budget, max_cycles):
                 progress.update("extract", cycle, 0, f"+{count} synced")
                 conn = get_connection(db_path)
                 try:
+                    # Filter to the active user — without this the watch
+                    # daemon also extracts other users' pending
+                    # attachments, which can OOM on a large peer backlog.
                     rows = conn.execute(
                         "SELECT DISTINCT m.id FROM messages m "
                         "JOIN attachments a ON a.message_id = m.id "
-                        "WHERE a.extracted_text IS NULL AND a.image_path IS NULL AND a.raw_path IS NOT NULL"
+                        "WHERE a.extracted_text IS NULL AND a.image_path IS NULL "
+                        "AND a.raw_path IS NOT NULL AND m.user_id = %s",
+                        (active_user_id,),
                     ).fetchall()
                     for row in rows:
                         attachments = get_attachments_for_message(conn, row["id"])
@@ -825,7 +890,10 @@ def watch(ctx, interval, budget, max_cycles):
                                 continue
                             updates = {}
                             if result.text:
-                                updates["extracted_text"] = result.text
+                                # Strip NUL bytes — PG TEXT can't store
+                                # them and one bad PDF would otherwise
+                                # crash the whole watch cycle.
+                                updates["extracted_text"] = result.text.replace("\x00", "")
                             if result.images:
                                 updates["image_path"] = str(
                                     result.images[0].parent if len(result.images) > 1 else result.images[0]
@@ -843,10 +911,10 @@ def watch(ctx, interval, budget, max_cycles):
                 # Embed
                 progress.update("embed", cycle, 0, "embedding new messages")
                 conn = get_connection(db_path)
-                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+                ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"], user_id=active_user_id)
                 conn.close()
                 if ok:
-                    emb_count = run_embedding_pipeline(db_path, cfg)
+                    emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id)
                     if emb_count:
                         click.echo(f"[cycle {cycle}] Embedded {emb_count} chunks")
                 else:
@@ -854,11 +922,15 @@ def watch(ctx, interval, budget, max_cycles):
 
                 # Reindex — light=True keeps the hot path fast.
                 progress.update("reindex", cycle, 0, "updating indexes")
-                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True)
+                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True, user_id=active_user_id)
 
                 conn = get_connection(db_path)
-                msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-                emb_total = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+                msg_count = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE user_id = %s", (active_user_id,)
+                ).fetchone()[0]
+                emb_total = conn.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE user_id = %s", (active_user_id,)
+                ).fetchone()[0]
                 conn.close()
                 click.echo(f"[cycle {cycle}] {msg_count:,} messages | {emb_total:,} embeddings")
             else:
@@ -1380,14 +1452,25 @@ def status(ctx):
     default=5.0,
     help="Seconds to sleep between passes when --loop is set and the last pass found nothing (default 5).",
 )
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account to summarize. Defaults to GMS_BOOTSTRAP_EMAIL env. "
+    "API spawns one daemon per user with --email set.",
+)
 @common_options
 @click.pass_context
-def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep):
+def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep, email):
     import logging
+    import os as _os
     import time
 
     from gmail_search.llm import get_backend
     from gmail_search.summarize import backfill
+
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     backend = get_backend()
@@ -1398,13 +1481,23 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep)
         f"limit={pass_limit}, loop={loop})"
     )
 
+    # Per-user job_progress so two users' summarize daemons coexist.
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+    _conn = get_connection(ctx.obj["db_path"])
+    try:
+        active_user_id = _resolve_uid(_conn)
+    finally:
+        _conn.close()
+    job_id = f"summarize:{active_user_id}"
+
     # In loop mode we keep an `summarize` job_progress row warm between
     # passes so the supervisor / /api/jobs/running see the daemon as
     # alive even when there's nothing to summarize. Created lazily —
     # no-op for the one-shot path.
     from gmail_search.store.db import JobProgress as _JP
 
-    idle_progress = _JP(ctx.obj["db_path"], "summarize", start_completed=0) if loop else None
+    idle_progress = _JP(ctx.obj["db_path"], job_id, start_completed=0) if loop else None
 
     while True:
         if idle_progress is not None:

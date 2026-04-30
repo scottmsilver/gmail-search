@@ -123,6 +123,87 @@ type AuthStatus = {
   drive_enabled: boolean;
 };
 
+// Broker-based per-user Gmail connection (multi-tenant Phase 3b).
+// Shown only when the server reports `multi_tenant: true`. Lets each
+// invited user grant Gmail access to the silver-oauth broker so the
+// sync daemon can fetch their mail with their own credentials.
+type GmailStatus = { multi_tenant: boolean; connected: boolean; scope_problem?: boolean };
+
+const BrokerGmailCard = () => {
+  const [status, setStatus] = useState<GmailStatus | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/gmail-status", { cache: "no-store", credentials: "include" });
+      if (!res.ok) return;
+      setStatus((await res.json()) as GmailStatus);
+    } catch {
+      // Server down — leave status null so the card renders neutrally.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    // Slow heartbeat so a connect-Gmail flow completing in another
+    // tab updates the status here without a hard refresh.
+    const id = setInterval(refresh, 8_000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  // Hide entirely in single-pool mode — the legacy AuthStatusCard
+  // below is the right surface there.
+  if (!status || !status.multi_tenant) return null;
+
+  // Top-level <a> nav (not fetch) so the broker round-trip happens
+  // via real browser navigation. SameSite=Lax cookies survive the
+  // top-level redirect chain; XHR/fetch wouldn't.
+  const here = typeof window !== "undefined" ? window.location.pathname : "/settings";
+  const connectHref = `/api/auth/connect-gmail?return_url=${encodeURIComponent(here)}`;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Gmail connection</CardTitle>
+        <CardDescription>
+          Grant the silver-oauth broker access to your Gmail so the sync daemon can index
+          your messages. Tokens stay on the broker — this app never sees them.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-muted-foreground">Status</span>
+          {status.connected ? (
+            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-600">
+              connected
+            </span>
+          ) : status.scope_problem ? (
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-600">
+              missing scope
+            </span>
+          ) : (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+              not connected
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <span className="text-xs text-muted-foreground">
+            {status.connected
+              ? "Re-connect to refresh granted scopes."
+              : "Click below to grant Gmail + Drive read access via Google."}
+          </span>
+          <a
+            href={connectHref}
+            className="inline-flex items-center rounded-md border border-border bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90"
+          >
+            {status.connected ? "Reconnect" : "Connect Gmail"}
+          </a>
+        </div>
+      </CardContent>
+    </Card>
+  );
+};
+
 const AuthStatusCard = () => {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -409,6 +490,8 @@ export const SettingsView = () => {
           {error}
         </div>
       )}
+
+      <BrokerGmailCard />
 
       <AuthStatusCard />
 

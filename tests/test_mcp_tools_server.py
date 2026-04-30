@@ -33,7 +33,7 @@ def test_search_emails_batch_routes_to_underlying_impl(monkeypatch):
     underlying batch impl with the input list."""
     captured: dict = {}
 
-    async def fake_batch(searches):
+    async def fake_batch(searches, *, user_id=None):
         captured["searches"] = searches
         return {"results": [{"input": s, "result": {"results": []}} for s in searches]}
 
@@ -59,7 +59,7 @@ def test_query_emails_batch_routes_to_underlying_impl(monkeypatch):
     """The batch structured-filter tool must forward the filters list."""
     captured: dict = {}
 
-    async def fake_batch(filters):
+    async def fake_batch(filters, *, user_id=None):
         captured["filters"] = filters
         return {"results": [{"input": f, "result": {"results": []}} for f in filters]}
 
@@ -152,7 +152,7 @@ def test_search_emails_batch_records_full_structured_response(monkeypatch):
         ]
     }
 
-    async def fake_batch(searches):
+    async def fake_batch(searches, *, user_id=None):
         return big_payload
 
     monkeypatch.setattr(mts, "_search_emails_batch_impl", fake_batch)
@@ -174,7 +174,7 @@ def test_unregister_session_clears_call_log(monkeypatch):
     """unregister_session must wipe the side-channel for the session
     so we don't leak structured payloads across turns."""
 
-    async def fake_batch(searches):
+    async def fake_batch(searches, *, user_id=None):
         return {"results": []}
 
     monkeypatch.setattr(mts, "_search_emails_batch_impl", fake_batch)

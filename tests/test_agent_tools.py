@@ -54,10 +54,10 @@ def _stub_httpx_async(monkeypatch, response_json: dict):
         async def __aexit__(self, *a):
             return None
 
-        async def get(self, url, params=None):  # noqa: ARG002
+        async def get(self, url, params=None, headers=None):  # noqa: ARG002
             return _R(response_json)
 
-        async def post(self, url, json=None):  # noqa: ARG002
+        async def post(self, url, json=None, headers=None):  # noqa: ARG002
             return _R(response_json)
 
     monkeypatch.setattr(tools.httpx, "AsyncClient", _C)
