@@ -56,6 +56,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               email: u.email,
               name: u.name ?? null,
               picture: u.picture ?? null,
+              is_admin: !!u.is_admin,
             },
           });
         } else {

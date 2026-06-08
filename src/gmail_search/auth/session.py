@@ -364,6 +364,40 @@ def require_user_id(request: Request) -> str:
         conn.close()
 
 
+_DEFAULT_ADMIN_EMAILS = "scottmsilver@gmail.com"
+
+
+def _admin_emails() -> set[str]:
+    """Comma-separated list of emails who can hit /api/admin/* endpoints.
+    Default = the single bootstrap user. Anything in this set can manage
+    other users' sync daemons. Reads env on every call (cheap; lets you
+    rotate without a restart)."""
+    raw = os.environ.get("GMS_ADMIN_EMAILS", _DEFAULT_ADMIN_EMAILS)
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def is_admin_email(email: str | None) -> bool:
+    if not email:
+        return False
+    return email.strip().lower() in _admin_emails()
+
+
+def require_admin(request: Request) -> "User":
+    """FastAPI dependency for /api/admin/* endpoints. Returns the
+    authenticated User iff their email is in `GMS_ADMIN_EMAILS`. 401 if
+    not signed in, 403 if signed in but not an admin. Service-token
+    callers (MCP) are NOT considered admin — admin access is for the
+    cookie/session path only, since admin actions are audit-relevant
+    and we want to know which human did them.
+    """
+    user = require_user(request)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not signed in")
+    if not is_admin_email(user.email):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin only")
+    return user
+
+
 def issue_handoff_jwt_for_test(*, email: str, name: Optional[str] = None, ttl_seconds: int = 60) -> str:
     """Issue a handoff JWT compatible with `verify_handoff_jwt`. Tests
     use this to drive the /api/auth/callback flow without spinning up

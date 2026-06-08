@@ -349,35 +349,51 @@ def _load_message_embeddings(conn, limit=50000, *, user_id: Optional[str] = None
     """Load message embeddings with metadata for clustering. Per-user
     when `user_id` is given (the normal call path); otherwise loads
     everything across users (legacy / dev-only)."""
-    import struct
 
     import numpy as np
 
+    # Smart sampling: UNIFORM across the whole corpus via a stable hash of
+    # message_id (not most-recent-N, which would skew the topic tree toward
+    # recent themes). Representative across all years + deterministic.
+    # k = ceil(total/limit); k=1 keeps everything for small corpora.
     if user_id is None:
+        total = conn.execute("SELECT COUNT(*) FROM embeddings WHERE chunk_type = 'message'").fetchone()[0]
+        k = max(1, -(-total // limit))
         rows = conn.execute(
             """SELECT e.message_id, e.embedding, m.subject, m.from_addr
                FROM embeddings e JOIN messages m ON e.message_id = m.id
-               WHERE e.chunk_type = 'message'
-               ORDER BY m.date DESC LIMIT %s""",
-            (limit,),
+               WHERE e.chunk_type = 'message' AND abs(hashtext(e.message_id)) %% %s = 0
+               LIMIT %s""",
+            (k, limit),
         ).fetchall()
     else:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE chunk_type = 'message' AND user_id = %s",
+            (user_id,),
+        ).fetchone()[0]
+        k = max(1, -(-total // limit))
         rows = conn.execute(
             """SELECT e.message_id, e.embedding, m.subject, m.from_addr
                FROM embeddings e JOIN messages m ON e.message_id = m.id
-               WHERE e.chunk_type = 'message' AND e.user_id = %s
-               ORDER BY m.date DESC LIMIT %s""",
-            (user_id, limit),
+               WHERE e.chunk_type = 'message' AND e.user_id = %s AND abs(hashtext(e.message_id)) %% %s = 0
+               LIMIT %s""",
+            (user_id, k, limit),
         ).fetchall()
 
+    # Build the matrix via np.frombuffer into a preallocated array.
+    # `list(struct.unpack("3072f", ...))` materialized 3072 Python float
+    # objects PER row (~97 KiB/row of object overhead) — ~5 GB for a 50k
+    # cap, and the dominant cost on the heavy reindex path. frombuffer is
+    # a zero-copy view; the assignment copies just the float32s.
+    n = len(rows)
+    vectors = np.empty((n, 3072), dtype=np.float32)
+    for i, r in enumerate(rows):
+        vectors[i] = np.frombuffer(r["embedding"], dtype=np.float32)
     return {
         "msg_ids": [r["message_id"] for r in rows],
         "subjects": [r["subject"] for r in rows],
         "senders": [r["from_addr"] for r in rows],
-        "vectors": np.array(
-            [list(struct.unpack("3072f", r["embedding"])) for r in rows],
-            dtype=np.float32,
-        ),
+        "vectors": vectors,
     }
 
 
@@ -606,17 +622,38 @@ def rebuild_topics(
     return count
 
 
-def _extract_terms_from_messages(conn, *, user_id: Optional[str] = None):
+def _extract_terms_from_messages(conn, *, user_id: Optional[str] = None, limit: int = 50000):
     """Build a reverse index: lowercase term → set of message indices.
-    Per-user when `user_id` is given (the normal call path)."""
+    Per-user when `user_id` is given (the normal call path).
+
+    Capped at `limit` most-recent messages. The unigram+bigram+trigram
+    index is by far the heaviest structure in the whole reindex — over the
+    full corpus it grows to tens of millions of keys (~15 GB) and OOM-kills
+    the build. 50k recent messages surface the same common aliases at a
+    bounded few-GB footprint.
+    """
     import re
 
+    # Smart sampling: a UNIFORM sample across the whole corpus, not the
+    # most-recent N (which would bias aliases toward recent mail and miss
+    # the older history). Take ~every k-th message by a stable hash of its
+    # id — representative across all years, deterministic (reproducible
+    # builds), and index-cheap (no global sort). k = ceil(total/limit), so
+    # k=1 (small corpus) keeps everything.
     if user_id is None:
-        rows = conn.execute("SELECT id, subject, body_text, from_addr FROM messages").fetchall()
-    else:
+        total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        k = max(1, -(-total // limit))
         rows = conn.execute(
-            "SELECT id, subject, body_text, from_addr FROM messages WHERE user_id = %s",
-            (user_id,),
+            "SELECT id, subject, body_text, from_addr FROM messages " "WHERE abs(hashtext(id)) %% %s = 0 LIMIT %s",
+            (k, limit),
+        ).fetchall()
+    else:
+        total = conn.execute("SELECT COUNT(*) FROM messages WHERE user_id = %s", (user_id,)).fetchone()[0]
+        k = max(1, -(-total // limit))
+        rows = conn.execute(
+            "SELECT id, subject, body_text, from_addr FROM messages "
+            "WHERE user_id = %s AND abs(hashtext(id)) %% %s = 0 LIMIT %s",
+            (user_id, k, limit),
         ).fetchall()
 
     term_to_msgs: dict[str, set[int]] = {}
@@ -691,123 +728,245 @@ def rebuild_term_aliases(
     min_occurrences=3,
     min_similarity=0.75,
     *,
+    data_dir: Optional[Path] = None,
     user_id: Optional[str] = None,
+    validate: bool = True,
+    max_embedding_id: Optional[int] = None,
+    full_rebuild: bool = False,
+    rebuild_after_days: int = 30,
 ) -> int:
-    """Discover term aliases using embedding nearest neighbors.
+    """Discover term aliases (abbreviation → expansion) via co-occurrence.
 
-    For short terms (likely abbreviations), finds longer terms whose message
-    embeddings cluster nearby — indicating they refer to the same concept.
+    INCREMENTAL + out-of-core. Co-occurrence counts and long-term doc-
+    frequencies are additive, so they're kept as append-only sort-merge run
+    files under data/users/<uid>/aliases/. Each call ingests ONLY messages
+    embedded since the last run (a watermark on the embeddings bigint id,
+    which advances for both fresh and backfilled mail), appends new runs,
+    then derives aliases by k-way merging all runs (heapq.merge) — bounded
+    RAM regardless of corpus size. The expensive cross-product pass is paid
+    once at bootstrap; ongoing updates are cheap deltas.
 
-    Per-user: scans only the given user's messages + embeddings, replaces
-    only that user's `term_aliases` rows.
+    Uses bigram (not trigram) phrases — the eval showed bigram-only is
+    iso-quality (≈945 vs 948 aliases) at ~10x fewer co-occurrence records.
+
+    Falls back to a one-shot temp build when `data_dir` is None (tests).
+    Per-user: replaces only that user's `term_aliases` rows.
     """
     import json
     import logging
-    import struct
-
-    import numpy as np
+    import re as _re
+    from collections import Counter
 
     from gmail_search.auth.write_user import resolve_write_user_id
 
     logger = logging.getLogger(__name__)
-
     conn = get_connection(db_path)
     uid = resolve_write_user_id(conn, user_id=user_id)
 
-    # Load embeddings (per-user)
-    emb_rows = conn.execute(
-        "SELECT message_id, embedding FROM embeddings WHERE chunk_type = 'message' AND user_id = %s",
-        (uid,),
-    ).fetchall()
-    if not emb_rows:
+    _WORD = _re.compile(r"[a-zA-Z]{2,}")
+    _ABBR = _re.compile(r"\b[A-Z]{2,5}\b")
+
+    def _terms_in(subject, body, from_addr):
+        """(abbreviations, long_terms) for one message. Long terms = words and
+        BIGRAMS longer than max_term_len chars. Trigrams were dropped: the
+        eval showed they don't change the discovered aliases but ~10x the
+        co-occurrence records (and the runtime / OOM risk)."""
+        raw = f"{subject or ''} {body or ''} {from_addr or ''}"
+        words = _WORD.findall(raw.lower())
+        long_terms = {w for w in words if len(w) > max_term_len}
+        for i in range(len(words) - 1):
+            ng = words[i] + " " + words[i + 1]
+            if len(ng) > max_term_len:
+                long_terms.add(ng)
+        abbrevs = {w.lower() for w in _ABBR.findall(raw)}
+        return abbrevs, long_terms
+
+    # ---- persistent append-only run state (cooc + long-term doc-freq) ----
+    import heapq as _heapq
+    import marshal as _marshal
+    import tempfile as _tempfile
+    import uuid as _uuid
+    from itertools import groupby as _groupby
+
+    _tmp = None
+    if data_dir is not None:
+        _state = Path(data_dir) / "users" / uid / "aliases"
+    else:
+        _tmp = _tempfile.TemporaryDirectory(prefix="gms_alias_")
+        _state = Path(_tmp.name)
+    _cooc_dir = _state / "cooc"
+    _ldf_dir = _state / "ldf"
+    _cooc_dir.mkdir(parents=True, exist_ok=True)
+    _ldf_dir.mkdir(parents=True, exist_ok=True)
+    _meta_path = _state / "meta.json"
+
+    watermark = 0
+    abbrev_df: Counter = Counter()
+    _bootstrap_at = None
+    if _meta_path.exists():
+        try:
+            _m = json.loads(_meta_path.read_text())
+            watermark = int(_m.get("watermark", 0))
+            abbrev_df = Counter(_m.get("abbrev_df", {}))
+            _bootstrap_at = _m.get("bootstrap_at")
+        except Exception:
+            watermark, abbrev_df, _bootstrap_at = 0, Counter(), None
+
+    # Periodic full-rebuild safety net: incremental runs only ADD counts, so
+    # deletions / re-embeds drift over time. On explicit full_rebuild, or every
+    # `rebuild_after_days`, wipe the runs and re-ingest from scratch (watermark
+    # 0). Self-healing — no external scheduler needed.
+    import datetime as _dt
+    import shutil as _shutil
+
+    _now = _dt.datetime.now(_dt.timezone.utc)
+    _stale = False
+    if _bootstrap_at:
+        try:
+            _stale = (_now - _dt.datetime.fromisoformat(_bootstrap_at)).days >= rebuild_after_days
+        except Exception:
+            _stale = True
+    if full_rebuild or _bootstrap_at is None or _stale:
+        _shutil.rmtree(_cooc_dir, ignore_errors=True)
+        _shutil.rmtree(_ldf_dir, ignore_errors=True)
+        _cooc_dir.mkdir(parents=True, exist_ok=True)
+        _ldf_dir.mkdir(parents=True, exist_ok=True)
+        watermark, abbrev_df = 0, Counter()
+        _bootstrap_at = _now.isoformat()
+        logger.info("alias: full rebuild (bootstrap or stale > %dd)", rebuild_after_days)
+
+    def _read_run(p):
+        with open(p, "rb") as f:
+            while True:
+                try:
+                    yield _marshal.load(f)
+                except EOFError:
+                    return
+
+    def _write_run(records, d):
+        with open(d / f"{_uuid.uuid4().hex}.run", "wb") as f:
+            for rec in records:
+                _marshal.dump(rec, f)
+
+    # ---- INGEST: only messages embedded since `watermark` (new + backfill) ----
+    # The embeddings bigint id advances whenever a message is embedded — for
+    # fresh frontfill mail AND backfilled old mail — so it's one monotonic
+    # cursor capturing everything not yet folded into the runs. Co-occurrence
+    # and doc-freq are additive, so each call just appends new sorted runs.
+    _CAP = 2_000_000
+    cacc: dict = {}
+    dacc: dict = {}
+    ingested = 0
+    last_eid = watermark
+    _cap_sql = " AND e.id <= %s" if max_embedding_id is not None else ""
+    while True:
+        _params = (uid, last_eid) + ((max_embedding_id, 5000) if max_embedding_id is not None else (5000,))
+        rows = conn.execute(
+            "SELECT e.id AS eid, m.subject, m.body_text, m.from_addr "
+            "FROM embeddings e JOIN messages m ON e.message_id = m.id "
+            "WHERE e.chunk_type = 'message' AND e.user_id = %s AND e.id > %s" + _cap_sql + " "
+            "ORDER BY e.id LIMIT %s",
+            _params,
+        ).fetchall()
+        if not rows:
+            break
+        last_eid = rows[-1]["eid"]
+        for r in rows:
+            abbrevs, long_terms = _terms_in(r["subject"], r["body_text"], r["from_addr"])
+            for a in abbrevs:
+                abbrev_df[a] += 1
+            for lt in long_terms:
+                dacc[lt] = dacc.get(lt, 0) + 1
+            for a in abbrevs:
+                for lt in long_terms:
+                    if a not in lt:
+                        cacc[(a, lt)] = cacc.get((a, lt), 0) + 1
+            ingested += 1
+            if len(cacc) >= _CAP:
+                _write_run(((k[0], k[1], v) for k, v in sorted(cacc.items())), _cooc_dir)
+                cacc = {}
+            if len(dacc) >= _CAP:
+                _write_run(((k, v) for k, v in sorted(dacc.items())), _ldf_dir)
+                dacc = {}
+    if cacc:
+        _write_run(((k[0], k[1], v) for k, v in sorted(cacc.items())), _cooc_dir)
+    if dacc:
+        _write_run(((k, v) for k, v in sorted(dacc.items())), _ldf_dir)
+    logger.info("alias: ingested %d newly-embedded message(s); watermark %d -> %d", ingested, watermark, last_eid)
+    _meta_path.write_text(
+        json.dumps({"watermark": last_eid, "abbrev_df": dict(abbrev_df), "bootstrap_at": _bootstrap_at})
+    )
+
+    # ---- COMPACTION: merge-sum runs so derive cost stays bounded as deltas
+    # accumulate. Re-summing equal keys is lossless. ----
+    def _compact(d, is_pair, threshold=40):
+        runs = sorted(d.glob("*.run"))
+        if len(runs) <= threshold:
+            return
+        merged = _heapq.merge(*(_read_run(p) for p in runs))
+        out = d / "_compacted.tmp"
+        with open(out, "wb") as f:
+            if is_pair:
+                for (a, lt), grp in _groupby(merged, key=lambda r: (r[0], r[1])):
+                    _marshal.dump((a, lt, sum(r[2] for r in grp)), f)
+            else:
+                for lt, grp in _groupby(merged, key=lambda r: r[0]):
+                    _marshal.dump((lt, sum(r[1] for r in grp)), f)
+        for p in runs:
+            p.unlink()
+        out.rename(d / f"{_uuid.uuid4().hex}.run")
+
+    _compact(_cooc_dir, True)
+    _compact(_ldf_dir, False)
+
+    # ---- DERIVE: k-way sort-merge all runs → overlap>=5 → score ----
+    short_terms = {a for a, c in abbrev_df.items() if c >= min_occurrences}
+    cooc_runs = sorted(_cooc_dir.glob("*.run"))
+    ldf_runs = sorted(_ldf_dir.glob("*.run"))
+    cooccur: dict[str, dict] = {}
+    cooccur_terms: set[str] = set()
+    if cooc_runs and short_terms:
+        for (_a, _l), _grp in _groupby(_heapq.merge(*(_read_run(p) for p in cooc_runs)), key=lambda r: (r[0], r[1])):
+            _ov = sum(r[2] for r in _grp)
+            if _ov >= 5 and _a in short_terms:
+                cooccur.setdefault(_a, {})[_l] = _ov
+                cooccur_terms.add(_l)
+    logger.info("alias: %d abbrev(s) with candidates · %d surviving long terms", len(cooccur), len(cooccur_terms))
+
+    if not cooccur or not cooccur_terms:
         conn.close()
         return 0
 
-    emb_by_msg: dict[str, int] = {}
-    vectors_list = []
-    for r in emb_rows:
-        emb_by_msg[r["message_id"]] = len(vectors_list)
-        vectors_list.append(list(struct.unpack("3072f", r["embedding"])))
+    long_df: Counter = Counter()
+    if ldf_runs:
+        for _l, _grp in _groupby(_heapq.merge(*(_read_run(p) for p in ldf_runs)), key=lambda r: r[0]):
+            _s = sum(r[1] for r in _grp)
+            if _l in cooccur_terms:
+                long_df[_l] = _s
 
-    vectors = np.array(vectors_list, dtype=np.float32)
-    logger.info(f"Loaded {len(vectors)} embeddings for alias discovery")
-
-    # Build term → message index mapping (all terms + uppercase abbreviations).
-    # Pass uid through so the term extractor scans only this user's messages.
-    term_to_msgs, abbrev_to_msgs, _, msg_ids = _extract_terms_from_messages(conn, user_id=uid)
-
-    def _remap_to_emb_indices(term_map):
-        result = {}
-        for term, msg_indices in term_map.items():
-            emb_indices = [emb_by_msg[msg_ids[mi]] for mi in msg_indices if msg_ids[mi] in emb_by_msg]
-            if len(emb_indices) >= min_occurrences:
-                result[term] = emb_indices
-        return result
-
-    # Short terms: only uppercase abbreviations (KE, HOA, IRS — not "the", "and")
-    short_terms = _remap_to_emb_indices(abbrev_to_msgs)
-    # Long terms: all words > 5 chars
-    long_terms = {t: idxs for t, idxs in _remap_to_emb_indices(term_to_msgs).items() if len(t) > max_term_len}
-
-    logger.info(f"Abbreviations (alias candidates): {len(short_terms)}")
-    logger.info(f"Long terms (expansion candidates): {len(long_terms)}")
-
-    if not short_terms or not long_terms:
-        conn.close()
-        return 0
-
-    # Build reverse index: message_index → set of long terms in that message
-    # This lets us find co-occurring long terms without checking all 36k x 36k pairs
-    logger.info("Building reverse index for co-occurrence...")
-    msg_to_long_terms: dict[int, set[str]] = {}
-    for long_term, indices in long_terms.items():
-        for idx in indices:
-            if idx not in msg_to_long_terms:
-                msg_to_long_terms[idx] = set()
-            msg_to_long_terms[idx].add(long_term)
-
-    # For each short term, find long terms that co-occur via the reverse index
-    logger.info("Discovering aliases via co-occurrence + embedding similarity...")
+    # Score: overlap >= 5, Jaccard >= 0.2, top 3 (deterministic tie-break by
+    # term). |A∪B| = df_a + df_l − overlap.
     conn.execute("DELETE FROM term_aliases WHERE user_id = %s", (uid,))
     alias_count = 0
-    from collections import Counter
-
-    for term, short_emb_indices in short_terms.items():
-        short_set = set(short_emb_indices)
-
-        # Count co-occurring long terms via reverse index (fast)
-        cooccur_counts: Counter = Counter()
-        for idx in short_emb_indices:
-            for long_term in msg_to_long_terms.get(idx, set()):
-                if term not in long_term and long_term not in term:
-                    cooccur_counts[long_term] += 1
-
-        # Keep long terms with 5+ co-occurrences and strong Jaccard
+    for term in cooccur:
+        df_a = abbrev_df[term]
         candidates = []
-        for long_term, overlap_count in cooccur_counts.most_common(20):
-            if overlap_count < 5:
-                break
-
-            long_set = set(long_terms[long_term])
-            jaccard = overlap_count / len(short_set | long_set)
-            if jaccard < 0.2:
+        for long_term, overlap in sorted(cooccur[term].items(), key=lambda kv: (-kv[1], kv[0]))[:20]:
+            union = df_a + long_df.get(long_term, 0) - overlap
+            if union <= 0 or overlap / union < 0.2:
                 continue
-
-            candidates.append((long_term, jaccard))
-
-        # Keep top 3 by co-occurrence strength
-        expansions = candidates[:3]
-        if expansions:
+            candidates.append((long_term, overlap / union))
+        if candidates[:3]:
             conn.execute(
                 "INSERT INTO term_aliases (term, expansions, similarity, user_id) VALUES (%s, %s, %s, %s)",
-                (term, json.dumps([t for t, _ in expansions]), expansions[0][1], uid),
+                (term, json.dumps([t for t, _ in candidates[:3]]), candidates[0][1], uid),
             )
             alias_count += 1
 
     conn.commit()
-    logger.info(f"Discovered {alias_count} candidate aliases, validating with Gemini...")
-
-    _validate_aliases_with_llm(conn, user_id=uid)
+    if validate:
+        logger.info(f"Discovered {alias_count} candidate aliases, validating with Gemini...")
+        _validate_aliases_with_llm(conn, user_id=uid)
 
     final_count = conn.execute("SELECT COUNT(*) FROM term_aliases WHERE user_id = %s", (uid,)).fetchone()[0]
     conn.close()
@@ -913,57 +1072,149 @@ def _validate_aliases_with_llm(conn, *, user_id: Optional[str] = None):
         logger.warning(f"LLM alias validation failed, keeping all candidates: {e}")
 
 
-def rebuild_spell_dictionary(db_path: Path, data_dir: Path, *, user_id: Optional[str] = None) -> int:
-    """Build a word frequency dictionary from the email corpus for spell correction.
+def rebuild_spell_dictionary(
+    db_path: Path,
+    data_dir: Path,
+    *,
+    user_id: Optional[str] = None,
+    full_rebuild: bool = False,
+    rebuild_after_days: int = 30,
+    max_embedding_id: Optional[int] = None,
+) -> int:
+    """Build a word-frequency dictionary from the corpus for spell correction.
 
-    Per-user: scans only the given user's messages and writes to
-    `data/users/<user_id>/spell_dictionary.txt`. Falls back to the
-    legacy `data/spell_dictionary.txt` location when called without
-    a user_id (legacy single-pool path)."""
+    INCREMENTAL + out-of-core, like rebuild_term_aliases: subject/body word
+    counts are additive, so they're kept as append-only sort-merge run files
+    under data/users/<uid>/spell/. Each call ingests only messages embedded
+    since the last watermark (embeddings bigint id), appends a run, then
+    derives the dictionary by k-way merging all runs. Sender-name boosts
+    (DISTINCT from_addr) are cheap and recomputed fresh at derive time.
+    Self-healing full rebuild every `rebuild_after_days`.
+
+    Per-user output: data/users/<uid>/spell_dictionary.txt (SymSpell format).
+    """
+    import datetime as _dt
+    import heapq as _heapq
+    import json
+    import logging
+    import marshal as _marshal
     import re
+    import shutil as _shutil
+    import uuid as _uuid
     from collections import Counter
+    from itertools import groupby as _groupby
 
     from gmail_search.auth.write_user import resolve_write_user_id
 
+    logger = logging.getLogger(__name__)
     conn = get_connection(db_path)
     uid = resolve_write_user_id(conn, user_id=user_id)
 
+    _word = re.compile(r"[a-zA-Z]+")
+    state = data_dir / "users" / uid / "spell"
+    run_dir = state / "runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = state / "meta.json"
+
+    watermark = 0
+    bootstrap_at = None
+    if meta_path.exists():
+        try:
+            m = json.loads(meta_path.read_text())
+            watermark = int(m.get("watermark", 0))
+            bootstrap_at = m.get("bootstrap_at")
+        except Exception:
+            watermark, bootstrap_at = 0, None
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    stale = False
+    if bootstrap_at:
+        try:
+            stale = (now - _dt.datetime.fromisoformat(bootstrap_at)).days >= rebuild_after_days
+        except Exception:
+            stale = True
+    if full_rebuild or bootstrap_at is None or stale:
+        _shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        watermark = 0
+        bootstrap_at = now.isoformat()
+        logger.info("spell: full rebuild (bootstrap or stale > %dd)", rebuild_after_days)
+
+    def _flush(acc):
+        if not acc:
+            return
+        with open(run_dir / f"{_uuid.uuid4().hex}.run", "wb") as f:
+            for w, c in sorted(acc.items()):
+                _marshal.dump((w, c), f)
+
+    # ---- INGEST: subject+body word TF for messages embedded since watermark ----
+    acc: dict = {}
+    last_eid = watermark
+    cap_sql = " AND e.id <= %s" if max_embedding_id is not None else ""
+    while True:
+        params = (uid, last_eid) + ((max_embedding_id, 5000) if max_embedding_id is not None else (5000,))
+        rows = conn.execute(
+            "SELECT e.id AS eid, m.subject, m.body_text "
+            "FROM embeddings e JOIN messages m ON e.message_id = m.id "
+            "WHERE e.chunk_type = 'message' AND e.user_id = %s AND e.id > %s" + cap_sql + " "
+            "ORDER BY e.id LIMIT %s",
+            params,
+        ).fetchall()
+        if not rows:
+            break
+        last_eid = rows[-1]["eid"]
+        for r in rows:
+            for field in (r["subject"], r["body_text"]):
+                if field:
+                    for w in _word.findall(field.lower()):
+                        if len(w) >= 2:
+                            acc[w] = acc.get(w, 0) + 1
+        if len(acc) >= 2_000_000:
+            _flush(acc)
+            acc = {}
+    _flush(acc)
+    meta_path.write_text(json.dumps({"watermark": last_eid, "bootstrap_at": bootstrap_at}))
+
+    def _read(p):
+        with open(p, "rb") as f:
+            while True:
+                try:
+                    yield _marshal.load(f)
+                except EOFError:
+                    return
+
+    # ---- COMPACTION: merge-sum runs so derive cost stays bounded ----
+    runs = sorted(run_dir.glob("*.run"))
+    if len(runs) > 40:
+        out = run_dir / "_compacted.tmp"
+        with open(out, "wb") as f:
+            for w, grp in _groupby(_heapq.merge(*(_read(p) for p in runs)), key=lambda r: r[0]):
+                _marshal.dump((w, sum(r[1] for r in grp)), f)
+        for p in runs:
+            p.unlink()
+        out.rename(run_dir / f"{_uuid.uuid4().hex}.run")
+        runs = sorted(run_dir.glob("*.run"))
+
+    # ---- DERIVE: merge word runs + fresh sender-name boost → dictionary ----
     word_counts: Counter = Counter()
+    for w, grp in _groupby(_heapq.merge(*(_read(p) for p in runs)), key=lambda r: r[0]):
+        word_counts[w] = sum(r[1] for r in grp)
 
-    # Extract words from subjects and body text (per-user)
-    rows = conn.execute("SELECT subject, body_text FROM messages WHERE user_id = %s", (uid,)).fetchall()
-    for r in rows:
-        for field in [r["subject"], r["body_text"]]:
-            if field:
-                words = re.findall(r"[a-zA-Z]+", field.lower())
-                word_counts.update(w for w in words if len(w) >= 2)
-
-    # Also extract from sender names (per-user)
-    rows = conn.execute("SELECT DISTINCT from_addr FROM messages WHERE user_id = %s", (uid,)).fetchall()
-    for r in rows:
+    # Sender names (DISTINCT, cheap) boosted so they're preferred corrections.
+    for r in conn.execute("SELECT DISTINCT from_addr FROM messages WHERE user_id = %s", (uid,)).fetchall():
         addr = r["from_addr"]
-        # Extract name part from "Name <email>"
-        if "<" in addr:
-            name = addr.split("<")[0].strip().strip('"')
-        else:
-            name = addr.split("@")[0]
-        words = re.findall(r"[a-zA-Z]+", name.lower())
-        # Boost names heavily so they're preferred corrections
-        word_counts.update({w: 50 for w in words if len(w) >= 2})
-
+        name = addr.split("<")[0].strip().strip('"') if "<" in addr else addr.split("@")[0]
+        for w in _word.findall(name.lower()):
+            if len(w) >= 2:
+                word_counts[w] += 50
     conn.close()
 
-    # Write dictionary file (word\tfrequency format for SymSpell). Per-user
-    # path under data/users/<user_id>/ so two users don't trample each
-    # other's vocabulary. The reader resolves the same path; legacy
-    # data/spell_dictionary.txt is left in place for older deployments.
     user_dir = data_dir / "users" / uid
     user_dir.mkdir(parents=True, exist_ok=True)
     dict_path = user_dir / "spell_dictionary.txt"
     with open(dict_path, "w") as f:
         for word, count in word_counts.most_common():
             f.write(f"{word} {count}\n")
-
     return len(word_counts)
 
 

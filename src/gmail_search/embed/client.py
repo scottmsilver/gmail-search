@@ -1,4 +1,5 @@
 import logging
+import os
 import struct
 from pathlib import Path
 from typing import Any
@@ -6,6 +7,13 @@ from typing import Any
 from google import genai  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# The regular (non-Batch-API) embedder must call embed_content once per text
+# (the SDK averages a list into one vector). Sequential calls capped the
+# backfill at ~150 texts/min — pure per-call latency, no rate-limit headroom
+# used. Fire them through a bounded thread pool instead. Override via env if
+# Gemini starts returning 429s (the pipeline's _retry_api_call still backs off).
+_EMBED_CONCURRENCY = max(1, int(os.environ.get("GMS_EMBED_CONCURRENCY", "16")))
 
 
 def estimate_tokens(text: str) -> int:
@@ -146,27 +154,37 @@ class GeminiEmbedder:
     def embed_texts_batch(self, texts: list[str], task_type: str | None = None) -> list[list[float]]:
         if task_type is None:
             task_type = self.task_type_document
+
         # The google-genai SDK's `embed_content` with `contents=<list>`
         # treats the list as a multi-part *single* content and returns
         # ONE averaged embedding — not N. Diagnosed when 50 texts in
         # produced 1 vector out, breaking `zip(chunk_owners, vectors)`
-        # and quietly dropping 49/50 inserts. Iterate one-at-a-time:
-        # slower but correct. The Batch API path in BatchGeminiEmbedder
-        # is the right way to do bulk; this regular client now matches
-        # the contract its callers rely on (one vector per text).
-        return [
-            self.client.models.embed_content(
-                model=self.model,
-                contents=t,
-                config={
-                    "task_type": task_type,
-                    "output_dimensionality": self.dimensions,
-                },
+        # and quietly dropping 49/50 inserts. So we must call per-text —
+        # but CONCURRENTLY (a bounded pool), not sequentially: sequential
+        # was the backfill's hard ceiling (~150 texts/min, pure latency).
+        # executor.map preserves input order, so callers' zip(owners,
+        # vectors) stays correct. The Batch API path in BatchGeminiEmbedder
+        # is still the cheapest way to do truly large bulk jobs.
+        def _one(t: str) -> list[float]:
+            return (
+                self.client.models.embed_content(
+                    model=self.model,
+                    contents=t,
+                    config={
+                        "task_type": task_type,
+                        "output_dimensionality": self.dimensions,
+                    },
+                )
+                .embeddings[0]
+                .values
             )
-            .embeddings[0]
-            .values
-            for t in texts
-        ]
+
+        if len(texts) <= 1:
+            return [_one(texts[0])] if texts else []
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(_EMBED_CONCURRENCY, len(texts))) as ex:
+            return list(ex.map(_one, texts))
 
     def embed_image(self, image_path: Path, task_type: str | None = None) -> list[float]:
         if task_type is None:

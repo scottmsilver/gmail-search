@@ -51,6 +51,7 @@ def run_embedding_pipeline(
     embedder: GeminiEmbedder | Any = None,
     *,
     user_id: str | None = None,
+    limit: int | None = None,
 ) -> int:
     """Embed all unembedded messages and attachments. When `user_id`
     is given, scopes BOTH phases (messages + attachments) to that
@@ -71,7 +72,7 @@ def run_embedding_pipeline(
     batch_size = 1000 if isinstance(embedder, BatchGeminiEmbedder) else TEXT_BATCH_SIZE
 
     # Phase 1: Embed messages
-    messages = get_messages_without_embeddings(conn, model=model, user_id=user_id)
+    messages = get_messages_without_embeddings(conn, model=model, user_id=user_id, limit=limit)
     logger.info(f"{len(messages)} messages to embed (batch_size={batch_size})")
 
     total_embedded = 0
@@ -143,15 +144,48 @@ def run_embedding_pipeline(
             )
             total_embedded += 1
 
+    # Prioritize the MESSAGE backlog. If Phase 1 filled its whole `limit`,
+    # there are almost certainly more unembedded messages — so defer the
+    # (much slower, ~4.7s each) attachment pass and come back for it once
+    # messages are caught up. Otherwise a single cycle stalls for hours in
+    # attachment embedding while the searchable-message count (what /admin
+    # shows) sits still. No `limit` (a full one-shot reindex) does both.
+    if limit is not None and len(messages) >= limit:
+        logger.info(
+            "embed: %d messages embedded; message backlog remains — deferring attachment pass",
+            len(messages),
+        )
+        conn.close()
+        return total_embedded
+
     # Phase 2: Embed attachments. Scope to the active user when given
     # — same OOM concern as Phase 1.
+    # Only messages with an attachment STILL needing an embedding — not every
+    # message. The old "SELECT id FROM messages" pulled all 413k rows every
+    # call and did a per-message attachment lookup (~80 min at ~86/s), which
+    # dominated the embed cycle and starved the crawl/reindex after it. This
+    # filters to real work and honors the same `limit` as Phase 1.
+    _att_lim = " LIMIT %s" if limit is not None else ""
+    _att_where = (
+        "((a.extracted_text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
+        "WHERE e.attachment_id = a.id AND e.chunk_type = 'attachment_text' AND e.model = %s)) "
+        "OR (a.image_path IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
+        "WHERE e.attachment_id = a.id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s)))"
+    )
     if user_id is not None:
+        _p = (user_id, model, model) + ((limit,) if limit is not None else ())
         all_messages = conn.execute(
-            "SELECT id, subject FROM messages WHERE user_id = %s",
-            (user_id,),
+            "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
+            "WHERE m.user_id = %s AND " + _att_where + " ORDER BY m.id" + _att_lim,
+            _p,
         ).fetchall()
     else:
-        all_messages = conn.execute("SELECT id, subject FROM messages").fetchall()
+        _p = (model, model) + ((limit,) if limit is not None else ())
+        all_messages = conn.execute(
+            "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
+            "WHERE " + _att_where + " ORDER BY m.id" + _att_lim,
+            _p,
+        ).fetchall()
     max_images_per_msg = att_config.get("max_images_per_message", 10)
 
     for row in tqdm(all_messages, desc="Processing attachments"):

@@ -336,6 +336,12 @@ def _build_assistant_parts_from_events(
     )
     seen: set[tuple] = set()
     # First pass: rich versions from Phase 2's `mcp_tool_call_full`.
+    #
+    # toolCallId MUST be globally unique across messages — assistant-ui's
+    # part-deduplication keys on it, so a bare `tc-{seq}` would make
+    # turn N's tool call collide with turn N+1's (both have seq=3 etc.)
+    # and the UI would render the first turn's tool data for every
+    # subsequent turn. Prefix with the session_id to scope per-turn.
     for ev in events:
         if ev.kind != "mcp_tool_call_full":
             continue
@@ -351,7 +357,7 @@ def _build_assistant_parts_from_events(
         parts.append(
             {
                 "type": f"tool-{name}",
-                "toolCallId": f"tc-{ev.seq}",
+                "toolCallId": f"tc-{session_id}-{ev.seq}",
                 "state": "output-available",
                 "input": args,
                 "output": response,
@@ -377,7 +383,7 @@ def _build_assistant_parts_from_events(
         parts.append(
             {
                 "type": f"tool-{name}",
-                "toolCallId": f"tc-stream-{ev.seq}",
+                "toolCallId": f"tc-stream-{session_id}-{ev.seq}",
                 "state": "input-available",
                 "input": args,
             }

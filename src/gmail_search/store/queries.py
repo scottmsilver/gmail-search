@@ -140,31 +140,35 @@ def get_message(conn, message_id: str, *, user_id: Optional[str] = None) -> Mess
     )
 
 
-def get_messages_without_embeddings(conn, model: str, *, user_id: Optional[str] = None) -> list[Message]:
+def get_messages_without_embeddings(
+    conn, model: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
+) -> list[Message]:
     """Messages that have no embedding row for `model` yet. When
     `user_id` is given, scopes to that user — required for per-user
     daemons so silvershabbat's embed pass doesn't try to embed
     scott's 410k messages too (and OOM the box).
+
+    `limit` bounds the batch: the old unbounded `SELECT m.* … fetchall()`
+    loaded EVERY unembedded message's body + raw_json into RAM at once
+    (~18 GB for a 220k backlog) and OOM-killed the embed step. Callers
+    embed in chunks and loop. Uses NOT EXISTS + ORDER BY id so the LIMIT
+    can terminate early via the PK + embeddings indexes.
     """
+    lim_sql = " ORDER BY m.id LIMIT %s" if limit is not None else ""
     if user_id is not None:
-        rows = conn.execute(
-            """SELECT m.* FROM messages m
-               WHERE m.user_id = %s
-                 AND m.id NOT IN (
-                   SELECT DISTINCT message_id FROM embeddings
-                   WHERE chunk_type = 'message' AND model = %s AND user_id = %s
-                 )""",
-            (user_id, model, user_id),
-        ).fetchall()
+        sql = (
+            "SELECT m.* FROM messages m WHERE m.user_id = %s "
+            "AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.message_id = m.id "
+            "AND e.chunk_type = 'message' AND e.model = %s AND e.user_id = %s)" + lim_sql
+        )
+        params = (user_id, model, user_id) + ((limit,) if limit is not None else ())
     else:
-        rows = conn.execute(
-            """SELECT m.* FROM messages m
-               WHERE m.id NOT IN (
-                 SELECT DISTINCT message_id FROM embeddings
-                 WHERE chunk_type = 'message' AND model = %s
-               )""",
-            (model,),
-        ).fetchall()
+        sql = (
+            "SELECT m.* FROM messages m WHERE NOT EXISTS (SELECT 1 FROM embeddings e "
+            "WHERE e.message_id = m.id AND e.chunk_type = 'message' AND e.model = %s)" + lim_sql
+        )
+        params = (model,) + ((limit,) if limit is not None else ())
+    rows = conn.execute(sql, params).fetchall()
     return [
         Message(
             id=r["id"],
@@ -471,11 +475,13 @@ def fill_url_attachment(
     text: str,
     url: str,
 ) -> None:
-    """Populate a previously-stubbed URL row with fetched content.
-
-    Renames the filename to `"URL: <title> [<url>]"` so the UI shows
-    something human and downstream code can still round-trip to the
-    original URL via `url_from_stub_filename`.
+    """Populate a SINGLE stubbed URL row with fetched content, so it gets
+    embedded exactly once. The same URL is linked from up to thousands of
+    messages; the page is identical, so we embed one representative copy (this
+    one) and the caller abandons the duplicate stubs WITHOUT content — embedding
+    the same page N times would just bloat the ScaNN index and churn reindex
+    without improving recall. Renames to `"URL: <title> [<url>]"` so the UI is
+    human and `url_from_stub_filename` still round-trips.
     """
     display = (title or _host_of(url) or "link").strip()
     new_filename = f"URL: {display} [{url}]"[:_URL_STUB_FILENAME_CAP]
@@ -517,6 +523,13 @@ def url_from_stub_filename(filename: str) -> str | None:
     return None
 
 
+# After this many failed crawl attempts a URL stub is abandoned (dead /
+# anti-bot link). Each attempt also backs off `crawl_attempts` hours, so a
+# stub is retried at ~1h, 2h, 3h then dropped — it can no longer head-of-line
+# block live URLs in `pending_url_stubs`.
+_MAX_CRAWL_ATTEMPTS = 4
+
+
 def pending_url_stubs(conn, limit: int) -> list[dict]:
     """Return URL stubs that haven't been fetched yet, oldest message
     first. Each dict carries `{id, message_id, url}`.
@@ -540,6 +553,15 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # Python, and denied rows get deleted in the same pass.
     from gmail_search.gmail.url_extract import _is_denied
 
+    # Fast lane / slow lane to avoid head-of-line blocking. A failed crawl
+    # leaves extracted_text NULL, so without attempt-tracking the SAME dead /
+    # anti-bot links were re-selected EVERY cycle forever — the newest 200 dead
+    # stubs permanently filled the batch and live URLs behind them never ran.
+    # Now: never-tried stubs (crawl_attempts=0) are crawled FIRST (fast lane);
+    # previously-failed ones back off (retry only after `attempts` hours) and
+    # are abandoned after _MAX_CRAWL_ATTEMPTS (slow lane). `_process_one` stamps
+    # each attempt. The partial index idx_attachments_crawl_lane serves the
+    # (crawl_attempts ASC, id DESC) order directly.
     overfetch = max(limit * 5, 500)
     rows = conn.execute(
         """SELECT id, message_id, filename
@@ -547,13 +569,17 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
             WHERE mime_type = 'text/html'
               AND extracted_text IS NULL
               AND filename LIKE %s
-            ORDER BY id DESC
+              AND crawl_attempts < %s
+              AND (crawl_last_attempt IS NULL
+                   OR crawl_last_attempt < now() - (interval '1 hour' * crawl_attempts))
+            ORDER BY crawl_attempts ASC, id DESC
             LIMIT %s""",
-        ("URL: %", overfetch),
+        ("URL: %", _MAX_CRAWL_ATTEMPTS, overfetch),
     ).fetchall()
 
     out: list[dict] = []
     deny_ids: list[int] = []
+    seen_urls: set[str] = set()
     for r in rows:
         url = url_from_stub_filename(r["filename"])
         if not url:
@@ -562,7 +588,14 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
         if _is_denied(url):
             deny_ids.append(int(r["id"]))
             continue
-        out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url})
+        # Dedup within the batch: the same URL is linked from many messages,
+        # and `fill_url_attachment` fans a single fetch out to every copy, so
+        # crawling one stub resolves them all. Carrying `filename` lets the
+        # fetcher fill/mark all copies by their exact original stub filename.
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url, "filename": r["filename"]})
         if len(out) >= limit:
             break
 

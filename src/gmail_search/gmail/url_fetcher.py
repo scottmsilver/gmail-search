@@ -31,8 +31,11 @@ logger = logging.getLogger(__name__)
 # 8000 chars ≈ 2000 tokens — enough for a summarizer to get the gist.
 _MAX_CRAWL_CHARS = 8000
 
-# Hard cap per URL. crawl4ai's page_timeout is in ms.
-_DEFAULT_TIMEOUT_S = 30.0
+# Hard cap per URL. crawl4ai's page_timeout is in ms. Kept short: most
+# uncrawled stubs are old dead / anti-bot links that would otherwise burn the
+# full timeout each; a live page loads well under this. (Was 30s — far too
+# long when a cycle has hundreds of dead links to try.)
+_DEFAULT_TIMEOUT_S = 10.0
 
 # Cap for the PDF-routed path. Binary download, not char count.
 _MAX_PDF_BYTES = 20 * 1024 * 1024
@@ -211,6 +214,91 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
     return title, _truncate_markdown(markdown)
 
 
+_HTTP_UA = "Mozilla/5.0 (compatible; gmail-search/1.0; +https://oursilverfamily.com)"
+_MIN_USABLE_CHARS = 250  # below this we assume a JS shell / empty page → browser
+_MAX_HTML_CHARS = 3_000_000  # cap parsed HTML so a giant page can't blow RAM
+_MAX_HTML_BYTES = 20_000_000  # reject responses larger than this (Content-Length)
+_MAX_REDIRECTS = 6
+
+
+class _SSRFBlocked(Exception):
+    """A redirect hop resolved to a blocked (private/loopback/link-local)
+    target. Raised so the caller does NOT fall back to crawl4ai, which would
+    follow the same attacker-controlled redirect WITHOUT the per-hop guard."""
+
+
+def _readable_text(html: str) -> tuple[str, str]:
+    """(text, title) from raw HTML. Strips script/nav/footer/etc. boilerplate
+    and prefers the main-content container (<article>/<main>) so embeddings
+    aren't diluted by menus. No new dependency (bs4 + lxml); good enough for
+    search even if cruder than a dedicated readability library."""
+    import warnings  # noqa: PLC0415
+
+    from bs4 import BeautifulSoup  # noqa: PLC0415
+
+    try:
+        from bs4 import XMLParsedAsHTMLWarning  # noqa: PLC0415
+
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    except Exception:
+        pass
+    soup = BeautifulSoup(html, "lxml")
+    title = (soup.title.get_text(strip=True) if soup.title else "") or ""
+    for tag in soup(
+        ["script", "style", "noscript", "template", "svg", "head", "nav", "footer", "header", "form", "aside", "iframe"]
+    ):
+        tag.decompose()
+    main = soup.find("article") or soup.find("main") or soup.find(attrs={"role": "main"}) or soup.body or soup
+    return main.get_text(separator="\n", strip=True), title
+
+
+async def _fetch_via_http(url: str, timeout_s: float) -> tuple[str, str] | None:
+    """Browser-free fetch with manual redirect-following. Each hop is SSRF-
+    checked BEFORE we fetch it (the caller's guard only covered the first URL),
+    so a redirect can't smuggle us to a private IP. Returns (title, text) on a
+    usable HTML page, else None → caller falls back to crawl4ai for JS pages."""
+    from urllib.parse import urljoin  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    cur = url
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=min(timeout_s, 10.0), headers={"User-Agent": _HTTP_UA}
+        ) as client:
+            for _ in range(_MAX_REDIRECTS):
+                if not _ssrf_guard(cur):
+                    # Blocked target: raise (don't return None) so the caller
+                    # won't hand the original URL to crawl4ai, which would
+                    # follow this same redirect with no guard.
+                    raise _SSRFBlocked(cur)
+                resp = await client.get(cur)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location")
+                    if not loc:
+                        return None
+                    cur = urljoin(cur, loc)
+                    continue
+                break
+            else:
+                return None  # redirect loop / too many hops
+    except _SSRFBlocked:
+        raise
+    except Exception:
+        return None
+    if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "").lower():
+        return None
+    try:
+        if int(resp.headers.get("content-length", "0")) > _MAX_HTML_BYTES:
+            return None  # oversized — don't buffer/parse it
+    except ValueError:
+        pass
+    text, title = _readable_text(resp.text[:_MAX_HTML_CHARS])
+    if len(text) < _MIN_USABLE_CHARS:
+        return None  # JS shell / near-empty → let the browser try
+    return title, _truncate_markdown(text)
+
+
 async def fetch_url_markdown(
     crawler,
     url: str,
@@ -219,10 +307,21 @@ async def fetch_url_markdown(
     """Fetch one URL, return `(title, markdown)` or None on failure.
 
     - Pre-flight SSRF guard against private / loopback / link-local IPs.
-    - PDF URLs (by URL suffix) route through the local PDF extractor so
-      we don't pipe a binary into crawl4ai. Non-suffix PDFs detected
-      via Content-Type inside crawl4ai would still be caught there.
-    - Crawl4ai output is capped at `_MAX_CRAWL_CHARS`.
+    - PDF URLs (by URL suffix) route through the local PDF extractor.
+    - HTTP-FIRST: a redirect-following httpx GET + readability extraction
+      handles server-rendered pages (incl. tracking redirects) with no browser
+      — far faster, no Chromium memory, no slot-holding. crawl4ai is the
+      fallback for JS-rendered / empty pages.
+
+    Known SSRF limitations (documented, accepted for this self-hosted app —
+    fetched content lands only in the user's own private index, never back to
+    an attacker):
+      * crawl4ai (Chromium) fallback follows redirects itself, unguarded —
+        pre-existing. The HTTP-first path (the common case) IS guarded per hop,
+        and a guard-rejected redirect now short-circuits before crawl4ai.
+      * _ssrf_guard resolves DNS separately from the connect, so DNS-rebinding
+        (TOCTOU) can still slip past. Fully closing it needs connect-time IP
+        pinning; tracked as a follow-up.
     """
     if not _ssrf_guard(url):
         logger.info(f"url_fetcher: skipping {url} (SSRF guard)")
@@ -231,6 +330,15 @@ async def fetch_url_markdown(
     if url.lower().split("?", 1)[0].endswith(".pdf"):
         return await asyncio.to_thread(_fetch_pdf_url, url)
 
+    try:
+        light = await _fetch_via_http(url, timeout_s)
+    except _SSRFBlocked as e:
+        # A redirect pointed at a blocked address — give up; do NOT fall back
+        # to crawl4ai (Chromium would follow the same redirect unguarded).
+        logger.info(f"url_fetcher: skipping {url} (SSRF redirect target {e})")
+        return None
+    if light is not None:
+        return light
     return await _fetch_via_crawl4ai(crawler, url, timeout_s)
 
 
@@ -239,14 +347,21 @@ def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
     extractor. Synchronous because `extract_pdf` is — the caller
     routes us through `asyncio.to_thread` to stay off the event loop.
 
-    SSRF was already checked by the caller.
+    SSRF was checked by the caller for THIS url. We also refuse to follow
+    redirects here, so a `…/a.pdf` that 30x-redirects to a private IP can't
+    smuggle us past the guard (urllib follows redirects by default).
     """
     import tempfile
     import urllib.request
 
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):  # noqa: ARG002
+            return None  # don't follow — an unguarded redirect could be SSRF
+
     try:
+        opener = urllib.request.build_opener(_NoRedirect)
         req = urllib.request.Request(url, headers={"User-Agent": "gmail-search/1.0"})
-        with urllib.request.urlopen(req, timeout=_DEFAULT_TIMEOUT_S) as resp:
+        with opener.open(req, timeout=_DEFAULT_TIMEOUT_S) as resp:
             data = resp.read(_MAX_PDF_BYTES)
     except Exception as e:
         logger.info(f"url_fetcher: pdf download failed for {url}: {e}")
@@ -277,21 +392,83 @@ async def _process_one(
     Commits its own transaction so a slow crawl can't hold a writer
     lock across concurrent fetches.
     """
+
+    def _mark_attempt():
+        conn = get_connection(db_path)
+        try:
+            # Mark ALL unfilled copies of this URL (dedup fan-out) so duplicate
+            # stubs back off / abandon together instead of each being retried.
+            conn.execute(
+                "UPDATE attachments SET crawl_attempts = crawl_attempts + 1, "
+                "crawl_last_attempt = now() WHERE filename = %s AND extracted_text IS NULL",
+                (stub["filename"],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _abandon():
+        # PERMANENT failure (URL resolves to a private/reserved IP, or doesn't
+        # resolve at all — a dead domain, very common in old mail). It will
+        # NEVER succeed, so jump all copies straight to the retry cap instead
+        # of burning 4 Chromium fetches over ~6h of backoff. _ssrf_guard fails
+        # closed on NXDOMAIN, so this also clears dead links cheaply (DNS only,
+        # no browser).
+        # Inline import: the formatter strips this from module scope as
+        # "unused" (it's only referenced in this nested fn), so import it here.
+        from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
+
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
+                "WHERE filename = %s AND extracted_text IS NULL",
+                (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     async with sem:
+        # Permanent-failure fast path: skip the browser entirely for URLs that
+        # can never succeed and abandon them in one DNS check.
+        if not await asyncio.to_thread(_ssrf_guard, stub["url"]):
+            await asyncio.to_thread(_abandon)
+            return False
+        # Stamp the attempt BEFORE fetching so a timeout / crash / anti-bot
+        # block still counts against the retry budget (_MAX_CRAWL_ATTEMPTS).
+        # Otherwise a perpetually-failing link never accrues attempts and is
+        # re-crawled every cycle forever — the head-of-line blocking that left
+        # 517k stubs thrashing while live URLs starved.
+        await asyncio.to_thread(_mark_attempt)
         result = await fetch_url_markdown(crawler, stub["url"], timeout_s=timeout_s)
     if result is None:
         return False
     title, markdown = result
 
     def _write():
+        from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
+
         conn = get_connection(db_path)
         try:
+            # Embed THIS copy of the URL once...
             fill_url_attachment(
                 conn,
                 attachment_id=stub["id"],
                 title=title,
                 text=markdown,
                 url=stub["url"],
+            )
+            # ...and resolve the duplicate stubs of the same URL out of the
+            # crawl queue WITHOUT content, so the identical page isn't embedded
+            # again for every message that links it (avoids thousands of
+            # duplicate vectors + the reindex churn that creates). They still
+            # match by the original `URL: <url>` filename; the one just filled
+            # was renamed + has extracted_text, so it's excluded here.
+            conn.execute(
+                "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
+                "WHERE filename = %s AND extracted_text IS NULL",
+                (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
             )
             conn.commit()
         finally:

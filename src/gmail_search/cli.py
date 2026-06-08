@@ -59,29 +59,6 @@ def main(ctx, data_dir, config_path, verbose):
     _setup_context(ctx, data_dir, config_path, verbose)
 
 
-@main.command(help="Run OAuth flow to authenticate with Gmail / Drive")
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Delete existing token.json and re-prompt the browser consent screen. "
-    "Required after adding a new scope (e.g. drive.readonly).",
-)
-@common_options
-@click.pass_context
-def auth(ctx, force):
-    from gmail_search.gmail.auth import get_credentials
-
-    data_dir = ctx.obj["data_dir"]
-    if force:
-        token_path = data_dir / "token.json"
-        if token_path.exists():
-            token_path.unlink()
-            click.echo(f"Removed {token_path} — next step will re-prompt consent.")
-    get_credentials(data_dir)
-    click.echo("Authentication successful. Token saved.")
-
-
 @main.command(help="Download messages from Gmail")
 @click.option("--max-messages", type=int, default=None, help="Max messages to download")
 @common_options
@@ -324,17 +301,122 @@ def embed(ctx, model, budget, force, batch_api):
 
 @main.command(help="Rebuild the ScaNN search index and all downstream surfaces")
 @common_options
+@click.option(
+    "--loop",
+    is_flag=True,
+    help="Run as a daemon: reindex (light) whenever a quantum of new embeddings accumulates. "
+    "Decoupled from the embed loop, which no longer reindexes per cycle.",
+)
+@click.option("--quantum", default=60, help="Seconds between work checks in --loop mode.")
+@click.option("--min-new", default=2000, help="Reindex once this many new embeddings exist.")
+@click.option("--max-age", default=600, help="...or when any new exist and the index is this stale (s).")
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account whose index to rebuild (--loop). Defaults to GMS_BOOTSTRAP_EMAIL. "
+    "The supervisor spawns one per-user reindex daemon with --email set.",
+)
 @click.pass_context
-def reindex(ctx):
+def reindex(ctx, loop, quantum, min_new, max_age, email):
+    import os as _os
+
     from gmail_search.pipeline import reindex as _reindex
 
-    _reindex(
-        db_path=ctx.obj["db_path"],
-        data_dir=ctx.obj["data_dir"],
-        cfg=ctx.obj["config"],
-        light=False,
-    )
-    click.echo("Index rebuilt (ScaNN + FTS + thread summary + contacts + spell + topics + aliases).")
+    db_path = ctx.obj["db_path"]
+    data_dir = ctx.obj["data_dir"]
+    cfg = ctx.obj["config"]
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+
+    if not loop:
+        _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=False)
+        click.echo("Index rebuilt (ScaNN + FTS + thread summary + contacts + spell + topics + aliases).")
+        return
+
+    # Daemon mode: the embed loop no longer reindexes; this rebuilds the
+    # ScaNN/FTS surfaces on a quantum when there's enough new work.
+    import time as _time
+
+    from gmail_search.auth.write_user import resolve_write_user_id
+    from gmail_search.pipeline import reindex_if_needed
+    from gmail_search.store.db import JobProgress, get_connection
+
+    _conn = get_connection(db_path)
+    try:
+        uid = resolve_write_user_id(_conn)
+    finally:
+        _conn.close()
+    job_id = f"reindex:{uid}"
+    progress = JobProgress(db_path, job_id, start_completed=0)
+    click.echo(f"reindex daemon for {uid}: every {quantum}s (min_new={min_new}, max_age={max_age}s)")
+    while True:
+        try:
+            did = reindex_if_needed(db_path, data_dir, cfg, user_id=uid, min_new=min_new, max_age_s=max_age)
+            progress.update("reindex" if did else "idle", 0, 0, "rebuilt" if did else "no new work")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"reindex loop error: {e}")
+            progress.heartbeat()
+        _time.sleep(quantum)
+
+
+@main.command(help="Crawl pending URL stubs (fast/slow lane). --loop runs as a daemon.")
+@common_options
+@click.option("--loop", is_flag=True, help="Run continuously as a daemon.")
+@click.option("--interval", default=15, help="Seconds to sleep between crawl batches in --loop mode.")
+@click.option("--concurrency", default=10, help="Concurrent headless-Chromium fetches.")
+@click.option("--limit", default=300, help="URL stubs per batch.")
+@click.pass_context
+def crawl(ctx, loop, interval, concurrency, limit):
+    """Decoupled URL crawler. Pulls pending stubs (newest never-tried first;
+    failed ones back off and are abandoned after a cap — see pending_url_stubs)
+    and fills attachments.extracted_text. Runs as its own daemon so it can't be
+    starved by the embed loop (which used to run it inline, after an ~80-min
+    attachment-embed pass that left it never executing)."""
+    import asyncio as _asyncio
+
+    from gmail_search.gmail.url_fetcher import run as _crawl_run
+
+    db_path = ctx.obj["db_path"]
+
+    if not loop:
+        r = _asyncio.run(_crawl_run(db_path, concurrency=concurrency, limit=limit))
+        click.echo(f"Crawled {r['done']}/{r['total']} URL stubs ({r['failed']} failed).")
+        return
+
+    import time as _time
+
+    from gmail_search.store.db import JobProgress
+
+    def _mem_aware_conc(max_conc: int) -> int:
+        """Scale crawl concurrency to free RAM each batch so a memory-tight box
+        (serve's ScaNN index alone is ~15 GB) isn't pushed into swap by Chromium
+        (~0.7 GB/tab). Reserves a 3 GB buffer for serve + spikes; floors at 2.
+        This replaces the manual pause/resume dance — the crawler throttles
+        itself down when RAM is scarce and back up when it frees."""
+        try:
+            avail_kb = next(int(line.split()[1]) for line in open("/proc/meminfo") if line.startswith("MemAvailable"))
+            avail_gb = avail_kb / 1024 / 1024
+        except Exception:
+            return max_conc
+        return max(2, min(max_conc, int((avail_gb - 4.0) / 0.7)))
+
+    progress = JobProgress(db_path, "crawl", start_completed=0)
+    click.echo(f"crawl daemon: batches of {limit}, concurrency ≤{concurrency} (memory-aware), every {interval}s")
+    while True:
+        try:
+            conc = _mem_aware_conc(concurrency)
+            r = _asyncio.run(_crawl_run(db_path, concurrency=conc, limit=limit))
+            progress.update(
+                "crawl" if r["total"] else "idle",
+                r["done"],
+                r["total"],
+                f"{r['done']}/{r['total']} fetched, {r['failed']} failed",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"crawl loop error: {e}")
+            progress.heartbeat()
+        _time.sleep(interval)
 
 
 def _extract_pending_attachments(conn, att_config: dict, *, user_id: str | None = None) -> int:
@@ -423,7 +505,6 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
     from gmail_search.locks import write_lock
-    from gmail_search.pipeline import reindex as _reindex
     from gmail_search.store.db import JobProgress
 
     cfg = ctx.obj["config"]
@@ -466,6 +547,16 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
         crash-tolerant while-True around a sleep, so the job never dies
         permanently — matches the `watch` daemon's behaviour.
         """
+        # Re-fetch a fresh Gmail token from the broker EACH cycle. The broker
+        # hands a short-lived access token with no refresh fields, so a service
+        # built once before the loop goes stale after ~1h and every later cycle
+        # dies with a RefreshError (the bug that froze sync + the embed drain).
+        nonlocal service
+        try:
+            service = build_gmail_service(data_dir, email=email)
+        except Exception as e:
+            logger.warning(f"couldn't refresh Gmail credentials this cycle: {e}")
+
         # Re-read the message count each cycle. Progress math is
         # relative to this cycle's start, not the first one, so the
         # UI rate/ETA reflects what's happening right now.
@@ -553,32 +644,14 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
                 total_extracted += extracted
                 click.echo(f"Extracted {extracted} attachments.")
 
-                # Crawl pending URL stubs written at ingest. Folded into
-                # this loop (instead of a separate --loop daemon) so new
-                # mail's URLs get fetched in the same cycle that
-                # downloaded the mail, and the embedding step below sees
-                # the crawled content on its first pass.
-                try:
-                    import asyncio as _asyncio
-
-                    from gmail_search.gmail.url_fetcher import run as _crawl_urls_run
-
-                    # Sized for a ~62GB / 20-core box: ~10 concurrent
-                    # Chromium tabs ≈ 1-2GB RAM, well under what's free.
-                    # Halves the inline crawl latency per update cycle
-                    # vs the old `concurrency=3` default.
-                    crawl_result = _asyncio.run(_crawl_urls_run(db_path, concurrency=10, limit=200))
-                    if crawl_result["total"]:
-                        click.echo(
-                            f"Crawled {crawl_result['done']}/{crawl_result['total']} URL stubs "
-                            f"({crawl_result['failed']} failed)."
-                        )
-                except Exception as e:
-                    # Don't let a crawl failure kill the whole update cycle —
-                    # next cycle retries.
-                    logger.warning(f"URL crawl step failed: {e}")
-
-                # Embed new messages + attachments
+                # Embed FIRST — this is the essential step. The URL crawl used
+                # to run before embed (so embeds could include crawled page
+                # text same-cycle), but a slow/failing crawl (dead links + the
+                # Chromium memory footprint) starved embedding: the cycle
+                # stalled or crashed mid-crawl and got respawned before embed
+                # ran, leaving messages unembedded (the ~220k backlog). Embed
+                # first; crawl best-effort after. Crawled page text is folded
+                # in by the NEXT cycle's embed pass (one-cycle lag, acceptable).
                 progress.update("embed", start_count + total_downloaded, progress_total, f"+{extracted} extracted")
                 click.echo("Embedding...")
                 conn = get_connection(db_path)
@@ -587,18 +660,17 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
                 if not ok:
                     click.echo(f"Budget exhausted (${spent:.2f} spent). Stopping embedding.")
                     break
-                emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id)
+                emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id, limit=5000)
                 total_embedded += emb_count
                 click.echo(f"Embedded {emb_count} chunks.")
 
-                # Reindex so search is live. light=True because heavy
-                # rebuilds (aliases, query cache wipe) run once at the
-                # end of the full update, not per-batch. user_id ensures
-                # we rebuild THIS user's ScaNN/FTS surfaces, not a
-                # different user's.
-                progress.update("reindex", start_count + total_downloaded, progress_total, f"+{emb_count} embedded")
-                click.echo("Reindexing...")
-                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True, user_id=active_user_id)
+                # NOTE: URL crawling and ScaNN reindexing used to run inline
+                # here, which serialized the pipeline and let the slow steps
+                # starve each other (embed's attachment pass starved crawl;
+                # reindex ran every batch). They're now independent supervised
+                # daemons — `crawl --loop` (global) and `reindex --loop`
+                # (per-user, rebuilds on a quantum of new embeddings). This
+                # cycle is just download → extract → embed.
 
                 conn = get_connection(db_path)
                 msg_count = conn.execute(
@@ -637,6 +709,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
         total_cost = get_total_spend(conn, user_id=active_user_id)
         conn.close()
         click.echo(f"Total: {msg_count:,} messages | {emb_total:,} embeddings | ${total_cost:.2f} spent")
+        return total_downloaded + total_embedded
 
     # ── outer driver ──────────────────────────────────────────────────
     if not loop:
@@ -647,8 +720,9 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
     while True:
         cycle += 1
         click.echo(f"\n{'#' * 50}\n# backfill loop cycle {cycle}\n{'#' * 50}")
+        did_work = 0
         try:
-            _one_cycle()
+            did_work = _one_cycle() or 0
         except KeyboardInterrupt:
             click.echo("interrupted — exiting loop.")
             raise
@@ -666,7 +740,12 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
                 )
             except Exception:
                 pass
-        click.echo(f"\n[backfill] sleeping {loop_sleep}s before next cycle...")
+        # Adaptive sleep: while there's still a backlog to drain (a cycle that
+        # downloaded and/or embedded something), loop quickly to keep the
+        # workers busy; once caught up (a no-op cycle) back off to the full
+        # loop_sleep so we don't poll Gmail every few seconds when idle.
+        effective_sleep = 15 if did_work else loop_sleep
+        click.echo(f"\n[backfill] sleeping {effective_sleep}s before next cycle...")
         # Hold the `update` heartbeat warm during the inter-cycle sleep
         # so the supervisor / HTTP status don't see the daemon as dead
         # while it's waiting to start the next cycle. We flip status back
@@ -678,7 +757,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
             idle.update("idle", 0, 0, "waiting for next cycle")
         except Exception:
             idle = None
-        for i in range(loop_sleep):
+        for i in range(effective_sleep):
             if idle is not None and i % 30 == 0:
                 try:
                     idle.heartbeat()
@@ -790,7 +869,6 @@ def watch(ctx, interval, budget, max_cycles, email):
     from gmail_search.extract import dispatch
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import sync_new_messages
-    from gmail_search.pipeline import reindex as _reindex
     from gmail_search.store.db import JobProgress
     from gmail_search.store.queries import get_attachments_for_message
 
@@ -848,6 +926,10 @@ def watch(ctx, interval, budget, max_cycles, email):
             progress.update("sync", cycle, 0, "checking for new emails")
 
             try:
+                # Fresh broker token each cycle — the handed access token has
+                # no refresh fields and expires in ~1h, so a service built once
+                # before the loop starts failing with RefreshError.
+                service = build_gmail_service(data_dir, email=email)
                 count = sync_new_messages(
                     service=service,
                     db_path=db_path,
@@ -914,15 +996,15 @@ def watch(ctx, interval, budget, max_cycles, email):
                 ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"], user_id=active_user_id)
                 conn.close()
                 if ok:
-                    emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id)
+                    emb_count = run_embedding_pipeline(db_path, cfg, user_id=active_user_id, limit=5000)
                     if emb_count:
                         click.echo(f"[cycle {cycle}] Embedded {emb_count} chunks")
                 else:
                     click.echo(f"[cycle {cycle}] Budget exhausted (${spent:.2f})")
 
-                # Reindex — light=True keeps the hot path fast.
-                progress.update("reindex", cycle, 0, "updating indexes")
-                _reindex(db_path=db_path, data_dir=data_dir, cfg=cfg, light=True, user_id=active_user_id)
+                # Indexing is decoupled: the `reindex --loop` daemon rebuilds
+                # the ScaNN/FTS surfaces on a quantum of new embeddings, so the
+                # frontfill cycle no longer reindexes inline.
 
                 conn = get_connection(db_path)
                 msg_count = conn.execute(
@@ -1092,7 +1174,7 @@ def reconcile(ctx, batch, loop, loop_sleep):
         _time.sleep(loop_sleep)
 
 
-@main.command(help="Watchdog that keeps watch/update/summarize/reconcile alive")
+@main.command(help="Watchdog that keeps each enrolled user's watch/update/summarize alive")
 @click.option("--interval", type=int, default=30, help="Seconds between heartbeat checks")
 @click.option(
     "--restart-delay",
@@ -1103,17 +1185,20 @@ def reconcile(ctx, batch, loop, loop_sleep):
 @common_options
 @click.pass_context
 def supervise(ctx, interval, restart_delay):
-    """Keep the three long-lived daemons alive.
+    """Multi-user watchdog. Walks `users` every `interval` seconds and
+    ensures three daemons are running per `sync_enabled` user:
+        watch:<user_id>      — frontfill (poll Gmail for new mail)
+        update:<user_id>     — backfill (older mail)
+        summarize:<user_id>  — local-LLM per-message summary
+    Plus one global `reconcile` daemon for thread_summary drift (no
+    per-user variant — scans all users).
 
-    Polls `job_progress.updated_at` for each of `watch`, `update`, and
-    `summarize`. If a row is stale for more than 90s (and we haven't
-    just tried to restart it) we respawn the daemon detached. The
-    supervisor itself also writes a `supervisor` row so you can see
-    it's alive.
-
-    Idempotent — running this under systemd-user or a tmux is fine;
-    if a daemon was already alive the 'already running' check in each
-    branch prevents a double-spawn.
+    Each spawned daemon gets `--email <user-email>` so it picks the
+    right broker tokens and writes to that user's `user_id`. The
+    job_progress row key is `<subcommand>:<user_id>` so multiple users
+    coexist without collision. Stale heartbeat + dead process →
+    respawn; stale heartbeat + live process → assume blocked, leave
+    alone (avoids the 10× duplicate summarize fight on a flaky vLLM).
     """
     import logging as _logging
     import signal as _signal
@@ -1129,39 +1214,57 @@ def supervise(ctx, interval, restart_delay):
     data_dir = ctx.obj["data_dir"]
     db_path = ctx.obj["db_path"]
 
-    # Supervisor-side view of the supervised daemons. "job_id" is the
-    # job_progress row key (same as the CLI subcommand), "argv" is what
-    # we respawn if the daemon is stale, and "log" is the file stdout
-    # + stderr land in.
-    daemons = [
+    # Per-user daemons we expect to be alive for every sync_enabled user.
+    # `argv_template` is appended with `--email <email>` per user. The
+    # log path uses the user_id prefix so per-user crashes don't pollute
+    # each other's tail-able log.
+    PER_USER_DAEMONS = [
+        {"key": "watch", "argv": ["watch", "--interval", "120"], "log_suffix": "watch.log"},
+        # Backfill: embeds the ~220k downloaded-but-unembedded messages and
+        # keeps catching up. Now safe to supervise — the cycle embeds BEFORE
+        # the (best-effort, short-timeout) URL crawl, so a slow/failing crawl
+        # can no longer starve embedding (the old crawl-first order left it
+        # embedding 0 and being respawned).
+        {"key": "update", "argv": ["update", "--loop", "--min-free-gb", "5"], "log_suffix": "backfill.log"},
         {
-            "job_id": "watch",
-            "argv": ["watch", "--interval", "120"],
-            "log": data_dir / "watch.log",
-        },
-        {
-            "job_id": "update",
-            "argv": ["update", "--loop"],
-            "log": data_dir / "backfill.log",
-        },
-        {
-            "job_id": "summarize",
+            "key": "summarize",
             "argv": ["summarize", "--concurrency", "12", "--batch-size", "1", "--loop"],
-            "log": data_dir / "summarize.log",
+            "log_suffix": "summarize.log",
         },
+        # Reindex is decoupled from the embed loop: this rebuilds the ScaNN/FTS
+        # surfaces on a quantum of new embeddings (or every --max-age for
+        # freshness on new mail) instead of every embed batch.
         {
-            "job_id": "reconcile",
-            # Drift detector: scans for threads whose `thread_summary`
-            # disagrees with `messages`, rebuilds them. Belt-and-
-            # suspenders behind the inline `_touch_thread_summary`
-            # call in upsert_message.
-            "argv": ["reconcile", "--loop"],
-            "log": data_dir / "reconcile.log",
+            "key": "reindex",
+            "argv": ["reindex", "--loop", "--quantum", "60", "--min-new", "10000", "--max-age", "900"],
+            "log_suffix": "reindex.log",
         },
     ]
 
-    # Track when we last attempted to spawn each daemon so we don't
-    # thrash on a process that dies immediately after start.
+    # Global daemons — no user_id needed (they scan across all users).
+    GLOBAL_DAEMONS = [
+        {
+            "key": "reconcile",
+            "argv": ["reconcile", "--loop"],
+            "log": data_dir / "reconcile.log",
+        },
+        # URL crawler. `--concurrency 8` is now a CEILING — the daemon scales
+        # actual Chromium concurrency down to fit free RAM each batch (see
+        # _mem_aware_conc), so it can't push the box into swap like it did when
+        # serve's ScaNN index grew to ~15 GB. No more manual pause/resume.
+        {
+            "key": "crawl",
+            # Small --limit so the browser RECYCLES often: crawl4ai can leave
+            # hung tabs open, which accumulate memory within a long batch
+            # (Chromium ballooned to ~12 GB on limit=600). Closing + reopening
+            # every ~100 URLs caps that. --concurrency is a memory-aware ceiling.
+            "argv": ["crawl", "--loop", "--concurrency", "8", "--limit", "100", "--interval", "5"],
+            "log": data_dir / "crawl.log",
+        },
+    ]
+
+    # Per-(job_id) last spawn timestamp so a freshly-spawned-but-not-yet-
+    # heartbeating daemon doesn't get re-spawned 10x in 30s.
     last_spawn_attempt: dict[str, float] = {}
 
     running = True
@@ -1174,9 +1277,8 @@ def supervise(ctx, interval, restart_delay):
     _signal.signal(_signal.SIGINT, _on_signal)
     _signal.signal(_signal.SIGTERM, _on_signal)
 
-    # Self-heartbeat so operators can see the supervisor is alive.
     supervisor_progress = JobProgress(db_path, "supervisor", start_completed=0)
-    supervisor_progress.update("starting", 0, len(daemons), "supervisor online")
+    supervisor_progress.update("starting", 0, 0, "supervisor online (multi-user)")
 
     _STALE_SECONDS = 90
 
@@ -1204,60 +1306,134 @@ def supervise(ctx, interval, restart_delay):
         last = last_spawn_attempt.get(job_id, 0.0)
         return (now - last) >= restart_delay
 
-    def _spawn(daemon: dict) -> None:
-        argv = gmail_search_command() + daemon["argv"] + ["--data-dir", str(data_dir)]
-        pid = spawn_detached(argv, daemon["log"])
-        last_spawn_attempt[daemon["job_id"]] = _time.time()
-        _log.info(f"supervisor: spawned {daemon['job_id']} pid={pid}")
+    def _spawn(job_id: str, argv_tail: list[str], log_path: Path) -> None:
+        argv = gmail_search_command() + argv_tail + ["--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, log_path)
+        last_spawn_attempt[job_id] = _time.time()
+        _log.info(f"supervisor: spawned {job_id} pid={pid}")
+
+    def _stop_unwanted_daemon(job_id: str, email: str | None) -> None:
+        """Converge *down*: SIGTERM a per-user daemon whose user is no
+        longer `sync_enabled`. Without this the toggle would only stop
+        *respawning* — already-running daemons would keep syncing until
+        they crashed on their own, so "Sync off" wouldn't actually
+        pause an account. Reads the pid from the daemon's job_progress
+        row and only signals if the OS process is genuinely alive."""
+        import os as _os  # inline: formatter strips top-level unused imports
+
+        row = JobProgress.get(db_path, job_id)
+        pid = row.get("pid") if row else None
+        if not pid or not is_daemon_running(job_id, email=email):
+            return
+        # PID-reuse guard: verify this exact PID's cmdline is really this
+        # daemon (subcommand + email) before signalling — a stale row could
+        # point at a PID since recycled by an unrelated process.
+        subcommand = job_id.split(":", 1)[0]
+        try:
+            with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
+            return
+        if subcommand not in cmdline or (email and email not in cmdline):
+            _log.warning(f"converge-down: pid {pid} cmdline no longer matches {job_id} — not killing")
+            return
+        try:
+            _os.kill(int(pid), _signal.SIGTERM)
+            _log.info(f"supervisor: stopped {job_id} pid={pid} (sync disabled)")
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+
+    def _enrolled_users() -> list[dict]:
+        """Read `users` for the current sync-enabled set. Re-queried
+        every cycle so newly-invited users get picked up automatically
+        without a supervisor restart. Same for `sync_enabled=false`
+        flipping a user off — next cycle they're skipped.
+        """
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute("SELECT id, email FROM users WHERE sync_enabled = TRUE ORDER BY email").fetchall()
+            return [{"id": r["id"], "email": r["email"]} for r in rows]
+        finally:
+            conn.close()
+
+    def _disabled_users() -> list[dict]:
+        """Users with `sync_enabled = FALSE` — their per-user daemons
+        should be converged *down* (stopped) if any are still running."""
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute("SELECT id, email FROM users WHERE sync_enabled = FALSE ORDER BY email").fetchall()
+            return [{"id": r["id"], "email": r["email"]} for r in rows]
+        finally:
+            conn.close()
 
     click.echo(
-        f"Supervisor online: watching {[d['job_id'] for d in daemons]} "
-        f"every {interval}s (stale > {_STALE_SECONDS}s, restart-delay {restart_delay}s)"
+        f"Supervisor online (multi-user). interval={interval}s "
+        f"stale>{_STALE_SECONDS}s restart-delay={restart_delay}s"
     )
 
     while running:
-        alive = 0
-        for daemon in daemons:
-            job_id = daemon["job_id"]
-            row = JobProgress.get(db_path, job_id)
-            if _is_alive(row):
-                alive += 1
-                continue
-            if not _should_respawn(job_id):
-                _log.debug(f"{job_id} stale but in restart-delay window — skipping")
-                continue
-            # Stale heartbeat + OS process still alive = daemon blocked
-            # (long HTTP call, flaky backend). Don't spawn a duplicate.
-            # Before this guard, we'd pile up 10+ summarize daemons all
-            # fighting for vLLM and reducing throughput to a crawl.
-            if is_daemon_running(job_id):
-                _log.warning(
-                    f"{job_id} heartbeat stale but process still alive — "
-                    "skipping respawn (probably blocked on backend)"
-                )
-                alive += 1
-                continue
-            prev_detail = (row.get("detail") if row else "") or "(no prior row)"
-            age = _row_age_seconds(row)
-            _log.info(
-                f"{job_id} is stale "
-                f"(age={age!r}s, status={row.get('status') if row else 'MISSING'}, "
-                f"prev_detail={prev_detail!r}) — respawning"
-            )
-            try:
-                _spawn(daemon)
-            except Exception as e:
-                _log.exception(f"failed to spawn {job_id}: {e}")
-
         try:
+            users = _enrolled_users()
+            # Build the full {job_id → spec} map for this cycle.
+            # Tuple shape: (job_id, argv_tail, log_path, email_or_None).
+            # The trailing email is for is_daemon_running()'s per-user
+            # disambiguation — without it, scott's `gmail-search watch`
+            # would mark silvershabbat's `watch:<uid>` as already-running.
+            wanted: list[tuple[str, list[str], Path, str | None]] = []
+            for u in users:
+                for spec in PER_USER_DAEMONS:
+                    job_id = f"{spec['key']}:{u['id']}"
+                    argv_tail = spec["argv"] + ["--email", u["email"]]
+                    log_path = data_dir / f"{u['id']}-{spec['log_suffix']}"
+                    wanted.append((job_id, argv_tail, log_path, u["email"]))
+            for spec in GLOBAL_DAEMONS:
+                wanted.append((spec["key"], spec["argv"], spec["log"], None))
+
+            # Converge down: any per-user daemon for a now-disabled user
+            # is stopped. Runs before the respawn pass so we don't fight
+            # ourselves on a user toggled off mid-cycle.
+            for u in _disabled_users():
+                for spec in PER_USER_DAEMONS:
+                    _stop_unwanted_daemon(f"{spec['key']}:{u['id']}", u["email"])
+
+            alive = 0
+            for job_id, argv_tail, log_path, email in wanted:
+                row = JobProgress.get(db_path, job_id)
+                if _is_alive(row):
+                    alive += 1
+                    continue
+                if not _should_respawn(job_id):
+                    continue
+                # Stale heartbeat + OS process alive = blocked daemon, not
+                # dead. Don't pile up duplicates fighting the same backend.
+                if is_daemon_running(job_id, email=email):
+                    _log.warning(f"{job_id} heartbeat stale but process still alive — skipping respawn")
+                    alive += 1
+                    continue
+                prev_detail = (row.get("detail") if row else "") or "(no prior row)"
+                age = _row_age_seconds(row)
+                _log.info(
+                    f"{job_id} stale "
+                    f"(age={age!r}s, status={row.get('status') if row else 'MISSING'}, "
+                    f"prev_detail={prev_detail!r}) — respawning"
+                )
+                try:
+                    _spawn(job_id, argv_tail, log_path)
+                except Exception as e:
+                    _log.exception(f"failed to spawn {job_id}: {e}")
+
             supervisor_progress.update(
                 "watching",
                 alive,
-                len(daemons),
-                f"{alive}/{len(daemons)} alive",
+                len(wanted),
+                f"{alive}/{len(wanted)} alive across {len(users)} user(s)",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # A transient failure (e.g. Postgres dropping the connection
+            # under memory pressure) must NOT kill the supervisor — log it
+            # and retry next interval. An unhandled OperationalError here
+            # is exactly what silently crash-killed the loop before.
+            _log.exception(f"supervisor cycle failed — retrying in {interval}s: {e}")
 
         for _ in range(interval):
             if not running:

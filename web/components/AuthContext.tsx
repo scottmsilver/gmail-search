@@ -20,6 +20,11 @@ export type AuthUser = {
   email: string;
   name: string | null;
   picture: string | null;
+  // Set when the signed-in email is in `GMS_ADMIN_EMAILS` server-side.
+  // Drives whether the UI surfaces /admin (multi-user sync console).
+  // Computed on the server every /api/auth/me call so a rotated env
+  // takes effect without a re-login.
+  is_admin?: boolean;
 };
 
 export type AuthContextValue = {

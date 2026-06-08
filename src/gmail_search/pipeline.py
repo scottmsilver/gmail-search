@@ -136,13 +136,83 @@ def reindex(
     if light:
         return
 
+    # Heavy navigational rebuilds (light=False only — the manual `reindex`
+    # path, NOT the per-cycle watch/backfill loops). Log peak RSS after
+    # each so the fixed-budget guarantee is observable end to end.
+    import resource as _resource
+
+    def _peak_mib() -> int:
+        return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss // 1024
+
     rebuild_contact_frequency(db_path, user_id=uid)
+    logger.info("reindex: after contact_frequency — peak RSS %d MiB", _peak_mib())
     rebuild_spell_dictionary(db_path, data_dir, user_id=uid)
+    logger.info("reindex: after spell_dictionary — peak RSS %d MiB", _peak_mib())
     rebuild_topics(db_path, user_id=uid)
-    rebuild_term_aliases(db_path, user_id=uid)
+    logger.info("reindex: after topics — peak RSS %d MiB", _peak_mib())
+    rebuild_term_aliases(db_path, data_dir=data_dir, user_id=uid)
+    logger.info("reindex: after term_aliases — peak RSS %d MiB", _peak_mib())
     # Cached query embeddings can now point at stale term-alias
     # expansions; wipe so the next query re-expands + re-embeds.
     # query_cache is intentionally shared across users (cache hit =
     # saved embedding cost; the query embedding is opaque) so the
     # clear is global, not per-user.
     clear_query_cache(db_path)
+
+
+def reindex_if_needed(
+    db_path: Path,
+    data_dir: Path,
+    cfg: dict[str, Any],
+    *,
+    user_id: Optional[str] = None,
+    min_new: int = 2000,
+    max_age_s: int = 600,
+) -> bool:
+    """Reindex (light) only when a *quantum* of new embeddings has built up.
+
+    Decouples indexing from the embed loop: the embedder just embeds; this
+    decides when the ScaNN/FTS surfaces are stale enough to rebuild. Tracks
+    the max embeddings.id folded into the live index in a per-user state file
+    and rebuilds when either >= `min_new` new embeddings exist, OR any new
+    exist and the index is older than `max_age_s` (freshness floor). Returns
+    True if it rebuilt. Cheap to call on a short interval — the COUNT is
+    index-served and it no-ops when there's nothing new.
+    """
+    import json
+    import time
+
+    from gmail_search.auth.write_user import resolve_write_user_id
+    from gmail_search.store.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        uid = resolve_write_user_id(conn, user_id=user_id)
+        cur_max = conn.execute("SELECT COALESCE(MAX(id), 0) FROM embeddings WHERE user_id = %s", (uid,)).fetchone()[0]
+        state_path = Path(data_dir) / "users" / uid / "reindex_state.json"
+        indexed_max, last_at = 0, 0.0
+        if state_path.exists():
+            try:
+                s = json.loads(state_path.read_text())
+                indexed_max = int(s.get("indexed_max_id", 0))
+                last_at = float(s.get("last_reindex_at", 0.0))
+            except Exception:
+                indexed_max, last_at = 0, 0.0
+        new = conn.execute(
+            "SELECT COUNT(*) FROM embeddings WHERE user_id = %s AND id > %s",
+            (uid, indexed_max),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    if new <= 0:
+        return False
+    age = time.time() - last_at
+    if new < min_new and age < max_age_s:
+        return False  # work exists but below the quantum — wait
+
+    reindex(db_path, data_dir, cfg, light=True, user_id=uid)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({"indexed_max_id": cur_max, "last_reindex_at": time.time()}))
+    logger.info("reindex_if_needed: rebuilt %s (%d new embeddings, index age %.0fs)", uid, new, age)
+    return True

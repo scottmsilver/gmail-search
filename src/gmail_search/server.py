@@ -751,8 +751,19 @@ def create_app(
                     start = _time.time()
                     built = await _asyncio.to_thread(_build_engine, user_id, current)
                     with _engine_lock:
+                        old = _engines.get(user_id)
                         _engines[user_id] = built
                         _engine_index_dirs[user_id] = current
+                    # Explicitly drop the previous engine and force a GC so
+                    # ScaNN's C++ searcher memory is released NOW. Without this
+                    # the old per-shard searchers lingered, leaking RAM every
+                    # swap until serve bloated enough that the next swap's
+                    # transient 2x index footprint pushed the box into swap —
+                    # the periodic multi-second serve freeze.
+                    del old
+                    import gc as _gc
+
+                    _gc.collect()
                     logger.info(
                         f"engine hot-swapped for {user_id} in {_time.time() - start:.1f}s " f"(index={current.name})"
                     )
@@ -2069,6 +2080,7 @@ def create_app(
         "frontfill": "watch",
         "backfill": "update",
         "summarize": "summarize",
+        "reindex": "reindex",
     }
 
     def _user_job_id(job_key: str, user_id: str) -> str:
@@ -2113,7 +2125,15 @@ def create_app(
         except (ValueError, TypeError):
             age = None
         pid = row.get("pid")
-        running = row.get("status") == "running" and (age is not None and age < _DAEMON_STALE_SECONDS)
+        fresh = row.get("status") == "running" and (age is not None and age < _DAEMON_STALE_SECONDS)
+        # A fresh heartbeat alone under-reports liveness: the backfill's
+        # URL-crawl phase can wait up to 300s per blocked link, so its
+        # heartbeat goes stale while the process is very much alive. Treat
+        # it as running if the heartbeat is fresh OR the recorded PID is
+        # still the live daemon (matched by cmdline) — else the UI shows a
+        # busy daemon as "down". ("supervisor" row → "supervise" argv.)
+        needle = "supervise" if job_id == "supervisor" else job_id.split(":", 1)[0]
+        running = fresh or (row.get("status") == "running" and _pid_cmdline_matches(pid, needle))
         return {
             "running": bool(running),
             "pid": int(pid) if pid else None,
@@ -2121,6 +2141,20 @@ def create_app(
             "stage": row.get("stage") or "",
             "detail": row.get("detail") or "",
         }
+
+    def _pid_cmdline_matches(pid: int | None, *needles: str) -> bool:
+        """True iff /proc/<pid> exists, isn't a zombie, and its cmdline
+        contains every needle. Guards os.kill against PID reuse / stale
+        job_progress rows that point at a PID since recycled by an
+        unrelated process running as this same user."""
+        if not pid:
+            return False
+        try:
+            with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except (FileNotFoundError, ProcessLookupError, ValueError, PermissionError):
+            return False
+        return bool(cmdline) and all(n in cmdline for n in needles)
 
     def _pid_file_status(pid_path: Path) -> dict:
         """Is the process at pid_path alive AND not a zombie?
@@ -2249,6 +2283,15 @@ def create_app(
         status = _daemon_status(job_id)
         if not status["running"] or not status["pid"]:
             return JSONResponse(status_code=404, content={"ok": False, "error": "not running"})
+        # PID-reuse guard: confirm this exact PID is really this user's
+        # daemon (subcommand + their email) before signalling it.
+        subcommand = _DAEMON_JOB_IDS[job_key]
+        email = _user_email(user_id) or ""
+        if not _pid_cmdline_matches(status["pid"], subcommand, email):
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "recorded pid no longer matches this daemon"},
+            )
         try:
             os.kill(status["pid"], signal.SIGTERM)
             return {"ok": True, "pid": status["pid"]}
@@ -2325,59 +2368,10 @@ def create_app(
             "summarize": _daemon_status(_user_job_id("summarize", user_id)),
         }
 
-    # ── OAuth status + re-auth ──────────────────────────────────────────
-    # Settings UI reads /api/auth/status to show which scopes the current
-    # token grants, and POSTs /api/auth/reauth to force a consent-screen
-    # re-prompt (needed after we expand SCOPES in gmail/auth.py). Re-auth
-    # spawns `gmail-search auth --force` detached so the browser flow
-    # runs outside the server process; the token file lands under data/
-    # and the status endpoint reflects it on next poll.
-
-    _SCOPE_LABELS = {
-        "https://www.googleapis.com/auth/gmail.readonly": "gmail",
-        "https://www.googleapis.com/auth/drive.readonly": "drive",
-    }
-
-    @app.get("/api/auth/status")
-    async def api_auth_status():
-        """Return which scopes the stored token actually grants, plus
-        a friendly `missing` list against the SCOPES our code expects.
-        """
-        import json
-
-        from gmail_search.gmail.auth import SCOPES
-
-        token_path = data_dir / "token.json"
-        granted: list[str] = []
-        if token_path.exists():
-            try:
-                tok = json.loads(token_path.read_text())
-                granted = list(tok.get("scopes") or [])
-            except Exception:
-                granted = []
-        expected = set(SCOPES)
-        missing = sorted(expected - set(granted))
-        granted_sorted = sorted(granted)
-        return {
-            "token_present": token_path.exists(),
-            "granted": granted_sorted,
-            "granted_labels": [_SCOPE_LABELS.get(s, s) for s in granted_sorted],
-            "missing": missing,
-            "missing_labels": [_SCOPE_LABELS.get(s, s) for s in missing],
-            "drive_enabled": "https://www.googleapis.com/auth/drive.readonly" in granted,
-        }
-
-    @app.post("/api/auth/reauth")
-    async def api_auth_reauth():
-        """Kick a detached `gmail-search auth --force` so the OAuth
-        flow opens in the user's default browser. Same pid-file pattern
-        as the other jobs — lets the UI show running/done state.
-        """
-        return _start_detached_job(
-            pid_filename="auth.pid",
-            log_filename="auth.log",
-            extra_args=["auth", "--force"],
-        )
+    # Legacy single-pool OAuth status/re-auth endpoints (token.json) were
+    # removed — credentials are broker-only now. Per-user Gmail connection
+    # status lives at /api/auth/gmail-status; (re)connect via
+    # /api/auth/connect-gmail.
 
     @app.post("/api/jobs/frontfill")
     async def api_jobs_frontfill(
@@ -2446,5 +2440,252 @@ def create_app(
     @app.post("/api/jobs/summarize/stop")
     async def api_jobs_summarize_stop(user_id: str = Depends(require_user_id)):
         return _stop_daemon("summarize", user_id)
+
+    # ── Admin: per-user sync management ──────────────────────────────
+    # Admins (GMS_ADMIN_EMAILS, default scottmsilver@gmail.com) get a
+    # cross-user view + can start/stop other users' daemons. The
+    # supervisor handles auto-start in the steady state — these
+    # endpoints are for forced reload (re-pull a user's mail), pausing
+    # an account during a trip, or debugging a stuck daemon.
+    from gmail_search.auth import require_admin
+
+    # Cache broker Gmail-connection probes so the /admin poll (every few
+    # seconds) doesn't hit the broker /token endpoint once per user per
+    # poll. Keyed by email → (fetched_at, status).
+    _gmail_status_cache: dict[str, tuple[float, dict]] = {}
+    _GMAIL_STATUS_TTL = 60.0
+
+    def _user_gmail_status(email: str) -> dict:
+        """Best-effort broker Gmail-connection status for `email`:
+        `{connected: bool, problem: 'scope'|None}`. Cached for
+        `_GMAIL_STATUS_TTL`s. Never raises — a broker hiccup or a
+        revoked/absent token just reports `connected=False` so the UI
+        can prompt a (re)connect."""
+        import time as _time
+
+        from gmail_search.gmail.auth import _broker_credentials_for
+
+        now = _time.time()
+        hit = _gmail_status_cache.get(email)
+        if hit and (now - hit[0]) < _GMAIL_STATUS_TTL:
+            return hit[1]
+        status = {"connected": False, "problem": None}
+        try:
+            creds = _broker_credentials_for(email)
+            status["connected"] = bool(creds and creds.token)
+        except PermissionError:
+            status["problem"] = "scope"
+        except Exception:
+            pass
+        _gmail_status_cache[email] = (now, status)
+        return status
+
+    @app.get("/api/admin/users")
+    async def api_admin_users(_admin=Depends(require_admin)):
+        """Return every user + their per-user daemon health (frontfill,
+        backfill, summarize) + sync_enabled flag. Powers the /admin UI."""
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                """SELECT u.id, u.email, u.name, u.sync_enabled,
+                          u.invited_at, u.last_login_at,
+                          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.id) AS msg_count,
+                          (SELECT COUNT(*) FROM embeddings e WHERE e.user_id = u.id) AS emb_count
+                   FROM users u
+                   ORDER BY u.email"""
+            ).fetchall()
+        finally:
+            conn.close()
+        users = []
+        for r in rows:
+            uid = r["id"]
+            users.append(
+                {
+                    "id": uid,
+                    "email": r["email"],
+                    "name": r["name"],
+                    "sync_enabled": bool(r["sync_enabled"]),
+                    "invited_at": r["invited_at"].isoformat() if r["invited_at"] else None,
+                    "last_login_at": r["last_login_at"].isoformat() if r["last_login_at"] else None,
+                    "msg_count": int(r["msg_count"] or 0),
+                    "emb_count": int(r["emb_count"] or 0),
+                    "frontfill": _daemon_status(_user_job_id("frontfill", uid)),
+                    "backfill": _daemon_status(_user_job_id("backfill", uid)),
+                    "summarize": _daemon_status(_user_job_id("summarize", uid)),
+                    "reindex": _daemon_status(_user_job_id("reindex", uid)),
+                    "gmail": _user_gmail_status(r["email"]),
+                }
+            )
+        # Plus the global supervisor row so admin can see if it's alive.
+        return {"users": users, "supervisor": _daemon_status("supervisor")}
+
+    @app.get("/api/admin/progress")
+    async def api_admin_progress(_admin=Depends(require_admin)):
+        """Work-remaining stats for /admin: per-user embedding coverage
+        (messages embedded vs total) and the URL-crawl queue split into
+        fast lane (never tried), slow lane (failed, backing off), abandoned
+        (hit the retry cap), and done. This is the heavier query (a scan of
+        the URL-stub attachments), so the UI polls it on a slower interval
+        than the daemon-health poll."""
+        from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS
+
+        conn = get_connection(db_path)
+        try:
+            emb_rows = conn.execute(
+                """SELECT u.id, u.email,
+                          (SELECT COUNT(*) FROM messages m WHERE m.user_id = u.id) AS messages,
+                          (SELECT COUNT(DISTINCT e.message_id) FROM embeddings e
+                             WHERE e.user_id = u.id AND e.chunk_type = 'message') AS embedded
+                   FROM users u
+                  ORDER BY u.email"""
+            ).fetchall()
+            crawl = conn.execute(
+                """SELECT
+                     COUNT(*) FILTER (WHERE extracted_text IS NULL AND crawl_attempts = 0) AS fast,
+                     COUNT(*) FILTER (WHERE extracted_text IS NULL AND crawl_attempts BETWEEN 1 AND %s) AS slow,
+                     COUNT(*) FILTER (WHERE extracted_text IS NULL AND crawl_attempts >= %s) AS dead,
+                     COUNT(*) FILTER (WHERE extracted_text IS NOT NULL) AS done
+                   FROM attachments
+                  WHERE mime_type = 'text/html' AND filename LIKE %s""",
+                (_MAX_CRAWL_ATTEMPTS - 1, _MAX_CRAWL_ATTEMPTS, "URL: %"),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        embedding = []
+        for r in emb_rows:
+            msgs = int(r["messages"] or 0)
+            emb = int(r["embedded"] or 0)
+            embedding.append(
+                {
+                    "id": r["id"],
+                    "email": r["email"],
+                    "messages": msgs,
+                    "embedded": emb,
+                    "pending": max(0, msgs - emb),
+                    "pct": round(100.0 * emb / msgs, 1) if msgs else 100.0,
+                }
+            )
+        c = crawl or {}
+        fast, slow, dead, done = (int(c[k] or 0) for k in ("fast", "slow", "dead", "done"))
+        return {
+            "embedding": embedding,
+            "crawl": {
+                "fast": fast,
+                "slow": slow,
+                "dead": dead,
+                "done": done,
+                "pending": fast + slow,
+                "max_attempts": _MAX_CRAWL_ATTEMPTS,
+            },
+        }
+
+    @app.post("/api/admin/users/{user_id}/sync_enabled")
+    async def api_admin_set_sync_enabled(
+        user_id: str,
+        payload: dict = Body(...),
+        _admin=Depends(require_admin),
+    ):
+        """Toggle the supervisor's interest in a user. `enabled=false`
+        means the supervisor stops auto-spawning their daemons next
+        cycle (existing daemons keep running until they exit
+        naturally; admin can stop them explicitly via the per-job
+        endpoints below). `enabled=true` re-enrolls them."""
+        enabled = bool(payload.get("enabled"))
+        conn = get_connection(db_path)
+        try:
+            cur = conn.execute(
+                "UPDATE users SET sync_enabled = %s WHERE id = %s RETURNING email",
+                (enabled, user_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            return JSONResponse({"ok": False, "error": "no such user"}, status_code=404)
+        return {"ok": True, "user_id": user_id, "email": row["email"], "sync_enabled": enabled}
+
+    @app.post("/api/admin/users/{user_id}/{job_key}/start")
+    async def api_admin_start_user_daemon(
+        user_id: str,
+        job_key: str,
+        _admin=Depends(require_admin),
+    ):
+        """Force-start a user's daemon. Equivalent to clicking
+        Frontfill/Backfill/Summarize in their Settings — but admin
+        can do it for any user. Returns 400 for unknown job_key."""
+        if job_key not in _DAEMON_JOB_IDS:
+            return JSONResponse(
+                {"ok": False, "error": f"job_key must be one of {sorted(_DAEMON_JOB_IDS)}"},
+                status_code=400,
+            )
+        log_filename = {
+            "frontfill": "watch.log",
+            "backfill": "backfill.log",
+            "summarize": "summarize.log",
+            "reindex": "reindex.log",
+        }[job_key]
+        extra_args = {
+            "frontfill": ["watch", "--interval", "120"],
+            "backfill": ["update", "--loop"],
+            "summarize": ["summarize", "--concurrency", "12", "--batch-size", "1", "--loop"],
+            "reindex": ["reindex", "--loop", "--quantum", "60", "--min-new", "10000", "--max-age", "900"],
+        }[job_key]
+        return _spawn_daemon(
+            job_key=job_key,
+            log_filename=log_filename,
+            extra_args=extra_args,
+            user_id=user_id,
+        )
+
+    @app.post("/api/admin/users/{user_id}/{job_key}/stop")
+    async def api_admin_stop_user_daemon(
+        user_id: str,
+        job_key: str,
+        _admin=Depends(require_admin),
+    ):
+        if job_key not in _DAEMON_JOB_IDS:
+            return JSONResponse(
+                {"ok": False, "error": f"job_key must be one of {sorted(_DAEMON_JOB_IDS)}"},
+                status_code=400,
+            )
+        return _stop_daemon(job_key, user_id)
+
+    @app.post("/api/admin/supervisor/start")
+    async def api_admin_supervisor_start(_admin=Depends(require_admin)):
+        """Start the multi-user supervisor — the reconciler that keeps
+        each sync-enabled user's watch/update/summarize alive and
+        converges disabled users down. 409 if already running. Spawned
+        as a child of this server process so it inherits the broker env
+        (and therefore so do the daemons it spawns)."""
+        if _daemon_status("supervisor")["running"]:
+            return JSONResponse({"ok": False, "error": "supervisor already running"}, status_code=409)
+        from gmail_search.jobs import gmail_search_command, spawn_detached
+
+        argv = gmail_search_command() + ["supervise", "--interval", "30", "--data-dir", str(data_dir)]
+        pid = spawn_detached(argv, data_dir / "supervise.log")
+        return {"ok": True, "pid": pid}
+
+    @app.post("/api/admin/supervisor/stop")
+    async def api_admin_supervisor_stop(_admin=Depends(require_admin)):
+        """SIGTERM the supervisor. Supervised daemons keep running — the
+        supervisor only respawns/converges, it doesn't own them."""
+        import os as _os
+        import signal as _signal
+
+        from gmail_search.store.db import JobProgress
+
+        row = JobProgress.get(db_path, "supervisor")
+        pid = row.get("pid") if row else None
+        # PID-reuse guard: only signal a PID whose cmdline is actually the
+        # supervisor (a stale row could point at a recycled PID).
+        if not pid or not _pid_cmdline_matches(pid, "supervise"):
+            return JSONResponse({"ok": False, "error": "supervisor not running"}, status_code=404)
+        try:
+            _os.kill(int(pid), _signal.SIGTERM)
+        except (ProcessLookupError, ValueError, PermissionError):
+            pass
+        return {"ok": True, "pid": pid}
 
     return app

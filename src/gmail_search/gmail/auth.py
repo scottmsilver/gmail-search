@@ -1,4 +1,4 @@
-"""Gmail credentials — broker-only path for multi-tenant.
+"""Gmail credentials — broker-only.
 
 Pivoted from `InstalledAppFlow.run_local_server` (which opens a browser
 on the host — useless for a multi-user web app) to the silver-oauth
@@ -7,13 +7,9 @@ fetch a fresh access token via `broker /token?email=&scope=...` on
 each call. No tokens stored locally, no per-app OAuth client, no
 encryption-at-rest concern.
 
-Legacy `data/token.json` path is preserved as a fallback when:
-  - `SILVER_OAUTH_BROKER_URL` is unset (legacy single-user dev)
-  - the broker request 404s (user hasn't connected Gmail yet)
-
-So an existing single-pool install with a stored `token.json` keeps
-working unchanged. New invitees go through the broker via the
-`/api/auth/connect-gmail` endpoint.
+The legacy `data/token.json` / `InstalledAppFlow` path has been
+removed: the broker is the sole credential store. Connect a Gmail
+account via `/api/auth/connect-gmail`.
 """
 
 from __future__ import annotations
@@ -24,7 +20,6 @@ from pathlib import Path
 from typing import Optional
 
 import requests
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -93,56 +88,39 @@ def _broker_credentials_for(email: str) -> Optional[Credentials]:
 
 
 def get_credentials(data_dir: Path, *, email: Optional[str] = None) -> Credentials:
-    """Resolve Google API credentials for `email`. Multi-tenant flow:
-        1. Try the broker — `broker /token?email=&scope=…`.
-        2. If the broker isn't configured OR returns 404, fall through
-           to the legacy `data/token.json` path so single-pool dev
-           installs keep working.
+    """Resolve Google API credentials for `email` via the silver-oauth
+    broker — the sole credential store. Fetches a fresh short-lived
+    access token per call; the refresh token never leaves the broker.
 
     `email` defaults to the `GMS_BOOTSTRAP_EMAIL` env var so daemon
-    callers (`gmail-search update --loop` etc.) can switch which
-    user's mail they're syncing without code changes — set the env
-    var, run the daemon, done. Same env var the write path uses, so
-    DB writes land under that user's user_id.
+    callers (`gmail-search update --loop` etc.) can switch which user's
+    mail they sync without code changes — set the env var, run the
+    daemon, done. Same env var the write path uses, so DB writes land
+    under that user's user_id.
 
-    Raises `FileNotFoundError` if neither path produces credentials —
-    same behaviour as before so callers get a stable error to retry on.
+    `data_dir` is retained for call-site compatibility (the removed
+    local-token path used it) but is no longer read.
+
+    Raises `RuntimeError` when no email can be resolved or the broker
+    has no credentials for it (broker unconfigured, or the user hasn't
+    connected Gmail). May raise `PermissionError` when the broker
+    reports a missing scope. Callers' retry loops treat these the same
+    way they did the previous `FileNotFoundError`.
     """
     if email is None:
         email = os.environ.get("GMS_BOOTSTRAP_EMAIL")
-    if email:
-        creds = _broker_credentials_for(email)
-        if creds is not None:
-            return creds
-        logger.info("broker has no Gmail tokens for %s — falling back to legacy token.json", email)
-
-    # Legacy single-pool fallback. Reads `data/token.json` written by
-    # the original `InstalledAppFlow` flow. New per-user installs
-    # should never hit this path — the broker IS the credential store.
-    creds_path = data_dir / "credentials.json"
-    token_path = data_dir / "token.json"
-
-    if not token_path.exists():
-        raise FileNotFoundError(
-            f"No credentials available for {email or '<unknown>'}. "
-            "Either connect Gmail via /api/auth/connect-gmail (broker path), "
-            f"or place a legacy token.json at {token_path}."
+    if not email:
+        raise RuntimeError(
+            "No email to resolve Gmail credentials for — pass --email or set "
+            "GMS_BOOTSTRAP_EMAIL. Credentials come from the silver-oauth broker."
         )
-
-    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    if not creds.valid:
-        if creds.expired and creds.refresh_token and creds_path.exists():
-            creds.refresh(Request())
-            import stat as _stat
-
-            token_path.write_text(creds.to_json())
-            token_path.chmod(_stat.S_IRUSR | _stat.S_IWUSR)
-        else:
-            raise FileNotFoundError(
-                f"Stored token at {token_path} is expired and cannot be refreshed "
-                "(no credentials.json, or no refresh_token). Re-auth via the broker."
-            )
-
+    creds = _broker_credentials_for(email)
+    if creds is None:
+        raise RuntimeError(
+            f"No Gmail credentials for {email} from the broker. Either the broker "
+            "is not configured (SILVER_OAUTH_BROKER_URL / SILVER_OAUTH_BEARER), or "
+            "the user hasn't connected Gmail via /api/auth/connect-gmail."
+        )
     return creds
 
 

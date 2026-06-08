@@ -94,6 +94,9 @@ _DENY_HOST_PREFIXES = (
     "ct.",
     "e.",
     "em.",
+    "email.",  # email.<brand> is marketing dispatch — 0% useful content in practice
+    "mailer.",
+    "newsletter.",
     "enews.",
     "eventing.",
     "link.",

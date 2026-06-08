@@ -300,7 +300,14 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
         """Auth-gated identity probe. With multi-tenant ON, returns 401
         unless the cookie verifies. With it OFF, returns the legacy
         `null` shape so the frontend can detect 'no auth required
-        here, single-pool mode'."""
+        here, single-pool mode'.
+
+        `is_admin` lets the UI show/hide the /admin link without a
+        second round-trip. Computed from `GMS_ADMIN_EMAILS` on each
+        call so a rotated env doesn't require a re-login.
+        """
+        from gmail_search.auth.session import is_admin_email
+
         if user is None:
             return {"multi_tenant": False, "user": None}
         return {
@@ -310,6 +317,7 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
                 "email": user.email,
                 "name": user.name,
                 "picture": user.picture,
+                "is_admin": is_admin_email(user.email),
             },
         }
 

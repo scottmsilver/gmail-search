@@ -394,16 +394,8 @@ def build_index_sharded(
             conn.close()
             return target_dir
 
-        if user_id is None:
-            cursor = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s ORDER BY id", (model,))
-        else:
-            cursor = conn.execute(
-                "SELECT id, embedding FROM embeddings WHERE model = %s AND user_id = %s ORDER BY id",
-                (model, user_id),
-            )
         all_ids: list[int] = []
         shard_idx = 0
-        buffer: list[tuple[int, bytes]] = []
         # When manual_rerank is on, stream the FULL-precision vectors
         # of every shard into one index-level memmap. The searcher
         # mmaps it at query time to rerank ScaNN's truncated-AH
@@ -417,14 +409,47 @@ def build_index_sharded(
             shard_kwargs["ah_dim"] = effective_ah_dim
         if appender is not None:
             shard_kwargs["full_corpus_appender"] = appender
-        for row in cursor:
-            buffer.append((row["id"], row["embedding"]))
-            if len(buffer) >= shard_size:
-                all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
-                buffer = []
-                shard_idx += 1
-        if buffer:
-            all_ids.extend(_build_one_shard(buffer, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
+
+        # Stream the corpus ONE SHARD AT A TIME via keyset pagination on
+        # (model, id) — backed by idx_embeddings_model_id. This is the
+        # whole point of the memory budget: psycopg's default client-side
+        # cursor buffers the ENTIRE result set on execute(), so a single
+        # "SELECT … ORDER BY id" pulls every embedding (~N × dims × 4
+        # bytes) into RAM up front and blows the per-shard budget (this is
+        # what was OOM-killing the backfill at ~20 GB). With keyset paging,
+        # each page IS a shard: fetch shard_size rows, build, free, repeat —
+        # so client-side working set stays ≈ one shard regardless of corpus
+        # size, and we just add shards until the corpus is exhausted.
+        import resource as _resource  # stdlib; for per-shard peak-RSS logging
+
+        last_id = -1
+        while True:
+            if user_id is None:
+                page = conn.execute(
+                    "SELECT id, embedding FROM embeddings WHERE model = %s AND id > %s ORDER BY id LIMIT %s",
+                    (model, last_id, shard_size),
+                ).fetchall()
+            else:
+                page = conn.execute(
+                    "SELECT id, embedding FROM embeddings WHERE model = %s AND user_id = %s "
+                    "AND id > %s ORDER BY id LIMIT %s",
+                    (model, user_id, last_id, shard_size),
+                ).fetchall()
+            if not page:
+                break
+            last_id = page[-1]["id"]
+            rows_buf = [(r["id"], r["embedding"]) for r in page]
+            n = len(rows_buf)
+            del page
+            all_ids.extend(_build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
+            del rows_buf
+            peak_mib = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss // 1024
+            logger.info(
+                "reindex: built shard %d (%d vecs) — process peak RSS %d MiB",
+                shard_idx,
+                n,
+                peak_mib,
+            )
             shard_idx += 1
         if appender is not None:
             appender.flush()

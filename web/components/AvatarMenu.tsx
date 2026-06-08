@@ -114,6 +114,18 @@ export function AvatarMenu() {
             >
               Settings
             </Link>
+            {isSignedIn && user?.is_admin ? (
+              <Link
+                href="/admin"
+                onClick={() => setOpen(false)}
+                className={cn(
+                  "block rounded px-2 py-1.5 text-xs",
+                  "transition hover:bg-accent hover:text-accent-foreground",
+                )}
+              >
+                Admin
+              </Link>
+            ) : null}
             {isSignedIn ? (
               <>
                 <button

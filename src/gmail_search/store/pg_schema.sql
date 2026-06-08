@@ -48,8 +48,18 @@ CREATE TABLE IF NOT EXISTS attachments (
     extracted_text TEXT,
     image_path TEXT,
     raw_path TEXT,
+    -- URL-stub crawl state (fast/slow lane). A failed crawl leaves
+    -- extracted_text NULL; these let pending_url_stubs back off and abandon
+    -- dead links instead of re-trying them every cycle (head-of-line blocking).
+    crawl_attempts INT NOT NULL DEFAULT 0,
+    crawl_last_attempt TIMESTAMPTZ,
     UNIQUE (message_id, filename)
 );
+
+-- Serves pending_url_stubs' (crawl_attempts ASC, id DESC) fast/slow-lane order.
+CREATE INDEX IF NOT EXISTS idx_attachments_crawl_lane
+    ON attachments (crawl_attempts, id DESC)
+    WHERE mime_type = 'text/html' AND extracted_text IS NULL;
 
 CREATE TABLE IF NOT EXISTS embeddings (
     id BIGSERIAL PRIMARY KEY,
@@ -419,6 +429,12 @@ BEGIN
         ALTER TABLE users ALTER COLUMN google_sub DROP NOT NULL;
     END IF;
 END $$;
+
+-- `sync_enabled` opts a user in/out of the centralized supervisor's
+-- watch+update+summarize fan-out. Default TRUE so newly-invited users
+-- start syncing the moment they sign in. Admin can pause an account
+-- (e.g. to stop billing during a trip) without deleting them.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sync_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE TABLE IF NOT EXISTS invited_emails (
     email TEXT PRIMARY KEY,
