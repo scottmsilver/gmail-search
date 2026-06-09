@@ -62,10 +62,14 @@ Rules:
 """
 
 
-def build_retriever_agent(*, model: str | None = None):
+def build_retriever_agent(*, model: str | None = None, user_id: str | None = None):
     """Build the Retriever LlmAgent wired to our four retrieval
     tools. Flash-tier is fine here — the model decides which tool
-    to call, not how to reason over the results."""
+    to call, not how to reason over the results.
+
+    `user_id` is the deep-mode session's authenticated user; it's bound
+    into every tool so the internal /api/* calls scope to that user
+    (without it the calls 401)."""
     from google.adk import Agent
 
     from gmail_search.agents.tools import build_retrieval_tools
@@ -75,5 +79,5 @@ def build_retriever_agent(*, model: str | None = None):
         name="retriever",
         model=model_name,
         instruction=RETRIEVER_INSTRUCTION,
-        tools=build_retrieval_tools(),
+        tools=build_retrieval_tools(user_id=user_id),
     )

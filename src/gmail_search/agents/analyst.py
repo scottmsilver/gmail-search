@@ -242,9 +242,28 @@ def build_analyst_agent(
     return Agent(
         name="analyst",
         model=model_name,
-        instruction=instruction or ANALYST_INSTRUCTION,
+        instruction=_as_constant_instruction(instruction or ANALYST_INSTRUCTION),
         tools=[run_code],
     )
+
+
+def _as_constant_instruction(text: str):
+    """Wrap a ready-to-use instruction as an ADK InstructionProvider (a
+    callable) so ADK SKIPS its `{var}` session-state substitution.
+
+    The Analyst injects matched SKILL.md bodies into its instruction,
+    and real skills contain literal braces (a gstack skill prints
+    `v{to}`). With a plain-string instruction ADK treats `{to}` as a
+    missing state variable and crashes the stage with
+    `KeyError: Context variable not found: to`. A provider is resolved
+    with `bypass_state_injection=True` — no templating. We don't rely on
+    ADK session state anyway: each sub-agent gets a one-shot session and
+    context is curated through the prompt."""
+
+    def _provider(_ctx):  # ADK calls this with a ReadonlyContext
+        return text
+
+    return _provider
 
 
 # ── Local skills discovery ─────────────────────────────────────────

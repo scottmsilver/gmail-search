@@ -929,7 +929,7 @@ async def _real_run(
         session_id=session_id,
         conn=conn,
         planner=build_planner_agent(model=default_model),
-        retriever=build_retriever_agent(model=default_model),
+        retriever=build_retriever_agent(model=default_model, user_id=user_id),
         writer=build_writer_agent(model=default_model),
         critic=build_critic_agent(model=default_model),
         analyst_factory=_analyst_factory,
