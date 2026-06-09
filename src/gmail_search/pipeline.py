@@ -20,7 +20,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from gmail_search.index.builder import build_index_sharded, shard_size_from_budget
+from gmail_search.index.builder import build_index_delta, build_index_sharded, shard_size_from_budget
 from gmail_search.store.db import (
     clear_query_cache,
     rebuild_contact_frequency,
@@ -117,7 +117,15 @@ def reindex(
         ah_dim,
         reorder_pool,
     )
-    written_to = build_index_sharded(
+    # Delta build on the frequent (light) path: reuse sealed shards, rebuild
+    # only the open tail — keeps the reindex memory peak to ~1 shard instead of
+    # the whole corpus, and lets serve reload only the changed shard. Full
+    # builds (light=False: manual reindex / post-backfill) act as compaction
+    # and also refresh spell/aliases. build_index_delta auto-falls-back to a
+    # full build on first run / config change / manual_rerank.
+    delta = bool(indexing_cfg.get("delta_index", False)) and light
+    _build = build_index_delta if delta else build_index_sharded
+    written_to = _build(
         db_path=db_path,
         index_dir=index_dir,
         model=cfg["embedding"]["model"],

@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 # translate a RAM budget into a shard size.
 _SCANN_PEAK_MULT = 4
 
+# Delta indexing: how much stale (deleted-but-still-indexed) content to
+# tolerate before a delta cycle compacts via a full rebuild. Stale vectors are
+# harmless in search (filtered by the message JOIN); a full rebuild is costly
+# (reloads the whole index), so we only pay it once staleness is material.
+_DELTA_COMPACTION_STALE_FRACTION = 0.02  # 2% of the index
+
 
 def _load_embeddings_matrix(conn, model: str, dimensions: int) -> tuple[list[int], np.ndarray]:
     """Stream (id, embedding) rows into a preallocated float32 matrix.
@@ -395,6 +401,7 @@ def build_index_sharded(
             return target_dir
 
         all_ids: list[int] = []
+        shards_meta: list[dict] = []  # v2 manifest: per-shard id-range keys for delta reuse
         shard_idx = 0
         # When manual_rerank is on, stream the FULL-precision vectors
         # of every shard into one index-level memmap. The searcher
@@ -441,7 +448,9 @@ def build_index_sharded(
             rows_buf = [(r["id"], r["embedding"]) for r in page]
             n = len(rows_buf)
             del page
-            all_ids.extend(_build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs))
+            shard_ids = _build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs)
+            all_ids.extend(shard_ids)
+            shards_meta.append(_shard_meta(shard_ids, shard_idx, shard_size))
             del rows_buf
             peak_mib = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss // 1024
             logger.info(
@@ -459,6 +468,13 @@ def build_index_sharded(
             "num_shards": num_shards,
             "dimensions": dimensions,
             "shard_size": shard_size,
+            # v2: per-shard id-range keys + watermark enable delta rebuilds
+            # (reuse sealed shards, rebuild only the open tail). Old readers
+            # ignore these keys; the v1 range(num_shards) load still works.
+            "format_version": 2,
+            "shards": shards_meta,
+            "watermark": all_ids[-1] if all_ids else 0,
+            "reorder_pool": reorder_pool,  # delta reuse-gate: tail must match sealed
         }
         if effective_ah_dim is not None:
             # Tells the searcher to truncate the query to this dim
@@ -484,6 +500,246 @@ def build_index_sharded(
         conn.close()
 
     logger.info(f"Sharded index built at {target_dir} ({shard_idx} shards)")
+    return target_dir
+
+
+def _shard_meta(shard_ids: list[int], shard_idx: int, shard_size: int) -> dict:
+    """v2-manifest entry for one shard. `key` is a deterministic id
+    (first/last/count) so the searcher can tell across reindexes whether a
+    shard is unchanged (reuse its loaded ScaNN searcher) or new (load it).
+    `sealed` (== full) → immutable → hardlink-reusable; the partial tail is
+    the 'open' shard, rebuilt each delta cycle."""
+    return {
+        "key": f"{shard_ids[0]}_{shard_ids[-1]}_{len(shard_ids)}",
+        "dir": f"shard_{shard_idx}",
+        "first_id": shard_ids[0],
+        "last_id": shard_ids[-1],
+        "count": len(shard_ids),
+        "sealed": len(shard_ids) == shard_size,
+    }
+
+
+def _hardlink_shard(src: Path, dst: Path) -> None:
+    """Reuse a sealed shard in a new versioned dir: hardlink the big ScaNN
+    artifacts (shared inodes → ~0 disk, and they survive the old dir's GC),
+    but REWRITE `scann_assets.pbtxt`, which bakes in ABSOLUTE paths to those
+    artifacts at serialize time — a plain hardlink would leave it pointing at
+    the GC'd source dir ("File too short" on load). Raises OSError on cross-
+    filesystem link — caller falls back to a full rebuild."""
+    import os  # noqa: PLC0415
+
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if not f.is_file():
+            continue
+        if f.name == "scann_assets.pbtxt":
+            (dst / f.name).write_text(f.read_text().replace(str(src), str(dst)))
+        else:
+            os.link(f, dst / f.name)
+
+
+def _delta_effective_ah_dim(dimensions, truncate_dim, manual_rerank, ah_dim):
+    if manual_rerank and ah_dim >= dimensions:
+        manual_rerank = False
+    eff = ah_dim if manual_rerank else (truncate_dim if truncate_dim and truncate_dim < dimensions else None)
+    return eff, manual_rerank
+
+
+def build_index_delta(
+    db_path: Path,
+    index_dir: Path,
+    model: str,
+    dimensions: int,
+    shard_size: int,
+    *,
+    truncate_dim: int | None = None,
+    manual_rerank: bool = False,
+    ah_dim: int = 1536,
+    reorder_pool: int = 100,
+    user_id: str | None = None,
+) -> Path:
+    """Delta rebuild: reuse the live index's SEALED shards (hardlink them into
+    a new versioned dir) and rebuild only the OPEN tail shard (+ any shard the
+    new embeddings fill). Only the delta is read from PG and built — the bulk
+    (sealed shards) is untouched, and the searcher reloads only changed shards.
+
+    Falls back to a full `build_index_sharded` when there's no reusable v2
+    live index, the build config (subspace/shard_size) changed, or manual_rerank
+    is on (its corpus_full.memmap spans all shards — out of scope for v1 delta).
+    """
+    full_kwargs = dict(
+        truncate_dim=truncate_dim,
+        manual_rerank=manual_rerank,
+        ah_dim=ah_dim,
+        reorder_pool=reorder_pool,
+        user_id=user_id,
+    )
+
+    def _full():
+        return build_index_sharded(db_path, index_dir, model, dimensions, shard_size, **full_kwargs)
+
+    eff_ah, manual_rerank = _delta_effective_ah_dim(dimensions, truncate_dim, manual_rerank, ah_dim)
+    if manual_rerank or not _pointer_table_exists(db_path):
+        return _full()
+
+    from gmail_search.index.searcher import resolve_active_index_dir
+
+    live_dir = resolve_active_index_dir(db_path, index_dir, user_id=user_id)
+    manifest_path = live_dir / "manifest.json"
+    if not manifest_path.exists():
+        return _full()
+    try:
+        live = json.loads(manifest_path.read_text())
+    except Exception:
+        return _full()
+    # Reuse is only valid when the build subspace + sharding are identical.
+    if (
+        live.get("format_version") != 2
+        or not live.get("shards")
+        or "manual_rerank" in live
+        or live.get("dimensions") != dimensions
+        or live.get("shard_size") != shard_size
+        or live.get("index_dim") != eff_ah  # None==None when no truncation
+        or live.get("reorder_pool") != reorder_pool  # ranking param must match
+    ):
+        return _full()
+
+    live_shards = live["shards"]
+    watermark = int(live.get("watermark", 0))
+    # Reuse only the LEADING run of SEALED shards; rebuild everything from the
+    # first unsealed shard onward. A delta build can leave SEVERAL trailing
+    # unsealed shards (a partial tail PLUS, e.g., a 1-row shard from an
+    # embedding inserted mid-build). Resuming from only the LAST one drops the
+    # others' vectors → a silent index gap. Resuming from the id after the last
+    # reusable sealed shard rebuilds every trailing row and compacts the
+    # fragments back into full shards.
+    sealed = []
+    for s in live_shards:
+        if not s.get("sealed"):
+            break
+        sealed.append(s)
+    if not sealed:
+        return _full()  # nothing reusable → full build
+    resume_from = int(sealed[-1]["last_id"]) + 1
+
+    conn = get_connection(db_path)
+    try:
+        if user_id is None:
+            new_max = conn.execute("SELECT COALESCE(MAX(id),0) FROM embeddings WHERE model=%s", (model,)).fetchone()[0]
+            live_count = conn.execute(
+                "SELECT count(*) FROM embeddings WHERE model=%s AND id<=%s", (model, watermark)
+            ).fetchone()[0]
+        else:
+            new_max = conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM embeddings WHERE model=%s AND user_id=%s", (model, user_id)
+            ).fetchone()[0]
+            live_count = conn.execute(
+                "SELECT count(*) FROM embeddings WHERE model=%s AND user_id=%s AND id<=%s",
+                (model, user_id, watermark),
+            ).fetchone()[0]
+        # Deletion handling: the index covers ids ≤ watermark. If the DB now
+        # holds FEWER embeddings in that range than the index does, rows were
+        # deleted (embed --force, message removal) and the stale vectors linger
+        # in immutable sealed shards. Stale vectors are HARMLESS in normal
+        # search (the message JOIN drops ids with no row), so we TOLERATE a
+        # small amount rather than pay a full rebuild — a full rebuild reloads
+        # the whole index (memory peak + serve disruption), so triggering it on
+        # every routine deletion would be far worse than the staleness. Only
+        # compact (full rebuild) once stale exceeds a threshold (% of the
+        # index). Routine deletions ride along in the delta until then.
+        index_count = sum(int(s.get("count", 0)) for s in live_shards)
+        stale = index_count - live_count
+        if stale > _DELTA_COMPACTION_STALE_FRACTION * index_count:
+            conn.close()
+            logger.info(
+                "delta reindex: %d stale (>%.0f%% of %d) → full rebuild (compaction)",
+                stale,
+                _DELTA_COMPACTION_STALE_FRACTION * 100,
+                index_count,
+            )
+            return _full()
+        if new_max <= watermark:
+            conn.close()
+            logger.info("delta reindex: no new embeddings (watermark=%d) — skipping", watermark)
+            return live_dir  # no-op: pointer stays put
+
+        target_dir = _pick_versioned_dir(index_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1) Hardlink sealed shards into the new dir (shard_0..shard_{m-1}).
+        all_ids: list[int] = []
+        shards_meta: list[dict] = []
+        for i, s in enumerate(sealed):
+            src = live_dir / s["dir"]
+            dst = target_dir / f"shard_{i}"
+            try:
+                _hardlink_shard(src, dst)
+            except OSError as e:
+                logger.warning("delta reindex: hardlink failed (%s) — full rebuild", e)
+                conn.close()
+                import shutil  # noqa: PLC0415
+
+                shutil.rmtree(target_dir, ignore_errors=True)
+                return _full()
+            sealed_ids = json.loads((dst / "ids.json").read_text())
+            all_ids.extend(sealed_ids)
+            meta = dict(s)
+            meta["dir"] = f"shard_{i}"
+            shards_meta.append(meta)
+
+        # 2) Rebuild the open shard + any new shards from delta rows (id >= resume_from).
+        shard_kwargs: dict[str, object] = {"reorder_pool": reorder_pool}
+        if eff_ah is not None:
+            shard_kwargs["ah_dim"] = eff_ah
+        shard_idx = len(sealed)
+        last_id = resume_from - 1
+        while True:
+            if user_id is None:
+                page = conn.execute(
+                    "SELECT id, embedding FROM embeddings WHERE model=%s AND id > %s ORDER BY id LIMIT %s",
+                    (model, last_id, shard_size),
+                ).fetchall()
+            else:
+                page = conn.execute(
+                    "SELECT id, embedding FROM embeddings WHERE model=%s AND user_id=%s AND id > %s ORDER BY id LIMIT %s",
+                    (model, user_id, last_id, shard_size),
+                ).fetchall()
+            if not page:
+                break
+            last_id = page[-1]["id"]
+            rows_buf = [(r["id"], r["embedding"]) for r in page]
+            del page
+            shard_ids = _build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs)
+            all_ids.extend(shard_ids)
+            shards_meta.append(_shard_meta(shard_ids, shard_idx, shard_size))
+            del rows_buf
+            shard_idx += 1
+
+        manifest_payload: dict[str, object] = {
+            "num_shards": shard_idx,
+            "dimensions": dimensions,
+            "shard_size": shard_size,
+            "format_version": 2,
+            "shards": shards_meta,
+            "watermark": all_ids[-1] if all_ids else watermark,
+            "reorder_pool": reorder_pool,
+        }
+        if eff_ah is not None:
+            manifest_payload["index_dim"] = eff_ah
+        (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
+        (target_dir / "ids.json").write_text(json.dumps(all_ids))
+        _promote_and_gc(conn, index_dir, target_dir, user_id=user_id)
+    finally:
+        conn.close()
+
+    logger.info(
+        "delta reindex: %d sealed shards reused, %d shards rebuilt (watermark %d→%d) at %s",
+        len(sealed),
+        shard_idx - len(sealed),
+        watermark,
+        all_ids[-1] if all_ids else watermark,
+        target_dir,
+    )
     return target_dir
 
 

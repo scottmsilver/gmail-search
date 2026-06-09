@@ -1248,16 +1248,13 @@ def supervise(ctx, interval, restart_delay):
             "argv": ["reconcile", "--loop"],
             "log": data_dir / "reconcile.log",
         },
-        # URL crawler. `--concurrency 8` is now a CEILING — the daemon scales
-        # actual Chromium concurrency down to fit free RAM each batch (see
-        # _mem_aware_conc), so it can't push the box into swap like it did when
-        # serve's ScaNN index grew to ~15 GB. No more manual pause/resume.
+        # URL crawler. Action-link denylist (RSVP/accept/approve/yes-no — see
+        # url_extract._DENY_PATH_CONTAINS) prevents GET-ing non-idempotent
+        # links. `--concurrency 8` is a CEILING; _mem_aware_conc scales actual
+        # Chromium concurrency down to fit free RAM (reserves a buffer), and the
+        # small --limit recycles the browser often so it can't balloon.
         {
             "key": "crawl",
-            # Small --limit so the browser RECYCLES often: crawl4ai can leave
-            # hung tabs open, which accumulate memory within a long batch
-            # (Chromium ballooned to ~12 GB on limit=600). Closing + reopening
-            # every ~100 URLs caps that. --concurrency is a memory-aware ceiling.
             "argv": ["crawl", "--loop", "--concurrency", "8", "--limit", "100", "--interval", "5"],
             "log": data_dir / "crawl.log",
         },

@@ -11,6 +11,7 @@ indexing:
   manual_rerank: false
   manual_rerank_ah_dim: 1536
   manual_rerank_reorder_pool: 500
+  delta_index: true
 attachments:
   max_file_size_mb: 10
   max_pdf_pages: 20

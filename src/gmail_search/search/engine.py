@@ -200,6 +200,39 @@ class SearchEngine:
         self._aliases: dict[str, list[str]] = {}
         self._load_term_aliases()
 
+    def close(self) -> None:
+        """Release native search resources (ScaNN C++ index, corpus mmap).
+        Called when a retired engine is swapped out so its memory is reclaimed
+        via refcounting instead of a stop-the-world gc.collect(). Idempotent."""
+        try:
+            self.searcher.close()
+        except Exception:
+            pass
+
+    def reload_index(self, new_index_dir: Path):
+        """Swap in a freshly-built ScaNN index WITHOUT rebuilding the rest of
+        the engine. The 15-min auto-reindexes are *light* — only the ScaNN
+        index changes; the SymSpell dictionary, contact-frequency map and term
+        aliases do NOT. Reconstructing the whole SearchEngine on every swap
+        re-loaded those (~80s of GIL-bound work) and froze serve. This loads
+        only the new searcher (mostly GIL-releasing C++) and reuses everything
+        else. Returns the OLD searcher so the caller can close() it after
+        in-flight queries drain. (Full reindexes that rebuild spell/aliases are
+        picked up on the next serve restart.)"""
+        from gmail_search.index.searcher import ScannSearcher
+
+        dims = self.config["embedding"]["dimensions"]
+        # prev=self.searcher → unchanged (sealed) shards reuse the already-
+        # loaded C++ searchers; only the changed (open/new) shards are loaded,
+        # so the swap allocates ~1 shard instead of the whole index. The reused
+        # searchers are shared with the old instance; when the caller later
+        # close()s `old` (ref-drop only), refcounting frees just the retired
+        # open shard, never a shard still referenced by the new instance.
+        new_searcher = ScannSearcher(new_index_dir, dimensions=dims, prev=self.searcher)
+        old = self.searcher
+        self.searcher = new_searcher  # atomic rebind; concurrent queries see old or new
+        return old
+
     def _detect_user_email(self):
         """Find the most frequent sender of THIS user's messages —
         that's their own email."""

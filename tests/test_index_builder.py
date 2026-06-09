@@ -8,6 +8,7 @@ import numpy as np
 from gmail_search.index.builder import (
     _load_embeddings_matrix,
     build_index,
+    build_index_delta,
     build_index_disk,
     build_index_sharded,
     load_index_metadata,
@@ -576,3 +577,224 @@ def test_scann_searcher_loads_legacy_single_index(tmp_path):
     ids, scores = searcher.search(qvec, top_k=5)
     assert len(ids) == 5
     assert len(scores) == 5
+
+
+def _add_embeddings(db_path, start: int, n: int, dims: int) -> None:
+    """Append n embeddings with distinct message ids + deterministic vectors
+    (seed == global index), so a corpus can be grown incrementally and an
+    identical corpus reproduced in a second DB."""
+    conn = get_connection(db_path)
+    for i in range(start, start + n):
+        upsert_message(
+            conn,
+            Message(
+                id=f"m{i:05d}",
+                thread_id="t1",
+                from_addr="a@b.com",
+                to_addr="c@d.com",
+                subject="Test",
+                body_text="Hello",
+                body_html="",
+                date=datetime(2025, 1, 1),
+                labels=[],
+                history_id=1,
+                raw_json="{}",
+            ),
+        )
+        insert_embedding(
+            conn,
+            EmbeddingRecord(
+                id=None,
+                message_id=f"m{i:05d}",
+                attachment_id=None,
+                chunk_type="message",
+                chunk_text="test",
+                embedding=_make_random_embedding(dims, seed=i),
+                model="test-model",
+            ),
+        )
+    conn.close()
+
+
+def test_delta_build_equals_full_build_exactly(tmp_path):
+    """Acceptance gate: an index grown via build_index_delta returns search
+    results IDENTICAL to a from-scratch full build over the same corpus
+    (exact ids + scores, brute-force regime)."""
+    dims = 16
+    shard_size = 30
+
+    # One DB (the test backend shares a single Postgres database, so two
+    # .db paths would collide). Grow the corpus + delta-build, then full-build
+    # the SAME corpus into a different index dir; compare the two by path.
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)  # shards 30,30,10(open)
+    idx = tmp_path / "scann"
+    build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    _add_embeddings(db, 70, 45, dims)  # +45 → fills open(→30), +30, +25(open)
+    delta_dir = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+
+    # Full build of the now-115 corpus into a separate index dir.
+    full_dir = build_index_sharded(
+        db, tmp_path / "scann_full", model="test-model", dimensions=dims, shard_size=shard_size
+    )
+
+    # Same corpus, same shard_size → identical search.
+    d = ScannSearcher(delta_dir, dimensions=dims)
+    f = ScannSearcher(full_dir, dimensions=dims)
+    assert sorted(load_index_metadata(delta_dir)) == sorted(load_index_metadata(full_dir))
+    rng = random.Random(3)
+    for _ in range(25):
+        q = np.array([rng.uniform(-1, 1) for _ in range(dims)], dtype=np.float32)
+        di, ds = d.search(q, top_k=10)
+        fi, fs = f.search(q, top_k=10)
+        assert di == fi, f"delta vs full ids differ:\n  delta: {di}\n  full:  {fi}"
+        for a, b in zip(ds, fs):
+            assert abs(a - b) < 1e-5
+
+
+def test_delta_build_reuses_sealed_shards(tmp_path):
+    """Sealed shard dirs in the new versioned index are the SAME inodes as the
+    prior build's (hardlinked) — proving they're reused, not rebuilt."""
+    import os
+
+    dims = 16
+    shard_size = 30
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 65, dims)  # shards 30,30,5(open)
+    idx = tmp_path / "scann"
+    first = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    first_inode = os.stat(first / "shard_0" / "ids.json").st_ino  # sealed shard 0
+
+    _add_embeddings(db, 65, 40, dims)  # delta
+    second = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    assert second != first
+    # shard_0 is sealed and must be the SAME inode (hardlinked, not rebuilt).
+    assert os.stat(second / "shard_0" / "ids.json").st_ino == first_inode
+
+
+def test_delta_build_noop_when_no_new_embeddings(tmp_path):
+    """No new embeddings → delta build is a no-op: returns the live dir,
+    does not create a new versioned dir."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 50, dims)
+    idx = tmp_path / "scann"
+    live = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=30)
+    same = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=30)
+    assert same == live
+
+
+def test_searcher_reload_reuses_sealed_shard_searchers(tmp_path):
+    """Serve delta-load: ScannSearcher(prev=...) reuses the already-loaded
+    C++ searchers of unchanged sealed shards (same object identity) and only
+    loads the changed ones — and its search output equals a cold load."""
+    dims = 16
+    shard_size = 30
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)  # shards 30,30,10(open) → 2 sealed
+    idx = tmp_path / "scann"
+    first = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    s1 = ScannSearcher(first, dimensions=dims)  # load BEFORE the delta GCs `first`
+    sealed0 = s1._shards[0][0]
+    sealed1 = s1._shards[1][0]
+
+    _add_embeddings(db, 70, 40, dims)
+    second = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+
+    s2 = ScannSearcher(second, dimensions=dims, prev=s1)
+    # Sealed shards 0,1 are reused (same C++ object); shard 2 (open→sealed at
+    # new range) and the new open shard are freshly loaded.
+    assert s2._shards[0][0] is sealed0, "sealed shard 0 should be reused, not reloaded"
+    assert s2._shards[1][0] is sealed1, "sealed shard 1 should be reused, not reloaded"
+
+    cold = ScannSearcher(second, dimensions=dims)  # no prev — loads everything fresh
+    rng = random.Random(11)
+    for _ in range(15):
+        q = np.array([rng.uniform(-1, 1) for _ in range(dims)], dtype=np.float32)
+        a_ids, a_sc = s2.search(q, top_k=10)
+        b_ids, b_sc = cold.search(q, top_k=10)
+        assert a_ids == b_ids
+        for a, b in zip(a_sc, b_sc):
+            assert abs(a - b) < 1e-5
+
+    # The reuse must survive closing the old instance (refcount keeps shared
+    # sealed searchers alive; only the retired open shard is freed).
+    s1.close()
+    ids_after, _ = s2.search(np.zeros(dims, dtype=np.float32), top_k=5)
+    assert len(ids_after) > 0, "reused shards must stay usable after prev.close()"
+
+
+def test_delta_rebuilds_all_trailing_unsealed_shards(tmp_path):
+    """Regression for the 45k-id gap: a delta build must rebuild ALL trailing
+    unsealed shards, not just the last. Concurrent inserts mid-build can leave
+    several trailing unsealed shards; reusing only sealed + resuming from the
+    LAST open one silently drops the others' vectors → an index gap."""
+    import shutil
+
+    dims = 16
+    shard_size = 30
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)  # → shard_0(30,sealed), shard_1(30,sealed), shard_2(10,open)
+    idx = tmp_path / "scann"
+    live = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    m = json.loads((live / "manifest.json").read_text())
+    assert m["shards"][-1]["sealed"] is False and m["shards"][-1]["count"] == 10
+
+    # Hand-craft TWO trailing unsealed shards: split open shard_2 (10 ids) into
+    # shard_2 (first 5) + shard_3 (last 5), mimicking a mid-build page split.
+    open_ids = json.loads((live / "shard_2" / "ids.json").read_text())
+    shutil.copytree(live / "shard_2", live / "shard_3")
+    (live / "shard_2" / "ids.json").write_text(json.dumps(open_ids[:5]))
+    (live / "shard_3" / "ids.json").write_text(json.dumps(open_ids[5:]))
+    s = m["shards"]
+    s[-1] = {"dir": "shard_2", "key": f"{open_ids[0]}_{open_ids[4]}_5",
+             "first_id": open_ids[0], "last_id": open_ids[4], "count": 5, "sealed": False}
+    s.append({"dir": "shard_3", "key": f"{open_ids[5]}_{open_ids[9]}_5",
+              "first_id": open_ids[5], "last_id": open_ids[9], "count": 5, "sealed": False})
+    m["num_shards"] = 4
+    (live / "manifest.json").write_text(json.dumps(m))
+
+    _add_embeddings(db, 70, 5, dims)  # a few new rows
+    delta = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+
+    # COMPLETENESS: the delta index must contain EVERY embedding id — no gap.
+    idx_ids = set(load_index_metadata(delta))
+    conn = get_connection(db)
+    db_ids = {r["id"] for r in conn.execute("SELECT id FROM embeddings WHERE model='test-model'").fetchall()}
+    conn.close()
+    assert idx_ids == db_ids, f"delta dropped vectors: {len(db_ids - idx_ids)} missing, {len(idx_ids - db_ids)} extra"
+
+
+def test_delta_full_rebuild_on_deletion(tmp_path):
+    """When embeddings are deleted from the indexed range, delta must NOT keep
+    the stale vectors — it detects the count drop and falls back to a full
+    rebuild, so the index matches the DB exactly (no stale, no dup)."""
+    dims = 16
+    shard_size = 30
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    idx = tmp_path / "scann"
+    build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+
+    conn = get_connection(db)
+    victim_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM embeddings WHERE model='test-model' ORDER BY id LIMIT 10").fetchall()]
+    for vid in victim_ids:
+        conn.execute("DELETE FROM embeddings WHERE id=%s", (vid,))
+    conn.commit()
+    conn.close()
+    _add_embeddings(db, 70, 3, dims)  # also a normal delta trigger
+
+    out = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
+    idx_ids = set(load_index_metadata(out))
+    conn = get_connection(db)
+    db_ids = {r["id"] for r in conn.execute("SELECT id FROM embeddings WHERE model='test-model'").fetchall()}
+    conn.close()
+    assert idx_ids == db_ids, f"index != db: stale={idx_ids - db_ids} missing={db_ids - idx_ids}"
+    assert not (set(victim_ids) & idx_ids), "deleted ids still present in index"

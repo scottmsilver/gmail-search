@@ -669,6 +669,10 @@ def create_app(
 
     _engines: dict[str, SearchEngine] = {}
     _engine_index_dirs: dict[str, Path] = {}
+    # ScaNN searcher retired on the PREVIOUS swap, kept one cycle so any
+    # in-flight query still holding it finishes before we close it (swaps are
+    # minutes apart; queries are sub-second). Closed on the next swap.
+    _retired_searchers: dict[str, object] = {}
     _engine_lock = _threading.Lock()
 
     def _user_index_dir(user_id: str) -> Path:
@@ -749,23 +753,28 @@ def create_app(
                     if current == prev_dir:
                         continue
                     start = _time.time()
-                    built = await _asyncio.to_thread(_build_engine, user_id, current)
+                    engine = _engines.get(user_id)
+                    if engine is None:
+                        continue  # not built yet — the lazy get_engine path will pick up `current`
+                    # Reload ONLY the ScaNN searcher (the sole thing a light
+                    # reindex changes), reusing the engine's spell dict / contact
+                    # map / aliases. The old _build_engine reconstructed the whole
+                    # engine — ~80s of GIL-bound reloads that froze serve every
+                    # swap. reload_index is mostly GIL-releasing C++.
+                    old_searcher = await _asyncio.to_thread(engine.reload_index, current)
                     with _engine_lock:
-                        old = _engines.get(user_id)
-                        _engines[user_id] = built
                         _engine_index_dirs[user_id] = current
-                    # Explicitly drop the previous engine and force a GC so
-                    # ScaNN's C++ searcher memory is released NOW. Without this
-                    # the old per-shard searchers lingered, leaking RAM every
-                    # swap until serve bloated enough that the next swap's
-                    # transient 2x index footprint pushed the box into swap —
-                    # the periodic multi-second serve freeze.
-                    del old
-                    import gc as _gc
-
-                    _gc.collect()
+                        # Close the searcher retired on the PRIOR swap (its
+                        # in-flight queries are long done) — frees ScaNN's C++
+                        # memory via refcounting, no event-loop-stalling
+                        # gc.collect(). Stash this one to close on the next swap.
+                        stale = _retired_searchers.get(user_id)
+                        _retired_searchers[user_id] = old_searcher
+                    if stale is not None:
+                        stale.close()
                     logger.info(
-                        f"engine hot-swapped for {user_id} in {_time.time() - start:.1f}s " f"(index={current.name})"
+                        f"engine index hot-swapped for {user_id} in {_time.time() - start:.1f}s "
+                        f"(index={current.name})"
                     )
             except _asyncio.CancelledError:
                 raise

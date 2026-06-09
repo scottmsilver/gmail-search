@@ -173,19 +173,27 @@ const SearchInner = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Gmail-style search-as-you-type. Fires 250ms after the last
-  // keystroke — short enough to feel live, long enough that each
-  // letter of a word-in-progress doesn't trigger a backend hit.
-  // Cancels on unmount / further typing so we never race stale
-  // responses against the current query.
+  // Search-as-you-type. Fires 500ms after the last keystroke. A
+  // relevance query costs ~1s server-side, so the debounce is tuned to
+  // only fire when you actually PAUSE — not on every mid-word keystroke
+  // (250ms fired too eagerly for fast typists, wasting ~N queries per
+  // word). Cancels on unmount / further typing so we never race stale
+  // responses. Enter (form onSubmit) bypasses this for an immediate
+  // search of any length.
+  const AUTOSEARCH_DEBOUNCE_MS = 500;
+  const AUTOSEARCH_MIN_CHARS = 3;
   useEffect(() => {
     const trimmed = query.trim();
     // Skip if the query hasn't changed since the last successful
     // search — prevents a redundant fetch right after `submit` runs.
     if (trimmed === lastQueryRef.current) return;
+    // Don't auto-search 1–2 char fragments — they're a word-in-progress,
+    // never useful, and the most frequent keystrokes. (Enter still
+    // submits any length.)
+    if (trimmed.length > 0 && trimmed.length < AUTOSEARCH_MIN_CHARS) return;
     const t = setTimeout(() => {
       submit(query, sort);
-    }, 250);
+    }, AUTOSEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, sort]);

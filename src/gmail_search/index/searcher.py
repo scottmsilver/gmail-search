@@ -61,7 +61,7 @@ class ScannSearcher:
     for top_k and merge by score.
     """
 
-    def __init__(self, index_dir: Path, dimensions: int):
+    def __init__(self, index_dir: Path, dimensions: int, *, prev: "ScannSearcher | None" = None):
         self.index_dir = index_dir
         self.dimensions = dimensions
 
@@ -74,6 +74,9 @@ class ScannSearcher:
         # unsharded legacy index; N entries for a sharded one. Empty list
         # = empty index.
         self._shards: list[tuple[object, list[int]]] = []
+        # Stable per-shard keys (parallel to _shards), used by reload to reuse
+        # an already-loaded shard's C++ searcher instead of re-loading it.
+        self._shard_keys: list[str] = []
 
         # Manual-rerank state. When the manifest carries the
         # `manual_rerank` block (variant C — see SCANN_COMPACTION_2026-04-27.md),
@@ -95,7 +98,7 @@ class ScannSearcher:
         manifest_path = index_dir / "manifest.json"
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text())
-            self._load_sharded(manifest)
+            self._load_sharded(manifest, prev=prev)
             # Read index_dim BEFORE the rerank attach: the rerank
             # block also implies truncation, so they share the same
             # query-projection logic.
@@ -105,6 +108,15 @@ class ScannSearcher:
             self._maybe_attach_manual_rerank(manifest)
         else:
             self._load_legacy_single()
+
+    def close(self) -> None:
+        """Release the ScaNN C++ searchers and the corpus mmap. Dropping
+        these references frees the (multi-GB) native memory immediately via
+        refcounting — no global gc.collect() needed, so the caller can reclaim
+        a retired index without stalling the event loop. Idempotent."""
+        self._shards = []
+        self._corpus_full = None
+        self._manual_rerank = None
 
     def _maybe_attach_manual_rerank(self, manifest: dict) -> None:
         """If the manifest has a `manual_rerank` block, mmap the
@@ -145,35 +157,59 @@ class ScannSearcher:
             self._corpus_full = None
             self._manual_rerank = None
 
-    def _load_sharded(self, manifest: dict) -> None:
+    def _load_sharded(self, manifest: dict, prev: "ScannSearcher | None" = None) -> None:
         # Tolerate missing/partial shards: the sharded builder writes
         # manifest.json LAST, but we still defend against a torn read
         # during a concurrent reindex (old manifest, new half-written
         # shard dirs). Missing shards drop out of the search, which is
         # strictly better than a 500 on the whole query path.
-        for i in range(manifest["num_shards"]):
-            shard_dir = self.index_dir / f"shard_{i}"
+        #
+        # Delta reuse: when a v2 manifest carries per-shard `key`s and `prev`
+        # is supplied, reuse prev's already-loaded ScaNN searcher for any
+        # unchanged (sealed) shard instead of calling load_searcher again —
+        # so a swap loads only the changed (open) shard, not the whole index.
+        prev_by_key: dict[str, tuple] = {}
+        if prev is not None and getattr(prev, "_shard_keys", None):
+            prev_by_key = dict(zip(prev._shard_keys, prev._shards))
+
+        shards_meta = manifest.get("shards")
+        if shards_meta:
+            entries = [(s["dir"], s.get("key")) for s in shards_meta]
+        else:  # v1 manifest — synthesize dir + (later) key from loaded ids
+            entries = [(f"shard_{i}", None) for i in range(manifest["num_shards"])]
+
+        reused = 0
+        for shard_name, key in entries:
+            shard_dir = self.index_dir / shard_name
             ids_file = shard_dir / "ids.json"
             if not ids_file.exists():
-                logger.warning("shard_%d missing ids.json; skipping — reindex may be in progress", i)
+                logger.warning("%s missing ids.json; skipping — reindex may be in progress", shard_name)
                 continue
             try:
                 shard_ids = json.loads(ids_file.read_text())
             except Exception as e:
-                logger.warning("shard_%d ids.json unreadable (%s); skipping", i, e)
+                logger.warning("%s ids.json unreadable (%s); skipping", shard_name, e)
                 continue
             if not shard_ids:
                 continue
-            try:
-                searcher = scann.scann_ops_pybind.load_searcher(str(shard_dir))
-            except Exception as e:
-                logger.warning("shard_%d load_searcher failed (%s); skipping", i, e)
-                continue
+            if not key:  # v1 or missing — derive a stable key from the ids
+                key = f"{shard_ids[0]}_{shard_ids[-1]}_{len(shard_ids)}"
+            cached = prev_by_key.get(key)
+            if cached is not None:
+                searcher = cached[0]  # reuse the loaded C++ searcher (shared ref)
+                reused += 1
+            else:
+                try:
+                    searcher = scann.scann_ops_pybind.load_searcher(str(shard_dir))
+                except Exception as e:
+                    logger.warning("%s load_searcher failed (%s); skipping", shard_name, e)
+                    continue
             self._shards.append((searcher, shard_ids))
+            self._shard_keys.append(key)
         logger.info(
-            "Loaded sharded ScaNN index: %d/%d shards, %d total vectors",
+            "Loaded sharded ScaNN index: %d shards (%d reused), %d total vectors",
             len(self._shards),
-            manifest["num_shards"],
+            reused,
             len(self.embedding_ids),
         )
 
@@ -183,6 +219,7 @@ class ScannSearcher:
             return
         searcher = scann.scann_ops_pybind.load_searcher(str(self.index_dir))
         self._shards.append((searcher, self.embedding_ids))
+        self._shard_keys.append(f"{self.embedding_ids[0]}_{self.embedding_ids[-1]}_{len(self.embedding_ids)}")
         logger.info(f"Loaded ScaNN index with {len(self.embedding_ids)} vectors")
 
     def search(

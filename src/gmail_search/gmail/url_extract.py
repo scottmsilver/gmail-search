@@ -158,6 +158,39 @@ _DENY_PATH_CONTAINS = (
     "email-preferences",
     "email_preferences",
     "preferences_center",
+    # Action / RSVP / invitation-response links. The crawler issues HTTP GETs,
+    # but these are NON-IDEMPOTENT — fetching one PERFORMS the action (accepting
+    # an invite, RSVPing, confirming attendance). NEVER crawl them; a GET would
+    # silently accept old invitations. Same class as unsubscribe above.
+    "rsvp",
+    "/accept",
+    "/decline",
+    "/respond",
+    "action=respon",
+    "action=rsvp",
+    "action=accept",
+    "action=decline",
+    "/invitation",
+    "/invite/",
+    "calendar/event",
+    "guest_response",
+    "meeting_response",
+    # Yes/no / approve-reject decision links — same non-idempotent hazard:
+    # a GET casts the vote / approves / rejects / confirms. We match action
+    # VERBS and decision QUERY-PARAMS, NOT bare "yes"/"no" (which would
+    # false-positive on words like "notes", "yesterday", "november").
+    "approve",  # approve / approved / disapprove / action=approve (not "approval")
+    "/reject",
+    "reject=",
+    "/deny",
+    "deny=",
+    "answer=",
+    "decision=",
+    "response=yes",
+    "response=no",
+    "vote=",
+    "confirm=",
+    "/confirm/",
 )
 
 # Binary / non-textual extensions. We let the main content-type check
