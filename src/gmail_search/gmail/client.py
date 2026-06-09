@@ -178,11 +178,18 @@ def download_messages(
             # shape as Drive stubs. The `crawl-urls` command fetches
             # the page text and fills extracted_text so summaries /
             # search see the crawled content.
+            #
+            # Content-based invitation guard: if this message is an
+            # actionable invitation (RSVP / accept / decline), creating a
+            # stub would let the crawler GET an action link and silently
+            # accept the invite. Skip ALL its links in that case.
+            from gmail_search.gmail.invite_guard import skip_link_crawl_cached as _skip_link_crawl
             from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
             from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-            for url in _extract_urls(msg.body_text or "", labels=msg.labels):
-                _upsert_url_stub(conn, message_id=msg.id, url=url)
+            if not _skip_link_crawl(conn, msg, att_metas):
+                for url in _extract_urls(msg.body_text or "", labels=msg.labels):
+                    _upsert_url_stub(conn, message_id=msg.id, url=url)
 
             for att_meta in att_metas:
                 if att_meta["size"] > max_attachment_size:
@@ -330,11 +337,16 @@ def sync_new_messages(
             upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
 
         # URL stubs — plain URLs filled later by the crawl-urls command.
+        # Same invitation guard as download_messages: skip ALL links when
+        # the message is an actionable invitation (non-idempotent action
+        # link hazard).
+        from gmail_search.gmail.invite_guard import skip_link_crawl_cached as _skip_link_crawl
         from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
         from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-        for url in _extract_urls(msg.body_text or "", labels=msg.labels):
-            _upsert_url_stub(conn, message_id=msg.id, url=url)
+        if not _skip_link_crawl(conn, msg, att_metas):
+            for url in _extract_urls(msg.body_text or "", labels=msg.labels):
+                _upsert_url_stub(conn, message_id=msg.id, url=url)
 
         for att_meta in att_metas:
             if att_meta["size"] > max_attachment_size:

@@ -467,6 +467,28 @@ def upsert_url_stub(conn, *, message_id: str, url: str, user_id: Optional[str] =
     return cursor.rowcount
 
 
+def get_crawl_blocked_reason(conn, *, message_id: str) -> Optional[str]:
+    """Return the cached invitation-guard verdict for a message, or None
+    if the message was never gated (the common case). Lets a re-sync
+    reuse the verdict instead of re-calling Gemini. A row that doesn't
+    exist yet also returns None."""
+    row = conn.execute(
+        "SELECT crawl_blocked_reason FROM messages WHERE id = %s",
+        (message_id,),
+    ).fetchone()
+    return row["crawl_blocked_reason"] if row else None
+
+
+def set_crawl_blocked_reason(conn, *, message_id: str, reason: Optional[str]) -> None:
+    """Persist the invitation-guard verdict for a message. `reason` is a
+    short human string when all links were skipped, or None when the
+    message crawls normally. Idempotent — overwrites any prior verdict."""
+    conn.execute(
+        "UPDATE messages SET crawl_blocked_reason = %s WHERE id = %s",
+        (reason, message_id),
+    )
+
+
 def fill_url_attachment(
     conn,
     *,

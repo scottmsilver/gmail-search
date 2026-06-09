@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS messages (
     raw_json TEXT NOT NULL DEFAULT '{}'
 );
 
+-- Invitation crawl guard verdict cache. When the content-based guard
+-- (src/gmail_search/gmail/invite_guard.py) classifies a message as an
+-- actionable invitation, it creates ZERO URL stubs and records WHY here
+-- so a re-sync doesn't re-call Gemini or flip-flop. NULL = not gated
+-- (the common case); a non-NULL reason means "all links were skipped
+-- for this message." Idempotent add for installs provisioned before the
+-- guard existed.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS crawl_blocked_reason TEXT;
+
 CREATE TABLE IF NOT EXISTS attachments (
     id BIGSERIAL PRIMARY KEY,
     message_id TEXT NOT NULL REFERENCES messages(id),

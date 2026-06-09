@@ -35,6 +35,47 @@ def _setup_context(ctx, data_dir, config_path, verbose):
     init_db(ctx.obj["db_path"])
 
 
+def _message_for_invite_guard(row):
+    """Build a lightweight Message from a catch-up DB row so the
+    invitation guard can read sender/subject/body. Only the fields the
+    guard touches are populated; the rest get harmless placeholders."""
+    import json
+    from datetime import datetime, timezone
+
+    from gmail_search.store.models import Message
+
+    labels = row["labels"]
+    if isinstance(labels, str):
+        try:
+            labels = json.loads(labels)
+        except (ValueError, TypeError):
+            labels = []
+    return Message(
+        id=row["id"],
+        thread_id=row["id"],
+        from_addr=row["from_addr"] or "",
+        to_addr="",
+        subject=row["subject"] or "",
+        body_text=row["body_text"] or "",
+        body_html="",
+        date=datetime(1970, 1, 1, tzinfo=timezone.utc),
+        labels=labels if isinstance(labels, list) else [],
+        history_id=0,
+        raw_json="{}",
+    )
+
+
+def _att_metas_for_message(conn, message_id):
+    """Fetch attachment mime/filename pairs for the calendar auto-skip
+    check in the catch-up scan. Returns the att_metas shape the guard
+    expects (only the keys it reads)."""
+    rows = conn.execute(
+        "SELECT mime_type, filename FROM attachments WHERE message_id = %s",
+        (message_id,),
+    ).fetchall()
+    return [{"mime_type": r["mime_type"], "filename": r["filename"]} for r in rows]
+
+
 def common_options(f):
     """Decorator that adds --data-dir, --config, and --verbose to a subcommand."""
 
@@ -162,12 +203,23 @@ def extract(ctx):
     # extracted_text; here we just seed the stubs so older messages
     # downloaded before the URL path existed get caught up.
     try:
+        from gmail_search.gmail.invite_guard import skip_link_crawl_cached
         from gmail_search.gmail.url_extract import extract_crawlable_urls
         from gmail_search.store.queries import upsert_url_stub
 
-        msg_rows = conn.execute("SELECT id, body_text, labels FROM messages WHERE length(body_text) >= 50").fetchall()
+        msg_rows = conn.execute(
+            "SELECT id, from_addr, subject, body_text, labels FROM messages WHERE length(body_text) >= 50"
+        ).fetchall()
         new_url_stubs = 0
         for r in tqdm(msg_rows, desc="Scanning bodies for URLs"):
+            # Same invitation guard as the ingest path: skip ALL links
+            # for actionable invitations so a GET can't accept an old
+            # invite. att_metas (mime/filename) come from the
+            # attachments table for the calendar auto-skip case.
+            msg = _message_for_invite_guard(r)
+            att_metas = _att_metas_for_message(conn, r["id"])
+            if skip_link_crawl_cached(conn, msg, att_metas):
+                continue
             for url in extract_crawlable_urls(r["body_text"] or "", labels=r["labels"]):
                 new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url)
         conn.commit()
