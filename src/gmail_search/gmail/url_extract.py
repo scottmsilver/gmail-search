@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # Curated email-tracker host list sourced from disconnectme/disconnect-
 # tracking-protection `services.json` (Email category only — the
@@ -143,6 +143,18 @@ _DENY_DOMAIN_SUFFIXES = (
     "twitter.com",
     "x.com",
     "instagram.com",
+    # JS-only media / meeting hosts: a crawl GET yields ZERO indexable
+    # text (the video/map/track/meeting is a client-side app, and the
+    # transcript/place data isn't in the served HTML). Measured
+    # (2026-06-09): these reach the browser tier and come back empty,
+    # burning ~1.4s/page for nothing. Whole-domain matches are safe here
+    # — every path under them is the same content-free app/join page.
+    "youtube.com",
+    "youtu.be",
+    "meet.google.com",
+    "maps.google.com",
+    "vimeo.com",  # video player — no crawlable text
+    "nextdoor.com",  # login-walled JS app; every page a content-free shell
 )
 
 # URL-path / query-string substrings that indicate unsubscribe /
@@ -191,6 +203,21 @@ _DENY_PATH_CONTAINS = (
     "vote=",
     "confirm=",
     "/confirm/",
+    # Auth / sign-in / account-management endpoints. Measured (2026-06-09):
+    # these are ~half of the pages that reach the browser tier and yield
+    # ZERO indexable text — a login/signup wall renders a form, not content,
+    # so crawling them burns a fetch + a ~1.4s browser pass for nothing.
+    # Leading slashes keep these precise: "/login" matches "/login" and
+    # "/userlogin.aspx" but not a content path like "/how-to-login-guide".
+    # Deliberately NOT including bare "/account/" — too broad (could match
+    # real content like a bank's "/account/types" marketing page).
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/sign_in",
+    "/oauth",
+    "/auth/",
+    "/subscribe",
 )
 
 # Binary / non-textual extensions. We let the main content-type check
@@ -274,6 +301,71 @@ def _path_is_denied(path_and_query: str) -> bool:
 def _suffix_is_denied(path: str) -> bool:
     lower = path.lower()
     return any(lower.endswith(ext) for ext in _DENY_SUFFIXES)
+
+
+# Security/email gateways and link shims that embed the REAL destination
+# right in the URL. Following them means an extra DNS+TCP+TLS+TTFB hop to a
+# slow gateway server (measured ~110ms TTFB each) before the redirect even
+# fires — and the gateway sometimes mangles the redirect so we fail to
+# follow it at all. Decoding the destination jumps straight there: a
+# measured 580ms→266ms / 727ms→102ms win on these, plus a recall win on the
+# ones whose redirect we couldn't follow. The decoded URL still flows
+# through the SSRF guard + denylist downstream, so this is pure
+# short-circuit, no trust change.
+def _decode_proofpoint(parsed, raw: str) -> str | None:
+    """Proofpoint urldefense v2 (`/v2/url?u=...`, `-`→`%` `_`→`/`) and v3
+    (`/v3/__<url>__;...`). v3 is matched on the RAW url because urlparse
+    splits the `;` into `params`, hiding the `__;` terminator."""
+    host = (parsed.hostname or "").lower()
+    if "urldefense" not in host:
+        return None
+    if "/v3/__" in raw:
+        m = re.search(r"/v3/__(.+?)__;", raw)
+        if m:
+            return unquote(m.group(1))
+        return None
+    u = parse_qs(parsed.query).get("u", [None])[0]
+    if not u:
+        return None
+    # v2 transport encoding: '-' is a hex escape marker, '_' is '/'.
+    return unquote(u.replace("-", "%").replace("_", "/"))
+
+
+def _decode_query_redirect(parsed) -> str | None:
+    """'Destination in a query param' shims — HOST-ANCHORED to the known
+    wrappers (Outlook SafeLinks `?url=`, Google `/url?q=`). Deliberately
+    NOT a generic `?url=`/`?u=` matcher: plenty of legitimate content URLs
+    carry an absolute-URL query param (share widgets, image proxies, oauth
+    `redirect=`), and unwrapping those would fetch the WRONG page. The
+    measured decodable population was entirely these host-anchored shims."""
+    host = (parsed.hostname or "").lower()
+    q = parse_qs(parsed.query)
+    if "safelinks.protection.outlook.com" in host:
+        cand = q.get("url", [None])[0]
+        return cand if cand and cand.startswith(("http://", "https://")) else None
+    if host.endswith("google.com") and parsed.path == "/url":
+        cand = q.get("q", [None])[0] or q.get("url", [None])[0]
+        return cand if cand and cand.startswith(("http://", "https://")) else None
+    return None
+
+
+def unwrap_tracker_url(url: str, _depth: int = 0) -> str:
+    """Return the real destination if `url` is a known link-wrapper that
+    embeds it (security gateway / redirect shim), else `url` unchanged.
+    Recurses (bounded) so a SafeLink wrapping a Proofpoint link unwraps
+    fully. Never raises — a decode failure just returns the input."""
+    if _depth >= 3:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    if parsed.scheme not in ("http", "https"):
+        return url
+    decoded = _decode_proofpoint(parsed, url) or _decode_query_redirect(parsed)
+    if decoded and decoded != url and decoded.startswith(("http://", "https://")):
+        return unwrap_tracker_url(decoded, _depth + 1)
+    return url
 
 
 def _is_denied(url: str) -> bool:
@@ -368,6 +460,11 @@ def extract_crawlable_urls(body_text: str, labels: object = None) -> list[str]:
         candidate = _strip_trailing_punct(m.group(0))
         if not candidate:
             continue
+        # Unwrap security-gateway / redirect shims to the real destination
+        # BEFORE denylist + dedup: skips a slow gateway hop at crawl time,
+        # dedups two emails that wrap the same target under different tokens,
+        # and lets the denylist judge the actual destination.
+        candidate = unwrap_tracker_url(candidate)
         if candidate in seen:
             continue
         if _is_denied(candidate):

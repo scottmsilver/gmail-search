@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 from pathlib import Path
 
 import click
@@ -428,6 +429,7 @@ def crawl(ctx, loop, interval, concurrency, limit):
     import asyncio as _asyncio
 
     from gmail_search.gmail.url_fetcher import run as _crawl_run
+    from gmail_search.gmail.url_fetcher import run_continuous as _crawl_run_continuous  # noqa: F401 (used in loop)
 
     db_path = ctx.obj["db_path"]
 
@@ -440,25 +442,33 @@ def crawl(ctx, loop, interval, concurrency, limit):
 
     from gmail_search.store.db import JobProgress
 
-    def _mem_aware_conc(max_conc: int) -> int:
-        """Scale crawl concurrency to free RAM each batch so a memory-tight box
-        (serve's ScaNN index alone is ~15 GB) isn't pushed into swap by Chromium
-        (~0.7 GB/tab). Reserves a 3 GB buffer for serve + spikes; floors at 2.
-        This replaces the manual pause/resume dance — the crawler throttles
-        itself down when RAM is scarce and back up when it frees."""
+    def _mem_aware_browser_cap(ceiling: int = 6) -> int:
+        """Scale the BROWSER pool to free RAM each batch. Only Chromium tabs
+        (~0.7 GB each) cost memory; the HTTP pool is I/O-bound and ~free, so
+        the memory bound applies to the browser pool ALONE now (post split-
+        pool refactor in url_fetcher). Reserves a 4 GB buffer for serve's
+        ScaNN index + spikes; floors at 1, ceils at `ceiling`."""
         try:
             avail_kb = next(int(line.split()[1]) for line in open("/proc/meminfo") if line.startswith("MemAvailable"))
             avail_gb = avail_kb / 1024 / 1024
         except Exception:
-            return max_conc
-        return max(2, min(max_conc, int((avail_gb - 4.0) / 0.7)))
+            return ceiling
+        return max(1, min(ceiling, int((avail_gb - 4.0) / 0.7)))
 
     progress = JobProgress(db_path, "crawl", start_completed=0)
-    click.echo(f"crawl daemon: batches of {limit}, concurrency ≤{concurrency} (memory-aware), every {interval}s")
+    click.echo(
+        f"crawl daemon: batches of {limit}, HTTP concurrency {concurrency}, memory-aware browser pool, every {interval}s"
+    )
     while True:
         try:
-            conc = _mem_aware_conc(concurrency)
-            r = _asyncio.run(_crawl_run(db_path, concurrency=conc, limit=limit))
+            # Continuous worker-pool (run_continuous): keeps the HTTP pool
+            # saturated across the slow browser tail instead of barriering on
+            # each batch. HTTP runs at the full ceiling (no memory cost); the
+            # memory-heavy browser pool is throttled to free RAM each call.
+            browser_cap = _mem_aware_browser_cap()
+            r = _asyncio.run(
+                _crawl_run_continuous(db_path, http_concurrency=concurrency, browser_cap=browser_cap, target=limit)
+            )
             progress.update(
                 "crawl" if r["total"] else "idle",
                 r["done"],
@@ -824,7 +834,6 @@ def _pid_file(data_dir: Path) -> Path:
 
 def _is_watch_running(data_dir: Path) -> tuple[bool, int | None]:
     """Check if a watch process is running. Returns (running, pid)."""
-    import os
     import subprocess
 
     pid_path = _pid_file(data_dir)
@@ -885,7 +894,6 @@ def start(ctx, interval, budget):
 @click.pass_context
 def stop(ctx):
     """Stop the watch daemon."""
-    import os
 
     data_dir = ctx.obj["data_dir"]
     running, pid = _is_watch_running(data_dir)
@@ -1302,12 +1310,17 @@ def supervise(ctx, interval, restart_delay):
         },
         # URL crawler. Action-link denylist (RSVP/accept/approve/yes-no — see
         # url_extract._DENY_PATH_CONTAINS) prevents GET-ing non-idempotent
-        # links. `--concurrency 8` is a CEILING; _mem_aware_conc scales actual
-        # Chromium concurrency down to fit free RAM (reserves a buffer), and the
-        # small --limit recycles the browser often so it can't balloon.
+        # links. `--concurrency 16` sizes the HTTP pool (I/O-bound, ~no memory;
+        # measured ~2x throughput vs 8 with flat latency, plateauing past 16).
+        # The memory-heavy BROWSER pool is bounded SEPARATELY and memory-aware
+        # (see crawl loop). The daemon uses run_continuous (worker-pool, no
+        # per-batch barrier on the browser tail), so `--limit 500` is the soft
+        # per-call target — large is fine since the only barrier (final render
+        # drain) is amortised over it. Short --interval: just a breath between
+        # continuous passes for progress/shutdown checks.
         {
             "key": "crawl",
-            "argv": ["crawl", "--loop", "--concurrency", "8", "--limit", "100", "--interval", "5"],
+            "argv": ["crawl", "--loop", "--concurrency", "16", "--limit", "500", "--interval", "2"],
             "log": data_dir / "crawl.log",
         },
     ]

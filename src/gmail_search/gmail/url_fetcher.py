@@ -18,7 +18,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
+import re
 import socket
+import time  # noqa: F401 — used in _resolve_all_ips; formatter must not strip
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -31,14 +34,30 @@ logger = logging.getLogger(__name__)
 # 8000 chars ≈ 2000 tokens — enough for a summarizer to get the gist.
 _MAX_CRAWL_CHARS = 8000
 
-# Hard cap per URL. crawl4ai's page_timeout is in ms. Kept short: most
-# uncrawled stubs are old dead / anti-bot links that would otherwise burn the
-# full timeout each; a live page loads well under this. (Was 30s — far too
-# long when a cycle has hundreds of dead links to try.)
-_DEFAULT_TIMEOUT_S = 10.0
+# Top-level per-URL budget. Now that curl_cffi/httpx have their own tight
+# per-op cap (_HTTP_OP_TIMEOUT_S), this primarily bounds the BROWSER tier
+# (crawl4ai page_timeout, in ms) and the PDF download. Measured (2026-06-10):
+# every SUCCESSFUL browser render finished under 2.4s (hits median 1.9s,
+# max 2.4s; dead pages max 1.6s), so 10s only let hung/dead browser pages
+# burn the clock. 6s keeps a ~2.5x margin over the observed max while
+# halving worst-case hung-browser time. (Was 30s, then 10s.)
+_DEFAULT_TIMEOUT_S = 6.0
 
 # Cap for the PDF-routed path. Binary download, not char count.
 _MAX_PDF_BYTES = 20 * 1024 * 1024
+
+
+# NEGATIVE-ONLY DNS cache. Dead domains (very common in old mail) repeat
+# across many stubs, and each NXDOMAIN costs a full resolver timeout —
+# caching those is the big win and is fail-closed by construction (a
+# cached [] can only cause a skip). Positive results are deliberately
+# NOT cached: the SSRF guard's answer must stay as close as possible to
+# the IP httpx's own connect-time resolution will get, and a "safe"
+# answer cached for minutes would widen the DNS-rebinding TOCTOU window
+# from one guard-to-connect race to the whole TTL (codex audit finding).
+_DNS_NEG_TTL_S = 600.0
+_DNS_CACHE_MAX = 4096
+_dns_cache: dict[str, tuple[float, list[str]]] = {}
 
 
 def _resolve_all_ips(host: str) -> list[str]:
@@ -48,18 +67,28 @@ def _resolve_all_ips(host: str) -> list[str]:
     resolver, so checking just the first record isn't enough.
 
     Returns `[]` on resolution failure; the caller treats that as
-    "skip this URL" (fail closed).
+    "skip this URL" (fail closed). Only failures are cached (see the
+    cache comment above) so repeated stubs of a dead domain don't
+    re-pay the resolver timeout.
     """
+    now = time.monotonic()
+    hit = _dns_cache.get(host)
+    if hit is not None and hit[0] > now:
+        return hit[1]
     try:
         # getaddrinfo covers both A and AAAA records.
         infos = socket.getaddrinfo(host, None)
     except Exception:
-        return []
+        infos = []
     out: list[str] = []
     for info in infos:
         sockaddr = info[4]
         if sockaddr:
             out.append(sockaddr[0])
+    if not out:
+        if len(_dns_cache) >= _DNS_CACHE_MAX:
+            _dns_cache.clear()  # crude eviction; refilling is cheap at this size
+        _dns_cache[host] = (now + _DNS_NEG_TTL_S, out)
     return out
 
 
@@ -218,13 +247,83 @@ _HTTP_UA = "Mozilla/5.0 (compatible; gmail-search/1.0; +https://oursilverfamily.
 _MIN_USABLE_CHARS = 250  # below this we assume a JS shell / empty page → browser
 _MAX_HTML_CHARS = 3_000_000  # cap parsed HTML so a giant page can't blow RAM
 _MAX_HTML_BYTES = 20_000_000  # reject responses larger than this (Content-Length)
+_MAX_FETCH_BYTES = 1_000_000  # stream cap: article text virtually always fits in the first MB
 _MAX_REDIRECTS = 6
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# Per-operation (connect / read / write) timeout for the HTTP path.
+# Measured (2026-06-10) UNDER CONCURRENCY 8 (the daemon's real load — NOT
+# sequential, which understates latency): good fetches run median 285ms,
+# p99 1865ms, max 2870ms. A 3.0s cap loses 0/105 good fetches; 2.5s lost
+# ~1% (one contended outlier at 2870ms). 3.0s caps tarpit / hung hosts at
+# 3s (was 5s) with zero good-fetch loss — hung hosts otherwise sit in a
+# concurrency slot blocking live URLs. Lesson: tune timeouts against the
+# CONCURRENT distribution, not a sequential probe.
+_HTTP_OP_TIMEOUT_S = 3.0
 
 
 class _SSRFBlocked(Exception):
     """A redirect hop resolved to a blocked (private/loopback/link-local)
     target. Raised so the caller does NOT fall back to crawl4ai, which would
     follow the same attacker-controlled redirect WITHOUT the per-hop guard."""
+
+
+_JSON_PROSE_RE = re.compile(r'"([^"\\]{40,})"')
+_LDJSON_FIELD_RE = re.compile(
+    r'"(?:articleBody|description|headline|text|name|caption|abstract|reviewBody|snippet)":\s*"([^"\\]{15,})"'
+)
+_EMBEDDED_STATE_MARKERS = ("__NEXT_DATA__", "__NUXT__", "__APOLLO_STATE__", "__INITIAL_STATE__", "__remixContext")
+
+
+def _extract_embedded_json_text(soup) -> str:
+    """Pull human-readable text out of embedded SPA state / structured data
+    in the RAW html — WITHOUT a browser. Many "JS shell" pages (yelp,
+    substack, github docs, Next.js/Nuxt sites) ship their full content as
+    JSON in a `<script>` (`__NEXT_DATA__`, ld+json, Apollo/Redux state);
+    rendering them in Chromium is a ~2s pass that often fails anyway, while
+    the data is right there in the HTML we already fetched. Measured
+    (2026-06-10): rescues ~32% of browser-bound pages at HTTP speed.
+
+    Heuristic by design: prefers schema.org content fields, then any prose-
+    looking string (has a space, not a URL/path) from JSON `<script>`s. Some
+    config noise can leak in, but for SEARCH indexing recall beats precision
+    and the result is capped downstream."""
+    texts: list[str] = []
+    seen: set[str] = set()
+
+    def add(s: str):
+        s = s.strip()
+        if len(s) >= 15 and s not in seen:
+            seen.add(s)
+            texts.append(s)
+
+    for tag in soup.find_all("script"):
+        s = tag.string or ""
+        if len(s) < 80:
+            continue
+        type_attr = (tag.get("type") or "").lower()
+        is_ldjson = "ld+json" in type_attr
+        is_json = "json" in type_attr
+        is_state = any(mk in s for mk in _EMBEDDED_STATE_MARKERS)
+        if is_ldjson:
+            for m in _LDJSON_FIELD_RE.finditer(s):
+                add(_unescape_json_str(m.group(1)))
+        if is_json or is_state:
+            for m in _JSON_PROSE_RE.finditer(s):
+                v = m.group(1)
+                if " " in v and not v.startswith(("http", "/", "data:", "#", "\\u", "@")):
+                    add(_unescape_json_str(v))
+    return "\n".join(texts)
+
+
+def _unescape_json_str(s: str) -> str:
+    """Best-effort unescape of a raw JSON string value (\\n, \\", \\uXXXX)."""
+    try:
+        import json as _json  # noqa: PLC0415
+
+        return _json.loads('"' + s.replace('"', '\\"') + '"')
+    except Exception:
+        return s
 
 
 def _readable_text(html: str) -> tuple[str, str]:
@@ -244,102 +343,389 @@ def _readable_text(html: str) -> tuple[str, str]:
         pass
     soup = BeautifulSoup(html, "lxml")
     title = (soup.title.get_text(strip=True) if soup.title else "") or ""
+    # Pull embedded JSON/SPA-state text BEFORE decomposing <script> tags —
+    # this is what rescues "JS shell" pages without a browser. Computed
+    # lazily-ish: we always extract it (cheap regex over scripts) but only
+    # USE it if the DOM text comes back thin.
+    json_text = _extract_embedded_json_text(soup)
     for tag in soup(
         ["script", "style", "noscript", "template", "svg", "head", "nav", "footer", "header", "form", "aside", "iframe"]
     ):
         tag.decompose()
     main = soup.find("article") or soup.find("main") or soup.find(attrs={"role": "main"}) or soup.body or soup
-    return main.get_text(separator="\n", strip=True), title
+    text = main.get_text(separator="\n", strip=True)
+    if len(text) < _MIN_USABLE_CHARS and main is not soup.body and soup.body is not None:
+        # The "main content" node can be an empty JS mount point (or, e.g. on
+        # amazon, a container whose content lived in <form> tags we removed)
+        # while the rest of <body> holds real server-rendered text. Falling
+        # back to body turns those false "thin" pages into HTTP successes
+        # instead of pointless ~10s Chromium passes (measured on amazon /dp:
+        # role=main div is 0 chars, body is ~2.5k chars).
+        body_text = soup.body.get_text(separator="\n", strip=True)
+        if len(body_text) > len(text):
+            text = body_text
+    # Still thin after DOM extraction? The page is a JS shell — use the
+    # embedded JSON content if it's richer (yelp/substack/Next.js/etc.).
+    if len(text) < _MIN_USABLE_CHARS and len(json_text) > len(text):
+        return json_text, title
+    return text, title
 
 
-async def _fetch_via_http(url: str, timeout_s: float) -> tuple[str, str] | None:
-    """Browser-free fetch with manual redirect-following. Each hop is SSRF-
-    checked BEFORE we fetch it (the caller's guard only covered the first URL),
-    so a redirect can't smuggle us to a private IP. Returns (title, text) on a
-    usable HTML page, else None → caller falls back to crawl4ai for JS pages."""
-    from urllib.parse import urljoin  # noqa: PLC0415
-
+def build_http_client(timeout_s: float = _DEFAULT_TIMEOUT_S):
+    """Pooled httpx client for the HTTP-first path. Built ONCE per crawl
+    pass and shared across every URL: keep-alive + HTTP/2 mean repeated
+    hosts (tracking domains, google.com, evite.com, …) skip the TCP+TLS
+    handshake that dominated per-page latency when each URL built its
+    own client. Caller is responsible for `await client.aclose()`."""
     import httpx  # noqa: PLC0415
 
+    per_op = min(_HTTP_OP_TIMEOUT_S, timeout_s)
+    return httpx.AsyncClient(
+        follow_redirects=False,  # hops are followed manually, SSRF-guarded each
+        http2=True,
+        headers={"User-Agent": _HTTP_UA},
+        timeout=httpx.Timeout(connect=per_op, read=per_op, write=per_op, pool=timeout_s),
+        limits=httpx.Limits(max_connections=64, max_keepalive_connections=32, keepalive_expiry=30.0),
+    )
+
+
+async def _read_capped(resp, cap: int = _MAX_FETCH_BYTES) -> str:
+    """Stream the body and stop after `cap` bytes. We only keep
+    _MAX_CRAWL_CHARS of extracted text, so downloading a page past the
+    first MB is pure waste — and on slow/tarpit hosts it's where the
+    old full-body read spent its time."""
+    chunks: list[bytes] = []
+    read = 0
+    async for chunk in resp.aiter_bytes():
+        chunks.append(chunk)
+        read += len(chunk)
+        if read >= cap:
+            break
+    encoding = resp.charset_encoding or "utf-8"
+    return b"".join(chunks).decode(encoding, errors="replace")
+
+
+async def _classify_response(resp, final_url: str) -> tuple[str, object]:
+    """Turn a terminal (non-redirect) response into a fetch outcome:
+
+    ("ok", (title, text)) — usable server-rendered page.
+    ("browser", final_url) — worth the Chromium fallback: a thin 200
+                            (JS shell) or a 403 (anti-bot walls
+                            sometimes pass a real browser fingerprint).
+                            `final_url` is the SSRF-GUARDED terminal URL
+                            of the redirect chain — the browser must
+                            start there, NOT at the original URL, so it
+                            doesn't replay the whole chain unguarded.
+    ("fail", None)        — DEFINITIVE for this cycle: 404/410/5xx,
+                            non-HTML 200s, oversized bodies. Chromium
+                            would see the same status/bytes, so the
+                            fallback is a guaranteed-wasted ~10s.
+    """
+    status = resp.status_code
+    if status == 403:
+        return ("browser", final_url)
+    if status != 200:
+        return ("fail", None)
+    if "html" not in resp.headers.get("content-type", "").lower():
+        return ("fail", None)
+    try:
+        if int(resp.headers.get("content-length", "0")) > _MAX_HTML_BYTES:
+            return ("fail", None)  # oversized — don't buffer/parse it
+    except ValueError:
+        pass
+    html = await _read_capped(resp)
+    text, title = _readable_text(html[:_MAX_HTML_CHARS])
+    if len(text) < _MIN_USABLE_CHARS:
+        return ("browser", final_url)  # JS shell / near-empty → browser
+    return ("ok", (title, _truncate_markdown(text)))
+
+
+async def _fetch_via_http(url: str, timeout_s: float, client=None) -> tuple[str, tuple[str, str] | None]:
+    """Browser-free fetch with manual redirect-following. Each hop is SSRF-
+    checked BEFORE we fetch it (the caller's guard only covered the first URL),
+    so a redirect can't smuggle us to a private IP.
+
+    Returns an outcome tuple (see `_classify_response`); network errors —
+    timeouts, refused connects, TLS failures — are ("fail", None): the
+    browser shares the same network path, so retrying them through
+    Chromium just re-pays the timeout. A 3xx with no Location header is
+    also ("fail", None) — Chromium would follow the body's navigation
+    with no per-hop SSRF guard.
+
+    `client` is the shared pooled client from `build_http_client`; when
+    None (tests, one-off callers) an ephemeral one is built per call.
+    """
+    from urllib.parse import urljoin  # noqa: PLC0415
+
+    own_client = None
+    if client is None:
+        own_client = client = build_http_client(timeout_s)
     cur = url
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=False, timeout=min(timeout_s, 10.0), headers={"User-Agent": _HTTP_UA}
-        ) as client:
-            for _ in range(_MAX_REDIRECTS):
-                if not _ssrf_guard(cur):
-                    # Blocked target: raise (don't return None) so the caller
-                    # won't hand the original URL to crawl4ai, which would
-                    # follow this same redirect with no guard.
-                    raise _SSRFBlocked(cur)
-                resp = await client.get(cur)
-                if resp.status_code in (301, 302, 303, 307, 308):
+        for _ in range(_MAX_REDIRECTS):
+            if not _ssrf_guard(cur):
+                # Blocked target: raise (don't return a fallback outcome) so
+                # the caller won't hand the original URL to crawl4ai, which
+                # would follow this same redirect with no guard.
+                raise _SSRFBlocked(cur)
+            async with client.stream("GET", cur) as resp:
+                if resp.status_code in _REDIRECT_CODES:
                     loc = resp.headers.get("location")
                     if not loc:
-                        return None
+                        # Malformed 3xx. Don't hand it to Chromium — the
+                        # browser follows whatever the body navigates to
+                        # with no per-hop SSRF guard (codex audit finding).
+                        # Real meta-refresh pages are 200s and still get
+                        # the browser via the thin-200 path.
+                        return ("fail", None)
                     cur = urljoin(cur, loc)
                     continue
-                break
-            else:
-                return None  # redirect loop / too many hops
+                return await _classify_response(resp, cur)
+        return ("fail", None)  # redirect loop / too many hops
     except _SSRFBlocked:
         raise
     except Exception:
+        return ("fail", None)
+    finally:
+        if own_client is not None:
+            await own_client.aclose()
+
+
+# crawl4ai impersonation profile for curl_cffi: a recent Chrome the
+# library ships a matching TLS+HTTP2 fingerprint for. Env-overridable so
+# we can bump it as the library adds newer profiles without a code change.
+_CFFI_IMPERSONATE = os.environ.get("GMAIL_CRAWL_IMPERSONATE", "chrome")
+
+
+def build_cffi_session():
+    """Shared curl_cffi AsyncSession — the PRIMARY fetch engine. libcurl +
+    BoringSSL perform a real Chrome TLS+HTTP2 handshake, so anti-bot walls
+    that fingerprint the TLS ClientHello (Cloudflare/Akamai JA3) see a
+    browser, not Python. Measured (2026-06-09) both faster than httpx
+    (253ms vs 433ms median) and able to fetch ~15-20% of pages httpx got
+    403/blocked on. One session per crawl pass; caller closes it.
+
+    Returns None if curl_cffi can't be imported, so the caller falls back
+    to the httpx engine rather than crashing the pass."""
+    try:
+        from curl_cffi.requests import AsyncSession  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"curl_cffi unavailable, falling back to httpx engine: {e}")
         return None
-    if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "").lower():
-        return None
+    return AsyncSession()
+
+
+async def _cffi_read_capped(resp, cap: int = _MAX_FETCH_BYTES) -> str:
+    """Stream a curl_cffi response body and stop after `cap` bytes —
+    AFTER libcurl's transparent gzip/br decompression, so a compressed
+    decompression bomb can't expand unbounded before we cap (codex audit
+    finding). Mirrors the httpx `_read_capped`."""
+    chunks: list[bytes] = []
+    read = 0
+    async for chunk in resp.aiter_content():
+        chunks.append(chunk)
+        read += len(chunk)
+        if read >= cap:
+            break
+    encoding = getattr(resp, "charset", None) or getattr(resp, "encoding", None) or "utf-8"
+    try:
+        return b"".join(chunks).decode(encoding, errors="replace")
+    except LookupError:  # bogus server-supplied charset must not force a fail
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+async def _abort_cffi_stream(resp) -> None:
+    """Tear down a curl_cffi streamed response. CRITICAL: curl_cffi's
+    `aclose()` AWAITS the background transfer task, which keeps downloading
+    the WHOLE body — so a capped read alone does NOT stop a large/slow body
+    (measured: closing a 100MB stream after a 1MB cap drained for 3-6s; on a
+    slow link the parallel agent saw 266s). Cancel the transfer task first,
+    then close → teardown is instant. A fully-read small body has an
+    already-done task, so cancel is a harmless no-op there."""
+    task = getattr(resp, "astream_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    try:
+        await resp.aclose()
+    except asyncio.CancelledError:
+        # aclose() awaits the child transfer task we just cancelled, so it
+        # re-raises that CancelledError. Swallow it — UNLESS our own coroutine
+        # is the cancel target (then honour the cancellation and propagate).
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            raise
+    except Exception:  # noqa: BLE001 — dead connection during teardown
+        pass
+
+
+async def _fetch_via_cffi(url: str, timeout_s: float, session) -> tuple[str, object]:
+    """Primary fetch via curl_cffi with manual, per-hop SSRF-guarded
+    redirect following. CRITICAL: `allow_redirects=False` — libcurl must
+    NOT follow redirects itself, or it would connect to attacker-chosen
+    hops in C with no SSRF check. Same tri-state outcome contract as
+    `_fetch_via_http` (browser payload is the guarded terminal URL); same
+    fail-closed-on-error policy. Raises `_SSRFBlocked` on a blocked hop so
+    the caller won't hand the URL to the unguarded Chromium fallback.
+
+    Uses `stream=True` + a byte cap so a small compressed body can't
+    decompress to huge RAM before the cap, and `_abort_cffi_stream` so the
+    uncapped remainder of a large body is never drained (see that helper).
+    `discard_cookies=True` keeps each fetch cold — URL A's Set-Cookie must
+    not replay onto unrelated URL B in the shared session (codex finding)."""
+    from urllib.parse import urljoin  # noqa: PLC0415
+
+    per_op = min(_HTTP_OP_TIMEOUT_S, timeout_s)
+    cur = url
+    for _ in range(_MAX_REDIRECTS):
+        if not _ssrf_guard(cur):
+            raise _SSRFBlocked(cur)
+        resp = await session.get(
+            cur,
+            impersonate=_CFFI_IMPERSONATE,
+            timeout=per_op,
+            allow_redirects=False,
+            stream=True,
+            discard_cookies=True,
+            headers={"Accept-Encoding": "gzip, deflate, br"},
+        )
+        try:
+            if resp.status_code in _REDIRECT_CODES:
+                loc = resp.headers.get("location")
+                if not loc:
+                    return ("fail", None)  # malformed 3xx — see _fetch_via_http
+                cur = urljoin(cur, loc)
+                continue
+            return await _classify_cffi_response(resp, cur)
+        finally:
+            await _abort_cffi_stream(resp)
+    return ("fail", None)  # redirect loop / too many hops
+
+
+async def _classify_cffi_response(resp, final_url: str) -> tuple[str, object]:
+    """Tri-state outcome from a terminal curl_cffi (streamed) response.
+    Mirrors `_classify_response`; the browser payload is the guarded
+    terminal URL so Chromium starts at a vetted target."""
+    status = resp.status_code
+    if status == 403:
+        return ("browser", final_url)  # anti-bot — a full browser may pass
+    if status != 200:
+        return ("fail", None)
+    if "html" not in resp.headers.get("content-type", "").lower():
+        return ("fail", None)
     try:
         if int(resp.headers.get("content-length", "0")) > _MAX_HTML_BYTES:
-            return None  # oversized — don't buffer/parse it
-    except ValueError:
+            return ("fail", None)  # oversized declared body — reject
+    except (ValueError, TypeError):
         pass
-    text, title = _readable_text(resp.text[:_MAX_HTML_CHARS])
+    html = await _cffi_read_capped(resp)
+    text, title = _readable_text(html[:_MAX_HTML_CHARS])
     if len(text) < _MIN_USABLE_CHARS:
-        return None  # JS shell / near-empty → let the browser try
-    return title, _truncate_markdown(text)
+        return ("browser", final_url)  # JS shell → let the browser render it
+    return ("ok", (title, _truncate_markdown(text)))
+
+
+async def resolve_via_http(
+    url: str,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    http_client=None,
+    cffi_session=None,
+) -> tuple[str, object]:
+    """HTTP-only resolution phase of the fetch ladder. Returns:
+      ("ok",   (title, markdown))  — content obtained without a browser.
+      ("fail", None)               — definitive: skip, no browser would help.
+      ("browser", browser_url)     — needs Chromium; `browser_url` is the
+                                     SSRF-GUARDED terminal URL to render.
+
+    This is everything in the old `fetch_url_markdown` EXCEPT the final
+    crawl4ai call, split out so the orchestrator can hold a cheap HTTP
+    concurrency slot here and switch to a SEPARATE small browser pool for
+    the render — a 2s Chromium pass must not block fast HTTP fetches. All
+    the SSRF logic (per-hop guard, terminal-URL guard, no-fallback-on-
+    block) is preserved verbatim.
+
+    Engine ladder: curl_cffi (Chrome TLS impersonation) → httpx (plain-UA
+    backup + second chance for trackers that wall impersonation) → caller's
+    browser. PDF URLs route to the local extractor (an "ok")."""
+    if not _ssrf_guard(url):
+        logger.info(f"url_fetcher: skipping {url} (SSRF guard)")
+        return ("fail", None)
+
+    if url.lower().split("?", 1)[0].endswith(".pdf"):
+        pdf = await asyncio.to_thread(_fetch_pdf_url, url)
+        return ("ok", pdf) if pdf else ("fail", None)
+
+    try:
+        if cffi_session is not None:
+            try:
+                kind, payload = await _fetch_via_cffi(url, timeout_s, cffi_session)
+            except _SSRFBlocked:
+                raise
+            except Exception as e:  # noqa: BLE001 — engine-level failure → fall back to httpx
+                logger.info(f"url_fetcher: cffi engine error on {url}, trying httpx: {type(e).__name__}")
+                kind, payload = await _fetch_via_http(url, timeout_s, client=http_client)
+        else:
+            kind, payload = await _fetch_via_http(url, timeout_s, client=http_client)
+    except _SSRFBlocked as e:
+        # A redirect pointed at a blocked address — give up; do NOT fall back
+        # to crawl4ai (Chromium would follow the same redirect unguarded).
+        logger.info(f"url_fetcher: skipping {url} (SSRF redirect target {e})")
+        return ("fail", None)
+    if kind == "ok":
+        return ("ok", payload)
+    if kind == "fail":
+        # Definitive HTTP outcome (404/5xx/non-HTML/timeout) — Chromium
+        # would see the same thing, so don't burn a browser pass on it.
+        return ("fail", None)
+
+    # kind == "browser": payload is the SSRF-GUARDED terminal URL of the
+    # redirect chain (or the original URL if there were no redirects).
+    browser_url = payload if isinstance(payload, str) and payload else url
+
+    # Second chance before the expensive browser: if curl_cffi (Chrome
+    # fingerprint) hit a wall but we haven't yet tried a plain-UA httpx
+    # GET, try it — some trackers serve honest clients the real content
+    # while walling impersonated ones. Cheap, and saves a browser pass.
+    if cffi_session is not None:
+        try:
+            hk, hpayload = await _fetch_via_http(browser_url, timeout_s, client=http_client)
+        except _SSRFBlocked as e:
+            logger.info(f"url_fetcher: skipping {url} (SSRF redirect target {e})")
+            return ("fail", None)
+        if hk == "ok":
+            return ("ok", hpayload)
+        if hk == "fail":
+            return ("fail", None)
+        if isinstance(hpayload, str) and hpayload:
+            browser_url = hpayload  # httpx's guarded terminal url
+
+    # Hand back the guarded terminal URL, NOT the original — crawl4ai follows
+    # redirects unguarded, so the original would let it replay the whole chain
+    # to an attacker-chosen private target (codex finding).
+    if not _ssrf_guard(browser_url):
+        # Terminal URL re-resolves to a blocked target (DNS changed since
+        # the in-loop guard) — fail closed rather than hand it to Chromium.
+        logger.info(f"url_fetcher: skipping browser fallback for {url} (terminal SSRF)")
+        return ("fail", None)
+    return ("browser", browser_url)
 
 
 async def fetch_url_markdown(
     crawler,
     url: str,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
+    http_client=None,
+    cffi_session=None,
 ) -> tuple[str, str] | None:
-    """Fetch one URL, return `(title, markdown)` or None on failure.
-
-    - Pre-flight SSRF guard against private / loopback / link-local IPs.
-    - PDF URLs (by URL suffix) route through the local PDF extractor.
-    - HTTP-FIRST: a redirect-following httpx GET + readability extraction
-      handles server-rendered pages (incl. tracking redirects) with no browser
-      — far faster, no Chromium memory, no slot-holding. crawl4ai is the
-      fallback for JS-rendered / empty pages.
-
-    Known SSRF limitations (documented, accepted for this self-hosted app —
-    fetched content lands only in the user's own private index, never back to
-    an attacker):
-      * crawl4ai (Chromium) fallback follows redirects itself, unguarded —
-        pre-existing. The HTTP-first path (the common case) IS guarded per hop,
-        and a guard-rejected redirect now short-circuits before crawl4ai.
-      * _ssrf_guard resolves DNS separately from the connect, so DNS-rebinding
-        (TOCTOU) can still slip past. Fully closing it needs connect-time IP
-        pinning; tracked as a follow-up.
-    """
-    if not _ssrf_guard(url):
-        logger.info(f"url_fetcher: skipping {url} (SSRF guard)")
+    """Fetch one URL through the full ladder, return `(title, markdown)` or
+    None. Thin wrapper over `resolve_via_http` + the crawl4ai browser phase,
+    for callers (tests, one-offs) that don't need the split-pool scheduling
+    the daemon uses in `_process_one`."""
+    kind, data = await resolve_via_http(url, timeout_s, http_client=http_client, cffi_session=cffi_session)
+    if kind == "ok":
+        return data  # type: ignore[return-value]
+    if kind == "fail":
         return None
-
-    if url.lower().split("?", 1)[0].endswith(".pdf"):
-        return await asyncio.to_thread(_fetch_pdf_url, url)
-
-    try:
-        light = await _fetch_via_http(url, timeout_s)
-    except _SSRFBlocked as e:
-        # A redirect pointed at a blocked address — give up; do NOT fall back
-        # to crawl4ai (Chromium would follow the same redirect unguarded).
-        logger.info(f"url_fetcher: skipping {url} (SSRF redirect target {e})")
-        return None
-    if light is not None:
-        return light
-    return await _fetch_via_crawl4ai(crawler, url, timeout_s)
+    return await _fetch_via_crawl4ai(crawler, data, timeout_s)  # data = guarded browser_url
 
 
 def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
@@ -379,107 +765,116 @@ def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
     return title, _truncate_markdown(result.text)
 
 
+def _mark_attempt_sync(db_path, filename: str) -> None:
+    """Stamp +1 attempt on ALL unfilled copies of this URL (dedup fan-out) so
+    duplicate stubs back off / abandon together instead of each being retried."""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE attachments SET crawl_attempts = crawl_attempts + 1, "
+            "crawl_last_attempt = now() WHERE filename = %s AND extracted_text IS NULL",
+            (filename,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _abandon_sync(db_path, filename: str) -> None:
+    """PERMANENT-failure fast path: jump all copies of this URL straight to the
+    retry cap (NEVER-succeeds: private/reserved IP, NXDOMAIN dead domain) so we
+    don't burn repeated browser fetches over ~6h of backoff."""
+    from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
+
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
+            "WHERE filename = %s AND extracted_text IS NULL",
+            (_MAX_CRAWL_ATTEMPTS, filename),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_result_sync(db_path, stub: dict, title: str, markdown: str) -> None:
+    """Persist the fetched content to THIS stub, and resolve the duplicate
+    stubs of the same URL out of the queue WITHOUT content (so the identical
+    page isn't embedded once per linking message — avoids duplicate vectors +
+    reindex churn). The just-filled copy is excluded by its now-non-NULL text."""
+    from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
+
+    conn = get_connection(db_path)
+    try:
+        fill_url_attachment(conn, attachment_id=stub["id"], title=title, text=markdown, url=stub["url"])
+        conn.execute(
+            "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
+            "WHERE filename = %s AND extracted_text IS NULL",
+            (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _persist_result(db_path, stub: dict, result) -> bool:
+    """Write a (title, markdown) result for `stub`, or return False on a None
+    result / DB error. Shared by the batch and continuous orchestrators."""
+    if result is None:
+        return False
+    title, markdown = result
+    try:
+        await asyncio.to_thread(_write_result_sync, db_path, stub, title, markdown)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"url_fetcher: db write failed for {stub['url']}: {e}")
+        return False
+    return True
+
+
 async def _process_one(
     crawler,
     stub: dict,
     sem: asyncio.Semaphore,
     db_path: Path,
     timeout_s: float,
+    http_client=None,
+    cffi_session=None,
+    browser_sem: asyncio.Semaphore | None = None,
 ) -> bool:
-    """Fetch a single stub and write the result. Returns True on
-    success (attachment filled), False otherwise.
+    """Fetch a single stub and write the result. Returns True on success.
 
-    Commits its own transaction so a slow crawl can't hold a writer
-    lock across concurrent fetches.
+    Two-pool scheduling: the HTTP resolution phase runs under `sem` (large —
+    HTTP is I/O-bound and cheap), then the slot is RELEASED before the Chromium
+    render acquires the separate, small `browser_sem`. When `browser_sem` is
+    None the render runs under `sem` (single-pool; tests / one-off callers).
+
+    NOTE: this is the BATCH path (one task per stub, awaited together in
+    `run`). The daemon uses `run_continuous` instead, which keeps the HTTP pool
+    saturated across the slow browser tail; this is kept for tests + one-shots.
     """
-
-    def _mark_attempt():
-        conn = get_connection(db_path)
-        try:
-            # Mark ALL unfilled copies of this URL (dedup fan-out) so duplicate
-            # stubs back off / abandon together instead of each being retried.
-            conn.execute(
-                "UPDATE attachments SET crawl_attempts = crawl_attempts + 1, "
-                "crawl_last_attempt = now() WHERE filename = %s AND extracted_text IS NULL",
-                (stub["filename"],),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def _abandon():
-        # PERMANENT failure (URL resolves to a private/reserved IP, or doesn't
-        # resolve at all — a dead domain, very common in old mail). It will
-        # NEVER succeed, so jump all copies straight to the retry cap instead
-        # of burning 4 Chromium fetches over ~6h of backoff. _ssrf_guard fails
-        # closed on NXDOMAIN, so this also clears dead links cheaply (DNS only,
-        # no browser).
-        # Inline import: the formatter strips this from module scope as
-        # "unused" (it's only referenced in this nested fn), so import it here.
-        from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
-
-        conn = get_connection(db_path)
-        try:
-            conn.execute(
-                "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
-                "WHERE filename = %s AND extracted_text IS NULL",
-                (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
     async with sem:
-        # Permanent-failure fast path: skip the browser entirely for URLs that
-        # can never succeed and abandon them in one DNS check.
+        # Denylisted URLs are filtered upstream in pending_url_stubs; here we
+        # only abandon URLs that can never resolve (private IP / NXDOMAIN).
         if not await asyncio.to_thread(_ssrf_guard, stub["url"]):
-            await asyncio.to_thread(_abandon)
+            await asyncio.to_thread(_abandon_sync, db_path, stub["filename"])
             return False
-        # Stamp the attempt BEFORE fetching so a timeout / crash / anti-bot
-        # block still counts against the retry budget (_MAX_CRAWL_ATTEMPTS).
-        # Otherwise a perpetually-failing link never accrues attempts and is
-        # re-crawled every cycle forever — the head-of-line blocking that left
-        # 517k stubs thrashing while live URLs starved.
-        await asyncio.to_thread(_mark_attempt)
-        result = await fetch_url_markdown(crawler, stub["url"], timeout_s=timeout_s)
-    if result is None:
+        # Stamp the attempt BEFORE fetching so a timeout / block still counts
+        # against the retry budget (else a failing link is re-crawled forever).
+        await asyncio.to_thread(_mark_attempt_sync, db_path, stub["filename"])
+        kind, data = await resolve_via_http(
+            stub["url"], timeout_s=timeout_s, http_client=http_client, cffi_session=cffi_session
+        )
+
+    if kind == "ok":
+        return await _persist_result(db_path, stub, data)
+    if kind == "fail":
         return False
-    title, markdown = result
-
-    def _write():
-        from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
-
-        conn = get_connection(db_path)
-        try:
-            # Embed THIS copy of the URL once...
-            fill_url_attachment(
-                conn,
-                attachment_id=stub["id"],
-                title=title,
-                text=markdown,
-                url=stub["url"],
-            )
-            # ...and resolve the duplicate stubs of the same URL out of the
-            # crawl queue WITHOUT content, so the identical page isn't embedded
-            # again for every message that links it (avoids thousands of
-            # duplicate vectors + the reindex churn that creates). They still
-            # match by the original `URL: <url>` filename; the one just filled
-            # was renamed + has extracted_text, so it's excluded here.
-            conn.execute(
-                "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
-                "WHERE filename = %s AND extracted_text IS NULL",
-                (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    try:
-        await asyncio.to_thread(_write)
-    except Exception as e:
-        logger.warning(f"url_fetcher: db write failed for {stub['url']}: {e}")
-        return False
-    return True
+    # Browser phase — HTTP slot released; acquire the small browser pool.
+    bsem = browser_sem if browser_sem is not None else sem
+    async with bsem:
+        result = await _fetch_via_crawl4ai(crawler, data, timeout_s)
+    return await _persist_result(db_path, stub, result)
 
 
 async def run(
@@ -509,7 +904,15 @@ async def run(
     progress = JobProgress(db_path, "crawl_urls")
     progress.update("crawling", 0, total, f"0/{total}")
 
+    # Two pools (see _process_one): a LARGE HTTP pool (I/O-bound, ~no memory)
+    # and a SMALL browser pool (Chromium is CPU/memory-heavy). Measured: HTTP
+    # throughput ~doubles from concurrency 8→16 with flat latency, then
+    # plateaus; the browser stays bounded so it can't starve HTTP or OOM the
+    # box. `concurrency` sizes the HTTP pool; the browser cap is small and
+    # fixed (overridable via $GMAIL_CRAWL_BROWSER_CONCURRENCY).
     sem = asyncio.Semaphore(max(1, concurrency))
+    _browser_cap = max(1, int(os.environ.get("GMAIL_CRAWL_BROWSER_CONCURRENCY", "3")))
+    browser_sem = asyncio.Semaphore(min(_browser_cap, max(1, concurrency)))
     browser_config = BrowserConfig(
         headless=True,
         verbose=False,
@@ -526,9 +929,25 @@ async def run(
 
     done = 0
     failed = 0
+    http_client = build_http_client(timeout_s)
+    cffi_session = build_cffi_session()  # primary engine; None → httpx-only
     try:
         async with AsyncWebCrawler(config=browser_config) as crawler:
-            tasks = [asyncio.create_task(_process_one(crawler, stub, sem, db_path, timeout_s)) for stub in pending]
+            tasks = [
+                asyncio.create_task(
+                    _process_one(
+                        crawler,
+                        stub,
+                        sem,
+                        db_path,
+                        timeout_s,
+                        http_client=http_client,
+                        cffi_session=cffi_session,
+                        browser_sem=browser_sem,
+                    )
+                )
+                for stub in pending
+            ]
             for coro in asyncio.as_completed(tasks):
                 ok = await coro
                 if ok:
@@ -546,9 +965,166 @@ async def run(
         logger.exception(f"url_fetcher.run crashed: {e}")
         progress.finish("error", f"{type(e).__name__}: {str(e)[:120]}")
         raise
+    finally:
+        await http_client.aclose()
+        if cffi_session is not None:
+            try:
+                await cffi_session.close()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
 
     progress.finish("done", f"{done} ok / {failed} failed of {total}")
     return {"total": total, "done": done, "failed": failed}
+
+
+async def run_continuous(
+    db_path: Path,
+    *,
+    http_concurrency: int = 16,
+    browser_cap: int = 3,
+    target: int = 500,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+) -> dict[str, int]:
+    """Continuous worker-pool crawl — the daemon's path. Unlike `run` (which
+    creates one task per stub and BARRIERS on the whole batch, so the HTTP
+    pool sits idle ~75% of the wall while the slow browser tail finishes),
+    this keeps the HTTP pool SATURATED: a producer refills a queue from the
+    DB, `http_concurrency` HTTP workers pull continuously, and stubs that need
+    a render are handed to `browser_cap` background browser workers WITHOUT
+    blocking HTTP. The only barrier is the final drain of the last few renders
+    — negligible amortised over `target` stubs.
+
+    Returns `{total, done, failed}`. `target` is a soft cap on stubs pulled
+    this call (the CLI loops it, refreshing progress + the memory-aware browser
+    cap between calls)."""
+    from crawl4ai import AsyncWebCrawler, BrowserConfig
+
+    progress = JobProgress(db_path, "crawl_urls")
+    counters = {"done": 0, "failed": 0, "pulled": 0}
+    # Bounded queues give natural backpressure: the producer blocks when the
+    # HTTP pool is saturated, so we never pull more than we can chew.
+    stub_q: asyncio.Queue = asyncio.Queue(maxsize=http_concurrency * 2)
+    browser_q: asyncio.Queue = asyncio.Queue(maxsize=max(8, browser_cap * 4))
+    http_client = build_http_client(timeout_s)
+    cffi_session = build_cffi_session()
+
+    def _fetch_pending(n: int):
+        conn = get_connection(db_path)
+        try:
+            return pending_url_stubs(conn, n)
+        finally:
+            conn.close()
+
+    async def _producer():
+        """Refill `stub_q` from the DB until `target` stubs are enqueued. A
+        marked stub (attempts+1, last_attempt=now) is excluded from the next
+        `pending_url_stubs` by its backoff window, so we don't re-pull — but we
+        pull a fresh DB chunk only when the queue is low, giving workers time
+        to stamp attempts first."""
+        while counters["pulled"] < target:
+            want = min(http_concurrency * 2, target - counters["pulled"])
+            rows = await asyncio.to_thread(_fetch_pending, want)
+            if not rows:
+                break  # backlog drained
+            for stub in rows:
+                if counters["pulled"] >= target:
+                    break
+                await stub_q.put(stub)
+                counters["pulled"] += 1
+
+    async def _http_worker():
+        while True:
+            stub = await stub_q.get()
+            try:
+                if stub is None:
+                    return  # poison pill
+                if not await asyncio.to_thread(_ssrf_guard, stub["url"]):
+                    await asyncio.to_thread(_abandon_sync, db_path, stub["filename"])
+                    counters["failed"] += 1
+                    continue
+                await asyncio.to_thread(_mark_attempt_sync, db_path, stub["filename"])
+                kind, data = await resolve_via_http(
+                    stub["url"], timeout_s=timeout_s, http_client=http_client, cffi_session=cffi_session
+                )
+                if kind == "ok":
+                    counters["done" if await _persist_result(db_path, stub, data) else "failed"] += 1
+                elif kind == "fail":
+                    counters["failed"] += 1
+                else:
+                    await browser_q.put((stub, data))  # hand off; do NOT block HTTP
+            except Exception as e:  # noqa: BLE001 — one bad stub must not kill the worker
+                logger.warning(f"url_fetcher: http worker error on {stub.get('url') if stub else '?'}: {e}")
+                counters["failed"] += 1
+            finally:
+                stub_q.task_done()
+
+    async def _browser_worker(crawler):
+        while True:
+            item = await browser_q.get()
+            try:
+                if item is None:
+                    return  # poison pill
+                # Broad guard: a browser worker must NEVER die on a bad item —
+                # if all browser workers died, HTTP workers would block forever
+                # on `browser_q.put(...)` during shutdown (codex audit finding).
+                try:
+                    stub, burl = item
+                    try:
+                        result = await _fetch_via_crawl4ai(crawler, burl, timeout_s)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"url_fetcher: browser worker error on {burl}: {e}")
+                        result = None
+                    counters["done" if await _persist_result(db_path, stub, result) else "failed"] += 1
+                except Exception as e:  # noqa: BLE001 — never let the worker die
+                    logger.warning(f"url_fetcher: browser worker loop error: {e}")
+                    counters["failed"] += 1
+            finally:
+                browser_q.task_done()
+
+    async def _progress_ticker():
+        while True:
+            await asyncio.sleep(2.0)
+            n = counters["done"] + counters["failed"]
+            progress.update("crawling", n, target, f"{counters['done']} ok / {counters['failed']} failed")
+
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=False,
+        light_mode=True,
+        text_mode=True,
+        extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    )
+    try:
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            http_workers = [asyncio.create_task(_http_worker()) for _ in range(max(1, http_concurrency))]
+            browser_workers = [asyncio.create_task(_browser_worker(crawler)) for _ in range(max(1, browser_cap))]
+            ticker = asyncio.create_task(_progress_ticker())
+
+            await _producer()
+            # Drain HTTP: poison each worker, wait for the queue + tasks to finish.
+            for _ in http_workers:
+                await stub_q.put(None)
+            await asyncio.gather(*http_workers)
+            # Now drain the browser tail (the only barrier, amortised over target).
+            for _ in browser_workers:
+                await browser_q.put(None)
+            await asyncio.gather(*browser_workers)
+            ticker.cancel()
+    except Exception as e:
+        logger.exception(f"url_fetcher.run_continuous crashed: {e}")
+        progress.finish("error", f"{type(e).__name__}: {str(e)[:120]}")
+        raise
+    finally:
+        await http_client.aclose()
+        if cffi_session is not None:
+            try:
+                await cffi_session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    total = counters["done"] + counters["failed"]
+    progress.finish("done", f"{counters['done']} ok / {counters['failed']} failed of {total}")
+    return {"total": total, "done": counters["done"], "failed": counters["failed"]}
 
 
 def _self_test() -> None:

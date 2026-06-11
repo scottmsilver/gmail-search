@@ -33,7 +33,14 @@ dependencies = [
     "xlrd>=2.0.0",  # legacy .xls (xlsx is openpyxl above)
     "gdown>=6.0.0",  # Drive URL parsing (gmail/drive.py)
     "beautifulsoup4>=4.12.0",
-    "crawl4ai>=0.3",  # Headless URL crawler for gmail/url_fetcher.py
+    "crawl4ai>=0.3",  # Headless URL crawler fallback for gmail/url_fetcher.py
+    # Primary HTTP fetch engine: libcurl + BoringSSL doing a REAL Chrome
+    # TLS+HTTP2 handshake. Measured (2026-06-09) faster than httpx
+    # (253ms vs 433ms median) AND cracks ~15-20% of anti-bot 403/TLS
+    # walls that otherwise force the slow browser path. MIT-licensed,
+    # widely used. We follow redirects manually (allow_redirects=False)
+    # so the per-hop SSRF guard still runs — libcurl must not redirect.
+    "curl_cffi>=0.7",
     # Floors bumped after `pip-audit` surfaced patchable CVEs in the
     # anaconda baseline (urllib3 streaming/redirect family, requests
     # extract_zipped_paths, nltk downloader / wordnet_app). These are
