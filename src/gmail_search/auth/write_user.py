@@ -47,6 +47,19 @@ def get_bootstrap_user_id(conn) -> str:
     return row["id"]
 
 
+def get_user_id_by_email(conn, email: str) -> Optional[str]:
+    """Resolve a user's internal `user_id` from their email, or None if
+    no such user exists. Used by the MCP transport-token mint path to
+    map an owner email to the `uid` claim SERVER-SIDE — the caller can
+    never supply a user_id. Email is canonicalized the same way every
+    other write/lookup site does so a trailing-space email can't dodge
+    the unique constraint."""
+    from gmail_search.auth.session import normalize_email
+
+    row = conn.execute("SELECT id FROM users WHERE email = %s", (normalize_email(email),)).fetchone()
+    return row["id"] if row else None
+
+
 def resolve_write_user_id(conn, *, user_id: Optional[str] = None) -> str:
     """The one helper every INSERT site calls. Pass `user_id` when the
     caller has it (authenticated endpoint, test, explicit migration);

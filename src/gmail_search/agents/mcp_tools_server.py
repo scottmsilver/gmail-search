@@ -29,8 +29,10 @@ Run as: `python -m gmail_search.agents.mcp_tools_server`. Port via
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,16 @@ class SessionContext:
 
 
 _SESSIONS: dict[str, SessionContext] = {}
+
+# Ephemeral, transport-scoped session contexts for /mcp callers. Keyed
+# by `(transport_uid, session_id)` so a transport caller can NEVER
+# collide with — or overwrite — a plain `session_id` registration in
+# `_SESSIONS` (which the in-process orchestrator owns). This keeps the
+# transport-override identity strictly request/owner-local: a token for
+# owner A can't poison owner B's registered session. Entries are cheap
+# (no db_conn opened until an artifact is persisted) and are wiped by
+# `unregister_session` alongside the registered entry.
+_TRANSPORT_SESSIONS: dict[tuple[str, str], SessionContext] = {}
 
 
 # ── Side-channel: per-session structured tool-call log ─────────────
@@ -263,6 +275,193 @@ def _resolve_server_db_dsn() -> str | None:
     return os.environ.get("DB_DSN") or os.environ.get("GMAIL_DB_DSN") or None
 
 
+# ── Transport-token identity (per-owner /mcp auth) ─────────────────
+#
+# The bhatti microVM presents `Authorization: Bearer <transport token>`
+# to /mcp. The token is a per-owner, expiring JWT (HS256) minted by the
+# admin endpoint below; the middleware verifies it and stashes the
+# token's user_id here for the duration of the request. The tool
+# wrappers prefer this identity over any caller-supplied session, so a
+# VM agent can never widen its scope to another tenant.
+
+_TRANSPORT_AUD = "mcp-transport"
+# A service token authenticates a TRUSTED server-side MCP client
+# (claudebox, the shared deep-analysis sandbox) to satisfy /mcp
+# enforcement. Unlike a transport token it carries NO tenant — per-run
+# scoping stays on the REGISTERED session (the orchestrator calls
+# register_session(user_id=...) before each run). cc-web only mints
+# transport tokens, so an untrusted VM can never obtain a service token.
+_SERVICE_AUD = "mcp-service"
+_TRANSPORT_ALGORITHM = "HS256"
+_TRANSPORT_MIN_SECRET_BYTES = 32
+_DEFAULT_TRANSPORT_TTL_SECONDS = 86400
+# Service tokens are static server-side client credentials, so they get a
+# long default lifetime (30 days) rather than the short transport TTL.
+_DEFAULT_SERVICE_TTL_SECONDS = 86400 * 30
+
+# Per-request transport identity. Unset (None) means no transport token
+# was presented — behavior falls back to the legacy register_session
+# path so the in-process deep-analysis orchestrator keeps working.
+_transport_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("_transport_user_id", default=None)
+
+
+def _transport_secret() -> str | None:
+    """Resolve the signing secret for transport tokens, or None when
+    transport auth is not configured.
+
+    Prefers the dedicated `GMAIL_MCP_TRANSPORT_SECRET` (must be >=32
+    bytes). Falls back to `GMS_SESSION_SECRET` ONLY when the operator
+    explicitly opts in via `GMAIL_MCP_TRANSPORT_ALLOW_SHARED_SECRET=1`
+    — sharing the cookie-signing key with the transport audience is a
+    blast-radius expansion, so it's never silent. Returns None (rather
+    than raising) so the mint endpoint can 503 and the middleware can
+    treat the server as "no auth configured" without crashing."""
+    secret = os.environ.get("GMAIL_MCP_TRANSPORT_SECRET")
+    if not secret and os.environ.get("GMAIL_MCP_TRANSPORT_ALLOW_SHARED_SECRET") == "1":
+        secret = os.environ.get("GMS_SESSION_SECRET")
+    if not secret:
+        return None
+    if len(secret.encode("utf-8")) < _TRANSPORT_MIN_SECRET_BYTES:
+        logger.warning(
+            "transport secret is under %d bytes; refusing to use it " "(HS256 forgery is practical below that)",
+            _TRANSPORT_MIN_SECRET_BYTES,
+        )
+        return None
+    return secret
+
+
+def _transport_ttl_seconds() -> int:
+    raw = os.environ.get("GMAIL_MCP_TRANSPORT_TTL_SECONDS")
+    if not raw:
+        return _DEFAULT_TRANSPORT_TTL_SECONDS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("invalid GMAIL_MCP_TRANSPORT_TTL_SECONDS=%r; using default", raw)
+        return _DEFAULT_TRANSPORT_TTL_SECONDS
+
+
+def mint_transport_token(*, user_id: str, email: str, ttl_seconds: int | None = None) -> tuple[str, int]:
+    """Mint a signed per-owner transport token. Returns `(token, exp)`.
+
+    The `uid` claim is resolved SERVER-SIDE by the caller (the mint
+    endpoint) from the email — never trusted from request input. Raises
+    RuntimeError if the signing secret is unavailable so the endpoint
+    can map that to a 503."""
+    import jwt
+
+    secret = _transport_secret()
+    if secret is None:
+        raise RuntimeError("transport signing secret unavailable")
+    now = int(time.time())
+    exp = now + (ttl_seconds if ttl_seconds is not None else _transport_ttl_seconds())
+    payload = {
+        "uid": user_id,
+        "email": email,
+        "aud": _TRANSPORT_AUD,
+        "iat": now,
+        "exp": exp,
+    }
+    token = jwt.encode(payload, secret, algorithm=_TRANSPORT_ALGORITHM)
+    return token, exp
+
+
+def _service_ttl_seconds() -> int:
+    raw = os.environ.get("GMAIL_MCP_SERVICE_TTL_SECONDS")
+    if not raw:
+        return _DEFAULT_SERVICE_TTL_SECONDS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("invalid GMAIL_MCP_SERVICE_TTL_SECONDS=%r; using default", raw)
+        return _DEFAULT_SERVICE_TTL_SECONDS
+
+
+def mint_service_token(ttl_seconds: int | None = None) -> str:
+    """Mint a signed SERVICE token for a trusted server-side MCP client
+    (claudebox). Signed with the SAME transport secret, audience
+    `mcp-service`, with `iat` + `exp` but NO tenant claims (uid/email) —
+    scoping for claudebox runs stays on the registered session.
+
+    Raises RuntimeError if the signing secret is unavailable so the
+    admin endpoint can map that to a 503."""
+    import jwt
+
+    secret = _transport_secret()
+    if secret is None:
+        raise RuntimeError("transport signing secret unavailable")
+    now = int(time.time())
+    exp = now + (ttl_seconds if ttl_seconds is not None else _service_ttl_seconds())
+    payload = {
+        "aud": _SERVICE_AUD,
+        "iat": now,
+        "exp": exp,
+    }
+    return jwt.encode(payload, secret, algorithm=_TRANSPORT_ALGORITHM)
+
+
+def _resolve_user_id_by_email(email: str) -> str | None:
+    """Map an owner email to its internal user_id via the users table.
+    Opens a short-lived connection (the DSN is server-side config, never
+    caller input). Returns None if no such user exists. Kept thin so
+    tests can monkeypatch it without a real DB."""
+    from gmail_search.auth.write_user import get_user_id_by_email
+    from gmail_search.store.db import get_connection
+
+    conn = get_connection(None)
+    try:
+        return get_user_id_by_email(conn, email)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def verify_token(token: str) -> dict | None:
+    """Verify a token's signature + audience + expiry against the
+    transport secret, accepting BOTH the `mcp-transport` (tenant-bound,
+    untrusted VM) and `mcp-service` (tenantless, trusted server-side
+    client) audiences. Returns the decoded claims (including `aud`) on
+    success, None on any failure (bad sig, unknown/missing aud, expired,
+    missing exp, or no secret configured) so callers can decide
+    401-vs-passthrough without leaking which check failed.
+
+    PyJWT accepts a list for `audience` and verifies the token's `aud`
+    is one of them — a 3rd/unknown audience is rejected."""
+    import jwt
+
+    secret = _transport_secret()
+    if secret is None:
+        return None
+    try:
+        return jwt.decode(
+            token,
+            secret,
+            algorithms=[_TRANSPORT_ALGORITHM],
+            audience=[_TRANSPORT_AUD, _SERVICE_AUD],
+            # Require exp + aud to be present: a signed token lacking
+            # either is rejected rather than treated as non-expiring /
+            # unaudienced. Defence-in-depth matching the spec's "enforce
+            # exp" — PyJWT only validates exp/aud when the claim exists.
+            options={"require": ["exp", "aud"]},
+        )
+    except jwt.PyJWTError as exc:
+        logger.debug("token verification failed: %s", exc)
+        return None
+
+
+def verify_transport_token(token: str) -> dict | None:
+    """Verify a token and require the `mcp-transport` audience. Returns
+    the claims only for a tenant-bound transport token; a service token
+    (or any other aud) yields None. Kept for callers/tests that want the
+    transport audience specifically."""
+    claims = verify_token(token)
+    if claims is None or claims.get("aud") != _TRANSPORT_AUD:
+        return None
+    return claims
+
+
 def register_session(
     session_id: str,
     *,
@@ -310,6 +509,11 @@ def unregister_session(session_id: str) -> None:
     ctx = _SESSIONS.pop(session_id, None)
     if ctx is not None:
         ctx.close()
+    # Also drop any transport-scoped ephemeral contexts for this
+    # session_id (across all transport uids), closing their lazy
+    # db_conns so we don't leak PG slots.
+    for key in [k for k in _TRANSPORT_SESSIONS if k[1] == session_id]:
+        _TRANSPORT_SESSIONS.pop(key).close()
     clear_session_calls(session_id)
 
 
@@ -335,6 +539,49 @@ def _get_session(session_id: str) -> SessionContext:
     return ctx
 
 
+def _resolve_ctx(session_id: str) -> SessionContext:
+    """Resolve the SessionContext a tool call should run against,
+    preferring the transport identity when one is present.
+
+    Two regimes:
+
+    1. **Transport identity set** (a verified per-owner /mcp token):
+       the token's `uid` is the effective user_id, FULL STOP. We return
+       a TRANSPORT-LOCAL SessionContext scoped to that uid — keyed by
+       `(uid, session_id)` in `_TRANSPORT_SESSIONS`, NEVER by mutating or
+       reading the user_id off a `_SESSIONS[session_id]` entry. This is
+       the security-critical part: a token for owner A must not be able
+       to repin (poison) a session that the in-process orchestrator
+       registered for owner B — that would bleed A's identity into B's
+       subsequent legacy calls via shared mutable state. The transport
+       context is cached per `(uid, session_id)` only so repeat calls in
+       the same request reuse one (lazy) db_conn; it can't collide with
+       a plain `session_id` registration.
+
+    2. **Transport identity unset** (legacy / orchestrator path):
+       behavior is exactly as before — `_get_session` requires a
+       prior register_session and uses its user_id verbatim. The
+       registered `_SESSIONS` entry is never touched by the transport
+       path, so its user_id is whatever register_session stored."""
+    transport_uid = _transport_user_id.get()
+    if not transport_uid:
+        # No transport identity (None == in-process orchestrator path;
+        # empty is never set by the middleware but is treated the same).
+        return _get_session(session_id)
+
+    _assert_session_id(session_id)
+    key = (transport_uid, session_id)
+    ctx = _TRANSPORT_SESSIONS.get(key)
+    if ctx is None:
+        ctx = SessionContext(
+            evidence_records=None,
+            db_dsn=_resolve_server_db_dsn(),
+            user_id=transport_uid,
+        )
+        _TRANSPORT_SESSIONS[key] = ctx
+    return ctx
+
+
 # ── Tool implementations (re-routes) ───────────────────────────────
 
 
@@ -344,7 +591,7 @@ async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> di
     /api/* sets the X-User-Id header — FastAPI's `require_user_id`
     honors it iff the request also carries the MCP admin token,
     keeping the per-user gate intact even from the MCP path."""
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"searches": searches}
     response = await _search_emails_batch_impl(searches, user_id=ctx.user_id)
     _record_call(session_id, "search_emails_batch", args, response)
@@ -352,7 +599,7 @@ async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> di
 
 
 async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict:
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"filters": filters}
     response = await _query_emails_batch_impl(filters, user_id=ctx.user_id)
     _record_call(session_id, "query_emails_batch", args, response)
@@ -360,7 +607,7 @@ async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict
 
 
 async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict:
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"thread_ids": thread_ids}
     response = await _get_thread_batch_impl(thread_ids, user_id=ctx.user_id)
     _record_call(session_id, "get_thread_batch", args, response)
@@ -368,7 +615,7 @@ async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict
 
 
 async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"queries": queries}
     response = await _sql_query_batch_impl(queries, user_id=ctx.user_id)
     _record_call(session_id, "sql_query_batch", args, response)
@@ -380,14 +627,14 @@ async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
     response is prepended with a scoping preamble pinning the active
     user — the LLM uses that to write correct WHERE user_id = ... clauses.
     """
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     response = await _describe_schema_impl(user_id=ctx.user_id)
     _record_call(session_id, "describe_schema", {}, response)
     return response
 
 
 async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"items": items}
     response = await _get_attachment_batch_impl(items, user_id=ctx.user_id)
     _record_call(session_id, "get_attachment_batch", args, response)
@@ -503,7 +750,7 @@ async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> di
     in that entry's `result` as `{error: ...}`; the batch as a
     whole still succeeds so the agent can publish every other file
     even if one is missing."""
-    ctx = _get_session(session_id)
+    ctx = _resolve_ctx(session_id)
     args = {"items": items}
     if not isinstance(items, list) or not items:
         response = {"error": "items must be a non-empty list of dicts"}
@@ -711,9 +958,48 @@ def _assert_safe_bind_combination(host: str, *, token_was_generated: bool) -> No
     )
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
+
+
+def _is_loopback_client(request) -> bool:
+    """True iff the request's client address is loopback. All LEGIT admin
+    callers are host-local (the in-process orchestrator and the cc-web
+    backend both call localhost:7878). When `request.client` is None we
+    can't prove loopback — treat as non-loopback (reject)."""
+    client = getattr(request, "client", None)
+    if client is None:
+        return False
+    host = getattr(client, "host", None)
+    return host in _LOOPBACK_HOSTS
+
+
+def _admin_guard(request):
+    """Gate every /admin/* route. Two layers, checked client-FIRST so a
+    remote caller never even learns whether its token is valid:
+
+    1. The client address must be loopback (127.0.0.1 / ::1) unless the
+       operator sets `GMAIL_MCP_ADMIN_ALLOW_REMOTE=1`. Once the firewall
+       opens :7878 to the bhatti VM subnet, VMs must not be able to reach
+       /admin/* — only host-local callers may. A non-loopback caller is
+       rejected with 403 BEFORE any token check, so it never learns
+       whether its (possibly stolen) admin token is valid.
+    2. The constant-time admin bearer-token check → 401 on failure.
+
+    Returns a JSONResponse to short-circuit the route on denial, or None
+    when access is granted."""
+    from starlette.responses import JSONResponse
+
+    if os.environ.get("GMAIL_MCP_ADMIN_ALLOW_REMOTE") != "1" and not _is_loopback_client(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if not _check_admin_token(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return None
+
+
 def _check_admin_token(request) -> bool:
     """Constant-time bearer-token check. Missing / wrong header
-    yields 401."""
+    yields 401. Does NOT enforce the loopback gate — use
+    `_check_admin_access` on routes; this remains the token-only check."""
     import secrets as _secrets
 
     expected = os.environ.get("GMAIL_MCP_ADMIN_TOKEN") or ""
@@ -734,15 +1020,17 @@ def _register_admin_routes(app) -> None:
 
     @app.custom_route("/admin/calls/{session_id}", methods=["GET"])
     async def get_calls(request: Request) -> JSONResponse:
-        if not _check_admin_token(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
         session_id = request.path_params["session_id"]
         return JSONResponse({"calls": get_session_calls(session_id)})
 
     @app.custom_route("/admin/sessions", methods=["POST"])
     async def post_session(request: Request) -> JSONResponse:
-        if not _check_admin_token(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
         body = await request.json()
         session_id = body.get("session_id")
         if not session_id:
@@ -770,11 +1058,192 @@ def _register_admin_routes(app) -> None:
 
     @app.custom_route("/admin/sessions/{session_id}", methods=["DELETE"])
     async def delete_session(request: Request) -> JSONResponse:
-        if not _check_admin_token(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
         session_id = request.path_params["session_id"]
         unregister_session(session_id)
         return JSONResponse({"ok": True})
+
+    @app.custom_route("/admin/transport-tokens", methods=["POST"])
+    async def mint_transport(request: Request) -> JSONResponse:
+        """Mint a per-owner /mcp transport token. Admin-gated. The
+        owner's internal `user_id` is resolved SERVER-SIDE from the
+        email — the caller cannot supply it (a caller-supplied user_id
+        in the body is ignored), so the admin token can never be used
+        to mint a token for an arbitrary tenant id."""
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
+        if _transport_secret() is None:
+            return JSONResponse(
+                {"error": "transport signing secret unavailable"},
+                status_code=503,
+            )
+        body = await request.json()
+        email = body.get("email")
+        if not email or not isinstance(email, str):
+            return JSONResponse({"error": "email required"}, status_code=400)
+        ttl_seconds = body.get("ttl_seconds")
+        if ttl_seconds is not None and not isinstance(ttl_seconds, int):
+            return JSONResponse({"error": "ttl_seconds must be an integer"}, status_code=400)
+
+        user_id = _resolve_user_id_by_email(email)
+        if not user_id:
+            return JSONResponse({"error": "unknown email"}, status_code=404)
+
+        try:
+            token, exp = mint_transport_token(user_id=user_id, email=email, ttl_seconds=ttl_seconds)
+        except RuntimeError:
+            return JSONResponse(
+                {"error": "transport signing secret unavailable"},
+                status_code=503,
+            )
+        return JSONResponse({"token": token, "expires_at": exp, "user_id": user_id})
+
+    @app.custom_route("/admin/service-tokens", methods=["POST"])
+    async def mint_service(request: Request) -> JSONResponse:
+        """Mint a SERVICE token for a trusted server-side MCP client
+        (claudebox). Admin-gated. Carries NO tenant — the token only
+        satisfies /mcp enforcement; per-run scoping stays on the
+        registered session. Body may carry an optional integer
+        `ttl_seconds` (defaults to the long service TTL)."""
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
+        if _transport_secret() is None:
+            return JSONResponse(
+                {"error": "transport signing secret unavailable"},
+                status_code=503,
+            )
+        body = await request.json()
+        ttl_seconds = body.get("ttl_seconds")
+        if ttl_seconds is not None and not isinstance(ttl_seconds, int):
+            return JSONResponse({"error": "ttl_seconds must be an integer"}, status_code=400)
+
+        try:
+            token = mint_service_token(ttl_seconds=ttl_seconds)
+        except RuntimeError:
+            return JSONResponse(
+                {"error": "transport signing secret unavailable"},
+                status_code=503,
+            )
+        claims = verify_token(token) or {}
+        return JSONResponse({"token": token, "expires_at": claims.get("exp")})
+
+
+def _require_transport_auth() -> bool:
+    """Whether a /mcp request MUST carry a valid transport token. When
+    off (default), unauthenticated /mcp requests pass through with no
+    transport identity — preserves today's orchestrator behavior during
+    rollout. Flipped on before the bhatti firewall port is opened."""
+    return os.environ.get("GMAIL_MCP_REQUIRE_TRANSPORT_AUTH") == "1"
+
+
+class _TransportAuthMiddleware:
+    """Pure-ASGI middleware that authenticates `/mcp` requests with a
+    per-owner transport token and scopes the request to the token's
+    owner.
+
+    Only the `/mcp` path is subject to this middleware's 401 — `/admin/*`
+    keeps its own admin-token check and is passed through untouched (the
+    host mints tokens via /admin/transport-tokens before transport auth
+    would otherwise gate it).
+
+    Behavior on a /mcp request, branching on the token audience:
+      - `mcp-transport` (tenant-bound) with a non-empty `uid`: set
+        `_transport_user_id` to the token's `uid` for the duration of the
+        request; reset after. This is the untrusted bhatti VM path.
+      - `mcp-service` (tenantless, trusted server-side client like
+        claudebox): authenticated, but DO NOT set `_transport_user_id` —
+        scoping falls to the registered session via `_get_session`.
+      - Either valid aud → request passes.
+      - Missing/invalid/expired/wrong-aud (incl. a transport token with
+        no usable `uid`): 401 JSON iff `GMAIL_MCP_REQUIRE_TRANSPORT_AUTH=1`;
+        otherwise pass through with no transport identity (legacy
+        behavior)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if not path.startswith("/mcp"):
+            await self.app(scope, receive, send)
+            return
+
+        token = self._bearer_token(scope)
+        # Accepts BOTH audiences; returns the claims (incl. `aud`) or None.
+        claims = verify_token(token) if token else None
+        aud = claims.get("aud") if claims else None
+
+        # A validly-signed transport token with no `uid` carries no usable
+        # identity — treat it as an auth failure rather than scoping to an
+        # empty user_id (defence-in-depth against a malformed mint).
+        uid = str(claims.get("uid") or "") if aud == _TRANSPORT_AUD else ""
+
+        # Authenticated iff a service token, or a transport token that
+        # actually carries a uid. Everything else (no token, bad sig,
+        # unknown/missing aud, expired, transport-without-uid) is a miss.
+        authenticated = aud == _SERVICE_AUD or bool(uid)
+
+        if not authenticated:
+            if _require_transport_auth():
+                await self._unauthorized(send)
+                return
+            # Flag off: pass through with no transport identity.
+            await self.app(scope, receive, send)
+            return
+
+        if not uid:
+            # Service token: authenticated, but tenantless — scoping
+            # falls to the registered session. No identity to set.
+            await self.app(scope, receive, send)
+            return
+
+        reset_token = _transport_user_id.set(uid)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _transport_user_id.reset(reset_token)
+
+    @staticmethod
+    def _bearer_token(scope) -> str | None:
+        for key, value in scope.get("headers", []):
+            if key == b"authorization":
+                raw = value.decode("latin-1")
+                if raw.lower().startswith("bearer "):
+                    return raw[len("bearer ") :].strip()
+                return None
+        return None
+
+    @staticmethod
+    async def _unauthorized(send) -> None:
+        body = b'{"error":"transport token required"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def build_asgi_app(host: str | None = None, port: int | None = None):
+    """Return the servable ASGI app: the FastMCP streamable-HTTP app
+    (which also carries the /admin/* custom routes) wrapped in the
+    transport-auth middleware. This is what `main()` serves via uvicorn
+    and what middleware tests exercise."""
+    app = build_app(host=host, port=port)
+    return _TransportAuthMiddleware(app.streamable_http_app())
 
 
 def _make_fastmcp_app(host: str, port: int):
@@ -813,27 +1282,50 @@ def build_app(host: str | None = None, port: int | None = None):
 
 def main() -> None:
     """Entrypoint for `python -m gmail_search.agents.mcp_tools_server`.
-    FastMCP's `run("streamable-http")` spins up uvicorn internally
-    on the host/port we configured at construction."""
+
+    We build the FastMCP streamable-HTTP Starlette app, wrap it in the
+    transport-auth middleware, and serve it directly with uvicorn.
+    (FastMCP's `app.run("streamable-http")` runs uvicorn internally with
+    no hook to inject middleware, so we drive uvicorn ourselves.) The
+    inner Starlette app's lifespan — which starts FastMCP's session
+    manager — still runs because the pure-ASGI middleware forwards
+    lifespan events to it."""
+    import uvicorn
+
     logging.basicConfig(level=logging.INFO)
     token, was_generated = _resolve_admin_token()
-    app = build_app()
-    _assert_safe_bind_combination(app.settings.host, token_was_generated=was_generated)
+    fastmcp = build_app()
+    host = fastmcp.settings.host
+    port = fastmcp.settings.port
+    _assert_safe_bind_combination(host, token_was_generated=was_generated)
     if was_generated:
         token_path = _write_auto_token_file(token)
         if token_path:
             logger.info("auto-generated admin token written to %s (mode 0600)", token_path)
     logger.info(
         "starting gmail-search MCP tools server on http://%s:%s%s",
-        app.settings.host,
-        app.settings.port,
+        host,
+        port,
         DEFAULT_PATH,
     )
     # SECURITY: never log the token itself. Operators read it from
     # GMAIL_MCP_ADMIN_TOKEN (operator-supplied) or scripts/mcp_admin_token
     # (auto-generated). See `_resolve_admin_token` + `_write_auto_token_file`.
     logger.info("admin endpoints at /admin/* (token loaded from GMAIL_MCP_ADMIN_TOKEN " "env or auto-generated)")
-    app.run("streamable-http")
+    if _require_transport_auth():
+        logger.info("transport auth ENFORCED: /mcp requires a valid Bearer transport token")
+    else:
+        logger.info("transport auth NOT enforced (GMAIL_MCP_REQUIRE_TRANSPORT_AUTH unset): /mcp open")
+    asgi = _TransportAuthMiddleware(fastmcp.streamable_http_app())
+    # SECURITY: proxy_headers=False. This server is NEVER legitimately
+    # behind a trusted proxy. uvicorn's default (proxy_headers=True,
+    # forwarded_allow_ips=127.0.0.1) would let any host-local proxy hop
+    # rewrite request.client.host from an attacker-supplied
+    # X-Forwarded-For — a VM sending `X-Forwarded-For: 127.0.0.1` could
+    # then masquerade as loopback and defeat the _admin_guard loopback
+    # gate. We bind the real peer address only, so the admin gate can't
+    # be spoofed via forwarded headers.
+    uvicorn.run(asgi, host=host, port=port, proxy_headers=False)
 
 
 if __name__ == "__main__":

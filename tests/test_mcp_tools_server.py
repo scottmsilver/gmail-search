@@ -12,17 +12,20 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from gmail_search.agents import mcp_tools_server as mts
 
 
 @pytest.fixture(autouse=True)
 def _clear_session_registry():
-    """Wipe the module-level session dict before AND after each test
-    so tests can't leak context into each other."""
+    """Wipe the module-level session dicts before AND after each test
+    so tests can't leak context into each other. Includes the
+    transport-scoped store so a future transport-touching test added to
+    this file can't cross-contaminate."""
     mts._SESSIONS.clear()
+    mts._TRANSPORT_SESSIONS.clear()
     yield
     mts._SESSIONS.clear()
+    mts._TRANSPORT_SESSIONS.clear()
 
 
 # ── register_session + tool happy path ─────────────────────────────
@@ -195,7 +198,10 @@ def test_admin_get_calls_requires_bearer_token(monkeypatch):
     monkeypatch.setenv("GMAIL_MCP_ADMIN_TOKEN", "secret-xyz")
     app = mts.build_app(host="127.0.0.1", port=0)
     asgi = app.streamable_http_app()
-    client = TestClient(asgi)
+    # /admin/* is loopback-gated; report a loopback client (TestClient's
+    # default host is the synthetic "testclient") so the token gate — not
+    # the loopback gate — is what this test exercises.
+    client = TestClient(asgi, client=("127.0.0.1", 50000))
 
     # Wrong token → 401
     r = client.get("/admin/calls/sess-1", headers={"Authorization": "Bearer wrong"})
@@ -218,7 +224,7 @@ def test_admin_post_session_registers_via_http(monkeypatch):
     monkeypatch.setenv("GMAIL_MCP_ADMIN_TOKEN", "tok-abc")
     monkeypatch.setenv("DB_DSN", "postgres://server-side")
     app = mts.build_app(host="127.0.0.1", port=0)
-    client = TestClient(app.streamable_http_app())
+    client = TestClient(app.streamable_http_app(), client=("127.0.0.1", 50000))
 
     r = client.post(
         "/admin/sessions",
@@ -248,7 +254,7 @@ def test_admin_post_session_ignores_caller_supplied_db_dsn(monkeypatch):
     monkeypatch.setenv("GMAIL_MCP_ADMIN_TOKEN", "tok-abc")
     monkeypatch.setenv("DB_DSN", "postgres://trusted-server-side")
     app = mts.build_app(host="127.0.0.1", port=0)
-    client = TestClient(app.streamable_http_app())
+    client = TestClient(app.streamable_http_app(), client=("127.0.0.1", 50000))
 
     r = client.post(
         "/admin/sessions",
@@ -276,7 +282,7 @@ def test_admin_post_session_no_dsn_when_unset(monkeypatch):
     monkeypatch.delenv("DB_DSN", raising=False)
     monkeypatch.delenv("GMAIL_DB_DSN", raising=False)
     app = mts.build_app(host="127.0.0.1", port=0)
-    client = TestClient(app.streamable_http_app())
+    client = TestClient(app.streamable_http_app(), client=("127.0.0.1", 50000))
 
     r = client.post(
         "/admin/sessions",
@@ -361,7 +367,7 @@ def test_admin_post_session_accepts_conversation_id(monkeypatch):
     monkeypatch.delenv("DB_DSN", raising=False)
     monkeypatch.delenv("GMAIL_DB_DSN", raising=False)
     app = mts.build_app(host="127.0.0.1", port=0)
-    client = TestClient(app.streamable_http_app())
+    client = TestClient(app.streamable_http_app(), client=("127.0.0.1", 50000))
 
     r = client.post(
         "/admin/sessions",
