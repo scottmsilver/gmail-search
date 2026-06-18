@@ -455,6 +455,102 @@ def _persist_rich_assistant_message(
         return False
 
 
+def _expired_creds_user_message(expires_at: float | None) -> str:
+    """Actionable, human-readable message for the credential-expired
+    preflight block. Includes the local expiry time when known so the
+    user can see how stale the token is."""
+    import time  # inline: formatter strips top-level unused imports
+
+    when = ""
+    if expires_at is not None:
+        try:
+            when = " at " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_at))
+        except (OverflowError, OSError, ValueError):
+            when = ""
+    return (
+        f"Your Claude credentials expired{when}. Refresh them by running "
+        "`claude` once on the host (or re-logging in), then retry."
+    )
+
+
+def _persist_assistant_error(
+    conn,
+    *,
+    conversation_id: str | None,
+    session_id: str,
+    text: str,
+) -> bool:
+    """INSERT a minimal text-only assistant message so a FAILED deep
+    turn leaves a visible bubble on reload instead of vanishing.
+
+    Mirrors the INSERT-into-conversation_messages shape used by
+    `_persist_rich_assistant_message` (next seq, role='assistant',
+    a single text part). Best-effort: logs and returns False on any
+    error — the SSE `error` frame is the primary user-facing signal,
+    this is the durability backstop for reloads."""
+    import json as _json
+
+    if not conversation_id:
+        return False
+    try:
+        parts = [{"type": "text", "text": text}]
+        next_seq_row = conn.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq " "FROM conversation_messages WHERE conversation_id = %s",
+            (conversation_id,),
+        ).fetchone()
+        next_seq = int(next_seq_row["next_seq"])
+        conn.execute(
+            """INSERT INTO conversation_messages
+               (conversation_id, seq, role, parts) VALUES (%s, %s, 'assistant', %s)""",
+            (conversation_id, next_seq, _json.dumps(parts)),
+        )
+        conn.execute(
+            "UPDATE conversations SET updated_at = NOW() WHERE id = %s",
+            (conversation_id,),
+        )
+        conn.commit()
+        logger.info(
+            "persisted assistant error msg for conv=%s session=%s",
+            conversation_id,
+            session_id,
+        )
+        return True
+    except Exception:
+        logger.exception(f"persist assistant error message failed for conv={conversation_id} session={session_id}")
+        return False
+
+
+def _surface_deep_failure(
+    conn,
+    *,
+    conversation_id: str | None,
+    session_id: str,
+    reason: str,
+    final_answer: str,
+) -> str:
+    """Common failure-surfacing path for both deep backends: persist a
+    visible assistant bubble, finalize the session as errored, and
+    return the SSE `error` frame to yield. `reason` is the short,
+    human-readable user-facing message; `final_answer` is the short
+    summary stored on the session row.
+
+    Returns the formatted SSE frame string (caller yields it). All DB
+    work is best-effort — a persist/finalize failure still yields the
+    SSE frame so the live client sees the error."""
+    bubble = f"⚠️ Deep analysis failed: {reason} Please retry."
+    _persist_assistant_error(
+        conn,
+        conversation_id=conversation_id,
+        session_id=session_id,
+        text=bubble,
+    )
+    try:
+        finalize_session(conn, session_id, status="error", final_answer=final_answer)
+    except Exception:
+        logger.exception(f"finalize_session(error) failed for session {session_id}")
+    return _sse("error", {"session_id": session_id, "payload": {"message": reason}})
+
+
 _HISTORY_MAX_TURNS = 4
 _HISTORY_MAX_CHARS = 8000
 
@@ -639,18 +735,39 @@ async def _real_run(
     # orchestrator's InvokeFn contract; claude_native is a separate
     # path that owns its own event emission + finalization.
     backend = _deep_backend(backend)
-    # Per-turn credential refresh: catches the case where the host
-    # rotated `~/.claude/.credentials.json` between server startup and
-    # this turn (Claude Code refreshes via OAuth roughly every 24h, so
-    # a long-running web server WILL drift if we only sync at boot).
-    # No-op when mtimes already match.
+    # Per-turn credential preflight: syncs the host-rotated token into
+    # the claudebox mount AND classifies its expiry. Claude Code
+    # refreshes via OAuth roughly every 24h, so a long-running web
+    # server WILL drift if we only sync at boot — and the synced token
+    # itself may already be expired (host token lives only a few hours;
+    # nothing proactively refreshes it). `credentials_health()` does the
+    # sync internally, so we no longer call sync_credentials_if_stale()
+    # separately. `_creds_expired_message` is set (and the run blocked)
+    # only when the mount token is already dead; "expiring"/"unknown"
+    # just warn and proceed.
+    _creds_expired_message: str | None = None
     if backend in ("claude_native", "claude_code"):
         try:
-            from gmail_search.claudebox_creds import sync_credentials_if_stale
+            from gmail_search.claudebox_creds import credentials_health
 
-            sync_credentials_if_stale()
+            status, expires_at = credentials_health()
+            if status == "expired":
+                _creds_expired_message = _expired_creds_user_message(expires_at)
+                logger.error(
+                    "claudebox credentials EXPIRED for session %s (expiresAt=%s); "
+                    "blocking deep run to avoid a doomed 401 mid-flight",
+                    session_id,
+                    expires_at,
+                )
+            elif status in ("expiring", "unknown"):
+                logger.warning(
+                    "claudebox credentials health=%s for session %s (expiresAt=%s); " "proceeding (token still usable)",
+                    status,
+                    session_id,
+                    expires_at,
+                )
         except Exception:
-            logger.exception("per-turn claudebox credential sync failed (continuing)")
+            logger.exception("per-turn claudebox credential preflight failed (continuing)")
     workspace = _claudebox_workspace_for(conversation_id, session_id)
     if backend == "claude_native":
         from gmail_search.agents.runtime_claude_native import native_run
@@ -659,6 +776,26 @@ async def _real_run(
             lookup_claude_session_uuid,
             record_claude_session_uuid,
         )
+
+        # Credential preflight (BUG #1): don't launch a doomed run on an
+        # already-expired token — it would 401 mid-flight after wasting
+        # a long run. Surface an actionable failure instead.
+        if _creds_expired_message is not None:
+            try:
+                yield _surface_deep_failure(
+                    conn,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    reason=_creds_expired_message,
+                    final_answer="Deep analysis blocked: Claude credentials expired.",
+                )
+            finally:
+                try:
+                    poll_conn.close()
+                except Exception:
+                    logger.exception(f"closing poll_conn for session {session_id} failed")
+                conn.close()
+            return
 
         _ensure_workspace_dir(workspace)
         # Resolve the Claude session UUID this conversation is pinned to
@@ -761,7 +898,20 @@ async def _real_run(
                 )
             exc = native_task.exception()
             if exc is not None:
+                # BUG #2: native_run raised OUTSIDE its own try/except
+                # (its internal failures emit an error event + finalize
+                # themselves, so reaching here means the turn produced NO
+                # assistant bubble). Surface a visible failure to both the
+                # live SSE client and the DB so the turn doesn't vanish.
                 logger.exception(f"native_run raised in session {session_id}: {exc}")
+                reason = "the analysis run failed (see server logs); please retry."
+                yield _surface_deep_failure(
+                    conn,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    reason=reason,
+                    final_answer="Deep analysis failed (native_run raised).",
+                )
             else:
                 # Persist a rich assistant message into conversation_messages
                 # so the chat-thread UI shows tool calls on reload (without
@@ -801,6 +951,27 @@ async def _real_run(
             lookup_claude_session_uuid,
             record_claude_session_uuid,
         )
+
+        # Credential preflight (BUG #1): don't launch a doomed run on an
+        # already-expired token. Surface an actionable failure instead.
+        # Done before register_session_via_admin so we don't leave a
+        # dangling side-channel session registration.
+        if _creds_expired_message is not None:
+            try:
+                yield _surface_deep_failure(
+                    conn,
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    reason=_creds_expired_message,
+                    final_answer="Deep analysis blocked: Claude credentials expired.",
+                )
+            finally:
+                try:
+                    poll_conn.close()
+                except Exception:
+                    logger.exception(f"closing poll_conn for session {session_id} failed")
+                conn.close()
+            return
 
         _ensure_workspace_dir(workspace)
         await register_session_via_admin(
@@ -1006,6 +1177,20 @@ async def _real_run(
         exc = orch_task.exception()
         if exc is not None:
             logger.exception(f"orchestrator raised in session {session_id}: {exc}")
+            # BUG #2: the orchestrator already emitted an `error` event
+            # (drained above) and finalized the session as errored, so the
+            # LIVE client sees the failure — but the rich-assistant persist
+            # block is gated on success, so NO conversation_messages row is
+            # written and the turn vanishes on reload. Persist a minimal
+            # failure bubble for durability. We do NOT re-emit an `error`
+            # SSE frame (would double up the orchestrator's) or re-finalize
+            # (already status=error).
+            _persist_assistant_error(
+                conn,
+                conversation_id=conversation_id,
+                session_id=session_id,
+                text="⚠️ Deep analysis failed: the analysis run failed (see server logs); please retry.",
+            )
     finally:
         # Drop the side-channel session BEFORE closing DB conns —
         # unregister_session is itself idempotent + non-DB-touching,

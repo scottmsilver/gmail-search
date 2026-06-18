@@ -32,6 +32,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+# How far ahead of the actual expiry we start warning/blocking. A long
+# deep run can cross the boundary mid-flight, so we treat a token that
+# expires "soon" as worth a heads-up (warn) but still usable (we never
+# block on "expiring" — only on already-expired).
+_EXPIRY_SAFETY_MARGIN_SECONDS = 20 * 60
+
+
 # Host source-of-truth. Resolved lazily so tests can monkeypatch.
 def _host_credentials_path() -> Path:
     return Path.home() / ".claude" / ".credentials.json"
@@ -104,3 +111,61 @@ def sync_credentials_if_stale(*, force: bool = False) -> bool:
     except OSError as exc:
         logger.warning("claudebox credential sync failed: %s", exc)
         return False
+
+
+def _read_expires_at(path: Path) -> float | None:
+    """Read `claudeAiOauth.expiresAt` from the credentials JSON at
+    `path` and return it as an epoch value in SECONDS, or None on any
+    error (missing file, bad JSON, missing key, non-numeric value).
+
+    The on-disk value is epoch MILLISECONDS (Claude Code's convention).
+    Any value above ~1e12 is far beyond a plausible epoch-seconds
+    timestamp, so we treat it as milliseconds and divide by 1000."""
+    import json  # inline: formatter strips top-level unused imports
+
+    try:
+        raw = path.read_text()
+        data = json.loads(raw)
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return None
+        value = oauth.get("expiresAt")
+        if not isinstance(value, (int, float)):
+            return None
+        expires_at = float(value)
+        if expires_at > 1e12:
+            expires_at = expires_at / 1000.0
+        return expires_at
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def credentials_health(
+    margin_seconds: float = _EXPIRY_SAFETY_MARGIN_SECONDS,
+) -> tuple[str, float | None]:
+    """Sync host → mount, then classify the MOUNT token's freshness.
+
+    Returns `(status, expires_at_epoch_or_None)` where status is one of:
+      - "expired"  : expiry is at or before now (token is dead).
+      - "expiring" : expiry is within `margin_seconds` of now (still
+                     usable, but a long run may cross the boundary).
+      - "ok"       : expiry is comfortably in the future.
+      - "unknown"  : no expiry could be read from the mount file.
+
+    Always calls `sync_credentials_if_stale()` first so the mount
+    reflects the latest host credentials before we inspect it.
+
+    Detection only — never refreshes, never touches the host file."""
+    try:
+        sync_credentials_if_stale()
+    except Exception:  # noqa: BLE001 — best-effort; classify on whatever's on disk
+        logger.warning("credentials_health: pre-check sync failed (continuing)", exc_info=True)
+    expires_at = _read_expires_at(_mount_credentials_path())
+    if expires_at is None:
+        return ("unknown", None)
+    now = time.time()
+    if expires_at <= now:
+        return ("expired", expires_at)
+    if expires_at - now <= margin_seconds:
+        return ("expiring", expires_at)
+    return ("ok", expires_at)
