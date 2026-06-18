@@ -356,6 +356,7 @@ def find_facts(
     cap: int = 500,
     hybrid: bool = True,
     rrf_k: int = 60,
+    max_load: int = 8000,
 ) -> list[dict[str, Any]]:
     """Hybrid (semantic ∪ keyword) retrieval over this user's propositions.
 
@@ -363,14 +364,37 @@ def find_facts(
     recall (plates, VINs, codes — which embeddings can't rank). In exhaustive
     mode the candidate set is {cosine >= floor} ∪ {BM25 matches}, fused for
     ordering by Reciprocal Rank Fusion. `hybrid=False` is the pure-semantic
-    baseline (for A/B)."""
-    rows = conn.execute(
-        "SELECT id, message_id, thread_id, text, embedding FROM propositions WHERE user_id = %s",
-        (user_id,),
-    ).fetchall()
+    baseline (for A/B).
+
+    Memory-bounded for scale: when the user has more than `max_load` facts, we
+    load embeddings only for the BM25 candidate pool (the semantic re-rank set)
+    instead of the whole table — so per-call memory is O(candidates), not O(all
+    facts), and it scales to the full mailbox. Below `max_load` we still
+    brute-force the whole table for maximum recall (no regression at small
+    scale). The cost at scale: a pure-semantic match with no keyword overlap
+    won't be in the candidate pool — acceptable for enumerate-style queries
+    where the entity term is in the fact; if that recall matters, a dedicated
+    ScaNN index over propositions is the next step."""
+    dims = embedder.dimensions
+    bm_ids_full = _bm25_ids(conn, user_id, query, cap * 4) if hybrid else []
+    total = conn.execute("SELECT count(*) FROM propositions WHERE user_id = %s", (user_id,)).fetchone()[0]
+    if total <= max_load:
+        rows = conn.execute(
+            "SELECT id, message_id, thread_id, text, embedding FROM propositions WHERE user_id = %s",
+            (user_id,),
+        ).fetchall()
+    elif bm_ids_full:
+        # Bounded: re-rank only the BM25 candidate pool.
+        rows = conn.execute(
+            "SELECT id, message_id, thread_id, text, embedding FROM propositions WHERE user_id = %s AND id = ANY(%s)",
+            (user_id, bm_ids_full),
+        ).fetchall()
+    else:
+        # Large table + no keyword anchor: can't bound-load without an ANN index.
+        logger.warning("find_facts: %d facts, no BM25 anchor for %r — needs a ScaNN props index", total, query)
+        return []
     if not rows:
         return []
-    dims = embedder.dimensions
     ids = [r["id"] for r in rows]
     by_id = {r["id"]: r for r in rows}
     mat = np.zeros((len(rows), dims), dtype=np.float32)
@@ -385,7 +409,7 @@ def find_facts(
     sem_rank = {ids[int(idx)]: rank for rank, idx in enumerate(sem_order, 1)}
     sem_score = {ids[int(idx)]: float(cos[int(idx)]) for idx in sem_order}
 
-    bm_ids = _bm25_ids(conn, user_id, query, cap) if hybrid else []
+    bm_ids = bm_ids_full
     bm_rank = {pid: rank for rank, pid in enumerate(bm_ids, 1)}
 
     if exhaustive:
