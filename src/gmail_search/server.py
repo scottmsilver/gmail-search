@@ -941,6 +941,49 @@ def create_app(
             "facets": facets,
         }
 
+    @app.get("/api/find_facts")
+    async def api_find_facts(
+        q: str = Query(..., min_length=1, max_length=1000),
+        exhaustive: bool = Query(True),
+        k: int = Query(200, ge=1, le=500),
+        hybrid: bool = Query(True),
+        user_id: str = Depends(require_user_id),
+    ):
+        """Enumerate atomic facts (propositions) matching `q` across this
+        user's mailbox via hybrid (semantic ∪ keyword) retrieval. `k`
+        caps the result count. Defensive: creates the propositions table
+        + BM25 index if absent, so this works before the proposition
+        backfill has run (returning {"facts": []} on an empty table)."""
+        from gmail_search import propositions
+
+        conn = get_connection(db_path)
+        try:
+            propositions.ensure_table(conn)
+            propositions.ensure_bm25_index(conn)
+            try:
+                embedder = getattr(get_engine(user_id), "embedder", None)
+            except FileNotFoundError:
+                # New user without a built ScaNN index yet — fall through
+                # to a fresh embedder rather than 500ing.
+                embedder = None
+            if embedder is None:
+                from gmail_search.config import load_config
+                from gmail_search.embed.client import GeminiEmbedder
+
+                embedder = GeminiEmbedder(load_config())
+            facts = propositions.find_facts(
+                conn,
+                embedder,
+                user_id=user_id,
+                query=q,
+                exhaustive=exhaustive,
+                cap=k,
+                hybrid=hybrid,
+            )
+        finally:
+            conn.close()
+        return {"facts": facts}
+
     @app.get("/api/query")
     async def api_query(
         sender: str | None = Query(None, description="Substring match on from_addr"),

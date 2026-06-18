@@ -145,6 +145,74 @@ async def test_sql_query_clips_oversized_cells(monkeypatch):
     assert data["rows"][1][1] == "short"
 
 
+def _capture_get_request(monkeypatch, response_json: dict):
+    """Patch httpx.AsyncClient so each GET records the url + params it
+    was called with, and returns `response_json`. Lets a test assert
+    the path/params a tool constructs without a live server."""
+    import httpx
+
+    from gmail_search.agents import tools
+
+    captured: dict = {}
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return response_json
+
+    class _C:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url, params=None, headers=None):  # noqa: ARG002
+            captured["url"] = url
+            captured["params"] = params or {}
+            return _R()
+
+    monkeypatch.setattr(tools.httpx, "AsyncClient", _C)
+    monkeypatch.setattr(httpx, "AsyncClient", _C)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_find_facts_constructs_url_and_params(monkeypatch):
+    """find_facts must GET /api/find_facts with q + cap (k) + the
+    boolean flags coerced to lowercase strings the FastAPI bool Query
+    parses, and pass the response through unchanged."""
+    from gmail_search.agents.tools import find_facts
+
+    payload = {"facts": [{"fact": "ABC123 is a plate", "message_id": "m1", "thread_id": "t1"}]}
+    captured = _capture_get_request(monkeypatch, payload)
+
+    data = await find_facts("all my license plates", exhaustive=True, k=50)
+
+    assert captured["url"].endswith("/api/find_facts")
+    assert captured["params"]["q"] == "all my license plates"
+    assert captured["params"]["k"] == 50
+    assert captured["params"]["exhaustive"] == "true"
+    assert captured["params"]["hybrid"] == "true"
+    assert data == payload
+
+
+@pytest.mark.asyncio
+async def test_find_facts_exhaustive_false_lowercased(monkeypatch):
+    """exhaustive=False must serialize as the literal 'false' string."""
+    from gmail_search.agents.tools import find_facts
+
+    captured = _capture_get_request(monkeypatch, {"facts": []})
+    await find_facts("vins", exhaustive=False)
+    assert captured["params"]["exhaustive"] == "false"
+    assert captured["params"]["k"] == 200  # default cap
+
+
 def _schema_carries_additional_properties(schema) -> bool:
     """True if an ADK proto Schema (or any nested items/properties/anyOf
     branch) still sets `additional_properties`. Gemini's non-Vertex

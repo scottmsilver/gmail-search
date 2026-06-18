@@ -622,6 +622,19 @@ async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
     return response
 
 
+async def _tool_find_facts(session_id: str, query: str, exhaustive: bool = True, k: int = 200) -> dict:
+    """Re-route to `find_facts`. Threads `user_id` from the
+    SessionContext so the /api/find_facts call is scoped to the
+    session's user via the X-User-Id + admin-token pair."""
+    from gmail_search.agents.tools import find_facts as _find_facts_impl
+
+    ctx = _resolve_ctx(session_id)
+    args = {"query": query, "exhaustive": exhaustive, "k": k}
+    response = await _find_facts_impl(query, exhaustive=exhaustive, k=k, user_id=ctx.user_id)
+    _record_call(session_id, "find_facts", args, response)
+    return response
+
+
 async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
     """Re-route to `describe_schema`. Threads `user_id` so the schema
     response is prepended with a scoping preamble pinning the active
@@ -854,6 +867,24 @@ SQL_QUERY_BATCH_DESC = (
     "BM25 prefilter + LIKE refinement is allowed (use only when BM25 "
     "truly cannot express the predicate). Cells > 8000 chars are "
     f"clipped. {SESSION_PARAM_NOTE}"
+)
+
+FIND_FACTS_DESC = (
+    "ENUMERATE every instance of an entity/attribute across the whole "
+    "mailbox in ONE call — instead of issuing many `search_emails_batch` "
+    "reformulations and hoping you covered them all. Use for exhaustive "
+    '"list ALL my X" questions: all my license plates, all my account '
+    "numbers, every flight booked, every address lived at. It runs "
+    "hybrid (semantic ∪ keyword) retrieval over pre-extracted atomic "
+    "facts ('propositions') mined from the mailbox, so bare identifiers "
+    "(plates, VINs, codes) that embeddings rank near-zero are still "
+    "recalled via the BM25 half. `query` is the entity/attribute to "
+    "enumerate; `exhaustive` (default true) returns the full candidate "
+    "set; `k` (default 200) caps the count. Returns "
+    "`{facts: [{fact, message_id, thread_id, cosine, bm25}, ...]}`. Each "
+    "fact carries a `message_id` back-pointer — use `get_thread_batch` "
+    "with it to cite/verify the source before reporting. If propositions "
+    f"haven't been backfilled yet, `facts` is `[]`. {SESSION_PARAM_NOTE}"
 )
 
 DESCRIBE_SCHEMA_DESC = (
@@ -1350,6 +1381,7 @@ def _make_fastmcp_app(host: str, port: int):
     app.tool(name="query_emails_batch", description=QUERY_BATCH_DESC)(_tool_query_emails_batch)
     app.tool(name="get_thread_batch", description=THREAD_BATCH_DESC)(_tool_get_thread_batch)
     app.tool(name="sql_query_batch", description=SQL_QUERY_BATCH_DESC)(_tool_sql_query_batch)
+    app.tool(name="find_facts", description=FIND_FACTS_DESC)(_tool_find_facts)
     app.tool(name="describe_schema", description=DESCRIBE_SCHEMA_DESC)(_tool_describe_schema)
     app.tool(name="get_attachment_batch", description=ATTACHMENT_BATCH_DESC)(_tool_get_attachment_batch)
     app.tool(name="publish_artifact_batch", description=PUBLISH_ARTIFACT_BATCH_DESC)(_tool_publish_artifact_batch)

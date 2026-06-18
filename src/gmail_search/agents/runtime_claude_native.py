@@ -57,6 +57,12 @@ Always pass the `session_id` provided in this prompt as the first arg.
   many queries concurrently. ParadeDB BM25 is enforced server-side
   (LIKE/ILIKE on indexed columns is rejected). Call `describe_schema`
   first if unsure about column names.
+- `find_facts(session_id, query, exhaustive?, k?)` — ENUMERATE every
+  instance of an entity/attribute across the whole mailbox in ONE call
+  (e.g. "all my license plates", "all my account numbers"). Use this
+  for exhaustive "list ALL my X" questions instead of many
+  `search_emails_batch` reformulations. Each returned fact carries a
+  `message_id` back-pointer to cite/verify via `get_thread_batch`.
 - `describe_schema(session_id)` — markdown docs for every queryable
   table. Cheap; call before writing a non-trivial sql_query.
 - `publish_artifact_batch(session_id, items=[{path, name?,

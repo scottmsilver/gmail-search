@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
 from gmail_search.agents import mcp_tools_server as mts
 
 
@@ -124,6 +125,7 @@ def test_build_app_registers_all_tools():
         "query_emails_batch",
         "get_thread_batch",
         "sql_query_batch",
+        "find_facts",
         "describe_schema",
         "get_attachment_batch",
         "publish_artifact_batch",

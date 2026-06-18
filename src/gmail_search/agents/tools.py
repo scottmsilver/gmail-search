@@ -172,6 +172,44 @@ async def search_emails(
     return data
 
 
+# ── find_facts ─────────────────────────────────────────────────────
+
+
+async def find_facts(
+    query: str,
+    *,
+    exhaustive: bool = True,
+    k: int = 200,
+    user_id: str | None = None,
+) -> dict:
+    """ENUMERATE every instance of an entity/attribute across the whole
+    mailbox in ONE call — instead of issuing many `search_emails`
+    reformulations and hoping you covered them all.
+
+    Use this for exhaustive "list ALL my X" questions: all my license
+    plates, all my account numbers, every flight I've booked, every
+    address I've lived at. It runs hybrid (semantic ∪ keyword) retrieval
+    over pre-extracted atomic facts ("propositions") mined from the
+    mailbox, so bare identifiers (plates, VINs, codes) that embeddings
+    rank near-zero are still recalled via the BM25 half.
+
+    Returns `{"facts": [{fact, message_id, thread_id, cosine, bm25}, ...]}`.
+    Each fact carries a `message_id` back-pointer — use it (via
+    `get_thread`) to cite and verify the source before reporting it.
+    If propositions haven't been backfilled yet, `facts` is `[]`.
+
+    `exhaustive=True` (default) returns the full candidate set above the
+    similarity floor; `k` caps the number of facts returned.
+    """
+    params: dict[str, Any] = {
+        "q": query,
+        "exhaustive": str(exhaustive).lower(),
+        "k": k,
+        "hybrid": "true",
+    }
+    return await _get("/api/find_facts", params=params, user_id=user_id)
+
+
 # ── query_emails ───────────────────────────────────────────────────
 
 
