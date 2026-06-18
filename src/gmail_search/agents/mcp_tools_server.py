@@ -1140,6 +1140,36 @@ def _require_transport_auth() -> bool:
     return os.environ.get("GMAIL_MCP_REQUIRE_TRANSPORT_AUTH") == "1"
 
 
+# Set by _make_fastmcp_app when GMAIL_MCP_OAUTH_ENABLED: the live OAuth
+# provider, so the transport middleware can ALSO accept OAuth-issued access
+# tokens (Claude's custom-connector path) and scope them to the owner.
+_active_oauth_provider = None
+_oauth_owner_uid_cache: str | None = None
+
+
+def _oauth_owner_uid() -> str:
+    """Resolve (and cache) the owner's internal uid for OAuth-authenticated
+    requests. OAuth tokens are only ever issued to the single owner (the
+    broker Google-login gate enforces it), so every OAuth token scopes to
+    this one uid."""
+    global _oauth_owner_uid_cache
+    if _oauth_owner_uid_cache is not None:
+        return _oauth_owner_uid_cache
+    try:
+        from gmail_search.agents.mcp_oauth import owner_email
+        from gmail_search.auth.write_user import get_user_id_by_email
+        from gmail_search.store.db import get_connection
+
+        conn = get_connection(None)
+        try:
+            _oauth_owner_uid_cache = get_user_id_by_email(conn, owner_email()) or ""
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — never let scoping resolution crash auth
+        _oauth_owner_uid_cache = ""
+    return _oauth_owner_uid_cache
+
+
 class _TransportAuthMiddleware:
     """Pure-ASGI middleware that authenticates `/mcp` requests with a
     per-owner transport token and scopes the request to the token's
@@ -1191,7 +1221,33 @@ class _TransportAuthMiddleware:
         # unknown/missing aud, expired, transport-without-uid) is a miss.
         authenticated = aud == _SERVICE_AUD or bool(uid)
 
+        # OAuth path: when an OAuth provider is active, also accept its
+        # access tokens (Claude's custom-connector path). They are only ever
+        # issued to the owner, so scope the request to the owner's uid. Use
+        # load_access_token (OAuth tokens only) — NOT verify_token, which
+        # would recurse back into this transport-token check.
+        # Only genuine OAuth access tokens (minted as "at_<hex>") take the
+        # owner-scoped OAuth path. Transport/service JWTs (the "eyJ..." form)
+        # are handled by verify_token above, so a malformed uid-less transport
+        # token can't fall through here and get silently upgraded to owner.
+        if not authenticated and token and token.startswith("at_") and _active_oauth_provider is not None:
+            try:
+                oauth_tok = await _active_oauth_provider.load_access_token(token)
+            except Exception:  # noqa: BLE001
+                oauth_tok = None
+            if oauth_tok is not None:
+                authenticated = True
+                uid = _oauth_owner_uid()
+
         if not authenticated:
+            # OAuth on: don't emit our plain 401 — pass through so the SDK's
+            # RequireAuthMiddleware produces the spec-compliant 401 with the
+            # RFC 9728 WWW-Authenticate resource-metadata pointer Claude needs
+            # to discover the OAuth flow. The SDK gate still enforces auth, so
+            # this doesn't open /mcp.
+            if _active_oauth_provider is not None:
+                await self.app(scope, receive, send)
+                return
             if _require_transport_auth():
                 await self._unauthorized(send)
                 return
@@ -1248,15 +1304,36 @@ def build_asgi_app(host: str | None = None, port: int | None = None):
 
 def _make_fastmcp_app(host: str, port: int):
     """Construct the FastMCP instance and register the five tools.
-    Split out so tests can build an app without binding a port."""
+    Split out so tests can build an app without binding a port.
+
+    When GMAIL_MCP_OAUTH_ENABLED is set, the app additionally runs as an
+    OAuth 2.1 authorization server (DCR + PKCE + RFC 8414/9728 metadata,
+    Google-gated via the broker) so Claude can add it as a custom
+    connector. Flag off → byte-for-byte the prior behavior. See mcp_oauth.
+    """
     from mcp.server.fastmcp import FastMCP
 
-    app = FastMCP(
-        name="gmail-search-tools",
-        host=host,
-        port=port,
-        streamable_http_path=DEFAULT_PATH,
-    )
+    from gmail_search.agents import mcp_oauth
+
+    global _active_oauth_provider
+    oauth_provider = None
+    if mcp_oauth.is_oauth_enabled():
+        auth_settings, oauth_provider = mcp_oauth.build_auth_settings()
+        app = FastMCP(
+            name="gmail-search-tools",
+            host=host,
+            port=port,
+            streamable_http_path=DEFAULT_PATH,
+            auth_server_provider=oauth_provider,
+            auth=auth_settings,
+        )
+    else:
+        app = FastMCP(
+            name="gmail-search-tools",
+            host=host,
+            port=port,
+            streamable_http_path=DEFAULT_PATH,
+        )
 
     app.tool(name="search_emails_batch", description=SEARCH_BATCH_DESC)(_tool_search_emails_batch)
     app.tool(name="query_emails_batch", description=QUERY_BATCH_DESC)(_tool_query_emails_batch)
@@ -1267,6 +1344,12 @@ def _make_fastmcp_app(host: str, port: int):
     app.tool(name="publish_artifact_batch", description=PUBLISH_ARTIFACT_BATCH_DESC)(_tool_publish_artifact_batch)
 
     _register_admin_routes(app)
+
+    if oauth_provider is not None:
+        mcp_oauth.register_oauth_callback_route(app, oauth_provider)
+    # Publish (or clear) the active provider so _TransportAuthMiddleware can
+    # accept OAuth access tokens and scope them to the owner.
+    _active_oauth_provider = oauth_provider
 
     return app
 
