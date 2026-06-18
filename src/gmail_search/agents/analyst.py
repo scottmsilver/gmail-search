@@ -46,6 +46,12 @@ and a read-only `db` psycopg connection to Postgres (tables:
 `topics`, `message_topics`, `contact_frequency`, `embeddings`,
 `term_aliases`).
 
+PERF: BM25 search (`id @@@ 'field:term'`) is fast, but per-row text
+processing over `body_text` (`regexp_replace`/`~*`/`substring`) across a
+broad match set is slow. Prefer the precomputed `message_summaries.summary`
+over re-deriving text from raw `body_text`; if you must touch `body_text`,
+filter + LIMIT first, then process only that small final set.
+
 Use the tool when the question actually needs computation —
 aggregations, plots, clustering, ratios, trend detection. Skip it
 when the question is already answered by the evidence handed to

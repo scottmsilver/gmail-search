@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,25 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────
 SQL_MAX_ROWS = 500
 SQL_MAX_QUERY_CHARS = 5000
-SQL_TIMEOUT_SEC = 10.0
+# Per-query statement_timeout for the read-only /api/sql path. These are
+# analytical queries the agent generates (BM25 search + text extraction over
+# body_text across large match sets), which legitimately run several seconds;
+# 10s was too tight. Tunable via env without a code change.
+try:
+    SQL_TIMEOUT_SEC = float(os.environ.get("GMAIL_SQL_TIMEOUT_SEC", "30.0"))
+except ValueError:
+    SQL_TIMEOUT_SEC = 30.0
+# Reject footgun values: 0 DISABLES Postgres' statement_timeout (unbounded
+# queries), and NaN/inf would later break int(SQL_TIMEOUT_SEC * 1000). Fall
+# back to the default and clamp to a sane [1, 120]s window.
+if SQL_TIMEOUT_SEC != SQL_TIMEOUT_SEC or SQL_TIMEOUT_SEC <= 0 or SQL_TIMEOUT_SEC > 120:
+    SQL_TIMEOUT_SEC = 30.0
+
+# How long to keep a hot-swapped-out ScaNN searcher alive before closing it.
+# Long enough for any in-flight query that captured the old searcher to finish
+# (queries are sub-second), short enough that we don't keep a full ~3-4 GB
+# index copy resident between swaps (which land ~15 min apart). Tunable.
+RETIRED_SEARCHER_GRACE_SECONDS = 5.0
 
 # Conversation IDs are interpolated into filesystem paths
 # (`deep-conv-<id>`) and used as PKs in `conversation_claude_session`.
@@ -669,11 +688,11 @@ def create_app(
 
     _engines: dict[str, SearchEngine] = {}
     _engine_index_dirs: dict[str, Path] = {}
-    # ScaNN searcher retired on the PREVIOUS swap, kept one cycle so any
-    # in-flight query still holding it finishes before we close it (swaps are
-    # minutes apart; queries are sub-second). Closed on the next swap.
-    _retired_searchers: dict[str, object] = {}
     _engine_lock = _threading.Lock()
+    # Strong refs to in-flight retired-searcher close tasks. asyncio only holds
+    # weak refs to tasks, so without this an unreferenced close task can be GC'd
+    # mid-sleep — silently leaking the index copy we meant to free.
+    _pending_closes: set = set()
 
     def _user_index_dir(user_id: str) -> Path:
         # Per-user fallback dir; resolve_active_index_dir uses the DB
@@ -735,6 +754,36 @@ def create_app(
             _engine_index_dirs[bootstrap_uid] = current
         logger.info(f"engine prewarmed for {bootstrap_uid} in {_time.time() - start:.1f}s (index={current.name})")
 
+    def _schedule_retired_searcher_close(old_searcher: object, user_id: str) -> None:
+        """Free a hot-swapped-out searcher promptly after a short grace delay.
+
+        The atomic swap is already done, so new queries use the new searcher;
+        only requests that captured the OLD searcher before the swap still hold
+        it. Those are sub-second, so we wait RETIRED_SEARCHER_GRACE_SECONDS to
+        let them drain, then close in a thread (the C++ teardown can block).
+        Closing promptly — rather than holding the retired copy until the next
+        swap ~15 min later — reclaims ~3-4 GB of steady-state RSS."""
+        import asyncio as _asyncio
+
+        async def _close_after_grace() -> None:
+            try:
+                await _asyncio.sleep(RETIRED_SEARCHER_GRACE_SECONDS)
+                await _asyncio.to_thread(old_searcher.close)
+            except _asyncio.CancelledError:
+                # Server shutting down — close inline so we don't leak the C++
+                # index, then re-raise to honor the cancellation.
+                try:
+                    old_searcher.close()
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                logger.warning(f"retired searcher close failed for {user_id}: {e}")
+
+        task = _asyncio.create_task(_close_after_grace())
+        _pending_closes.add(task)
+        task.add_done_callback(_pending_closes.discard)
+
     async def _engine_swap_watcher() -> None:
         """Background task: poll every cached user's index pointer.
         When one moves (a reindex landed for that user), build the
@@ -764,14 +813,11 @@ def create_app(
                     old_searcher = await _asyncio.to_thread(engine.reload_index, current)
                     with _engine_lock:
                         _engine_index_dirs[user_id] = current
-                        # Close the searcher retired on the PRIOR swap (its
-                        # in-flight queries are long done) — frees ScaNN's C++
-                        # memory via refcounting, no event-loop-stalling
-                        # gc.collect(). Stash this one to close on the next swap.
-                        stale = _retired_searchers.get(user_id)
-                        _retired_searchers[user_id] = old_searcher
-                    if stale is not None:
-                        stale.close()
+                    # Free the retired searcher promptly after a grace delay
+                    # (instead of holding a full ~3-4 GB index copy resident
+                    # until the next swap) — see _schedule_retired_searcher_close.
+                    if old_searcher is not None:
+                        _schedule_retired_searcher_close(old_searcher, user_id)
                     logger.info(
                         f"engine index hot-swapped for {user_id} in {_time.time() - start:.1f}s "
                         f"(index={current.name})"
@@ -1992,6 +2038,21 @@ def create_app(
             "  SELECT m.subject FROM messages m\n"
             "    JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id\n"
             "   WHERE m.user_id = '" + user_id + "' AND m.id @@@ 'subject:invoice';\n\n"
+            "---\n\n"
+            "## Performance (write FAST SQL)\n\n"
+            "BM25 search (`id @@@ 'field:term'`) is fast even across the whole\n"
+            "mailbox. What's slow is **per-row text processing over `body_text`**\n"
+            "(`regexp_replace`, `~*`, `substring`, `split_part`) — bodies are large\n"
+            "HTML, and a broad match is tens of thousands of rows, so this blows the\n"
+            "query timeout. Two rules:\n\n"
+            "1. **Prefer `message_summaries.summary`** (a precomputed, cleaned, plain-\n"
+            "   text summary per message) over re-deriving text from raw `body_text`.\n"
+            "   Join `message_summaries ms ON ms.message_id = m.id AND ms.user_id =\n"
+            "   m.user_id` and read `ms.summary` instead of regexing `m.body_text`.\n"
+            "2. If you MUST touch `body_text`, **narrow first**: apply your\n"
+            "   `user_id` / `date` / `@@@` filters and `LIMIT` in a CTE or subquery,\n"
+            "   then run any `regexp_replace`/`~*` only on that small final set —\n"
+            "   never on the full match set.\n\n"
             "---\n\n"
         )
         return {"markdown": preamble + describe_schema_for_llm()}
