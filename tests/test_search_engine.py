@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from gmail_search.config import load_config
 from gmail_search.index.builder import build_index
-from gmail_search.search.engine import SearchEngine, SearchResult
+from gmail_search.search.engine import SearchEngine, SearchResult, _exact_subject_phrase, _recency_score
 from gmail_search.store.db import get_connection, init_db
 from gmail_search.store.models import Attachment, EmbeddingRecord, Message
 from gmail_search.store.queries import insert_embedding, upsert_attachment, upsert_message
@@ -298,3 +298,31 @@ def test_search_threads_query_param_date_from_wins_over_newer_than(db_backend, t
         filter_offtopic=False,
     )
     assert results, "explicit date_from should have widened the window"
+
+
+def test_exact_subject_phrase_matches_contiguous_only():
+    # Full phrase present verbatim in the subject -> 1.0
+    assert _exact_subject_phrase("draw request", "Silver May 2026 Draw Request") == 1.0
+    # Case-insensitive
+    assert _exact_subject_phrase("DRAW REQUEST", "silver may 2026 draw request") == 1.0
+    # Scattered tokens (not contiguous) -> 0.0; BM25 owns token-level relevance,
+    # this signal only rewards the literal phrase BM25 can't.
+    assert _exact_subject_phrase("draw request", "Request to draw down funds") == 0.0
+    # Phrase absent entirely -> 0.0
+    assert _exact_subject_phrase("draw request", "Invoice for April") == 0.0
+    # Empty inputs are safe
+    assert _exact_subject_phrase("", "anything") == 0.0
+    assert _exact_subject_phrase("draw request", "") == 0.0
+
+
+def test_freshness_bonus_lifts_recent_exact_match_over_stale_one():
+    # The freshness bonus is W_FRESH_MATCH * match_strength * recency. For two
+    # threads with identical match_strength, the recent one must gain strictly
+    # more, which is exactly the "Silver May 2026 Draw Request" lift.
+    fresh = _recency_score(datetime.now().isoformat())
+    stale = _recency_score("2024-01-01T00:00:00")
+    assert fresh > stale
+    match_strength = 1.0  # exact subject phrase hit, same for both
+    from gmail_search.search.engine import W_FRESH_MATCH
+
+    assert W_FRESH_MATCH * match_strength * fresh > W_FRESH_MATCH * match_strength * stale

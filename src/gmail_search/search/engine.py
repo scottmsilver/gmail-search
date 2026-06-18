@@ -25,6 +25,15 @@ W_REPLIED = 0.08
 W_MATCH_DENSITY = 0.06
 W_THREAD_SIZE = 0.04
 
+# Freshness-of-match bonus, added ON TOP of the normalized 1.0 blend (like the
+# contact bonus). Rewards results that are BOTH recent AND a strong match:
+# bonus = W_FRESH_MATCH * match_strength * recency, where match_strength is the
+# stronger of semantic similarity and an exact subject-phrase hit. Old exact
+# matches earn almost nothing (recency has decayed); a freshly-arrived, on-point
+# message (e.g. this month's "Draw Request") floats up past deep but stale
+# threads instead of being buried by their thread-size / reply signals.
+W_FRESH_MATCH = 0.18
+
 # When structured filters (from:/to:/subject:/date/has_attachment) pre-restrict
 # the corpus, we run vector similarity directly over the restricted set if
 # it's small enough — brute-force cosine over a few thousand embeddings is
@@ -88,6 +97,21 @@ def _match_density_score(match_count: int, thread_message_count: int) -> float:
     if thread_message_count == 0:
         return 0.0
     return min(match_count / thread_message_count, 1.0)
+
+
+def _exact_subject_phrase(query: str, subject: str) -> float:
+    """1.0 when the full query phrase appears verbatim in the subject, else 0.0.
+
+    This is the one match signal BM25 (`ts_rank`) does NOT specially reward — a
+    plain tsquery treats the words as independent lexemes, so a contiguous
+    subject-line hit ("draw request" in "Silver May 2026 Draw Request") scores no
+    higher than scattered body tokens. Token-level / TF-IDF relevance is left to
+    BM25; semantic closeness to similarity. We only add the literal-phrase lift.
+    """
+    if not query or not subject:
+        return 0.0
+    q = query.strip().lower()
+    return 1.0 if q and q in subject.lower() else 0.0
 
 
 def _thread_size_score(message_count: int) -> float:
@@ -891,6 +915,10 @@ class SearchEngine:
                     best_bm25 = max(best_bm25, bm25_scores[msg_id])
             thread_bm25[thread_id] = best_bm25
 
+        # Max-scale BM25 to 0-1 for use in the freshness bonus's match_strength.
+        # (The blend itself still uses raw bm25 via W_BM25, unchanged.)
+        max_bm25 = max(thread_bm25.values(), default=0.0)
+
         # Bulk-fetch precomputed thread metadata (one query instead of N)
         import json as _json
 
@@ -959,6 +987,17 @@ class SearchEngine:
                 + W_THREAD_SIZE * tsize
                 + 0.08 * contact  # contact frequency bonus (on top of 1.0 total)
             )
+
+            # Freshness-of-match bonus: reward results that are BOTH a strong
+            # match AND recent. match_strength reuses the signals we already
+            # trust — semantic similarity and (normalized) BM25 token relevance —
+            # plus the one thing BM25 misses: an exact subject-phrase hit. A
+            # freshly-arrived on-point message thus rises past deep-but-stale
+            # threads. Decays with recency, so old strong matches are unaffected.
+            bm25_norm = (bm25 / max_bm25) if max_bm25 > 0 else 0.0
+            exact = _exact_subject_phrase(pq.text or expanded_query, subject)
+            match_strength = max(sim, bm25_norm, exact)
+            blended += W_FRESH_MATCH * match_strength * recency
 
             thread_results.append(
                 ThreadResult(
