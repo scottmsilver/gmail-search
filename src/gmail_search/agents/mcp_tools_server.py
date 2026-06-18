@@ -1151,9 +1151,13 @@ def _oauth_owner_uid() -> str:
     """Resolve (and cache) the owner's internal uid for OAuth-authenticated
     requests. OAuth tokens are only ever issued to the single owner (the
     broker Google-login gate enforces it), so every OAuth token scopes to
-    this one uid."""
+    this one uid.
+
+    Returns "" on failure and does NOT cache the failure — a transient DB
+    hiccup must not stick an empty uid until restart. Callers MUST treat ""
+    as a hard auth failure (fail closed), never as a default tenant."""
     global _oauth_owner_uid_cache
-    if _oauth_owner_uid_cache is not None:
+    if _oauth_owner_uid_cache:  # only a non-empty uid is ever cached
         return _oauth_owner_uid_cache
     try:
         from gmail_search.agents.mcp_oauth import owner_email
@@ -1162,12 +1166,14 @@ def _oauth_owner_uid() -> str:
 
         conn = get_connection(None)
         try:
-            _oauth_owner_uid_cache = get_user_id_by_email(conn, owner_email()) or ""
+            uid = get_user_id_by_email(conn, owner_email()) or ""
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 — never let scoping resolution crash auth
-        _oauth_owner_uid_cache = ""
-    return _oauth_owner_uid_cache
+        uid = ""
+    if uid:
+        _oauth_owner_uid_cache = uid
+    return uid
 
 
 class _TransportAuthMiddleware:
@@ -1236,8 +1242,13 @@ class _TransportAuthMiddleware:
             except Exception:  # noqa: BLE001
                 oauth_tok = None
             if oauth_tok is not None:
-                authenticated = True
-                uid = _oauth_owner_uid()
+                owner_uid = _oauth_owner_uid()
+                if owner_uid:
+                    authenticated = True
+                    uid = owner_uid
+                # else: owner uid unresolved → do NOT authenticate (fail
+                # closed). Falls through to the SDK gate, which also can't
+                # scope it, rather than scoping to an empty/default tenant.
 
         if not authenticated:
             # OAuth on: don't emit our plain 401 — pass through so the SDK's
@@ -1347,6 +1358,17 @@ def _make_fastmcp_app(host: str, port: int):
 
     if oauth_provider is not None:
         mcp_oauth.register_oauth_callback_route(app, oauth_provider)
+        # Resolve the owner uid eagerly and FAIL STARTUP if it can't be
+        # resolved — an OAuth server that can't map its tokens to the owner
+        # would fail open (empty-tenant scoping). Better a loud refusal than
+        # a silent default-tenant exposure. Success populates the cache, so
+        # a later transient DB hiccup at request time still has the uid.
+        if not _oauth_owner_uid():
+            raise RuntimeError(
+                "GMAIL_MCP_OAUTH_ENABLED=1 but the owner uid for "
+                f"{mcp_oauth.owner_email()!r} could not be resolved — refusing to "
+                "start the OAuth server (would scope tokens to an empty tenant)."
+            )
     # Publish (or clear) the active provider so _TransportAuthMiddleware can
     # accept OAuth access tokens and scope them to the owner.
     _active_oauth_provider = oauth_provider
