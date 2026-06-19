@@ -357,6 +357,7 @@ def find_facts(
     hybrid: bool = True,
     rrf_k: int = 60,
     max_load: int = 8000,
+    owner_boost: float = 0.02,
 ) -> list[dict[str, Any]]:
     """Hybrid (semantic ∪ keyword) retrieval over this user's propositions.
 
@@ -412,6 +413,24 @@ def find_facts(
     bm_ids = bm_ids_full
     bm_rank = {pid: rank for rank, pid in enumerate(bm_ids, 1)}
 
+    # Owner-scoping: boost facts that are ABOUT the mailbox owner so "my X"
+    # ranks the owner's facts above third parties (e.g. a neighbor's plate).
+    # Soft boost, not a filter — owner-relevant facts that don't name the owner
+    # aren't dropped. Owner identity from owner_string() (env-configured).
+    owner_terms: list[str] = []
+    if owner_boost > 0:
+        os_ = owner_string().lower()
+        full = re.sub(r"\s*\(.*\)", "", os_).strip()  # "scott silver"
+        m = re.search(r"\(([^@()]+)@", os_)  # email local part
+        local = m.group(1) if m else ""
+        owner_terms = [t for t in (full, local) if len(t) >= 4]
+    owner_pids = set()
+    if owner_terms:
+        for pid in set(ids) | set(bm_ids):
+            r = by_id.get(pid)
+            if r and any(t in r["text"].lower() for t in owner_terms):
+                owner_pids.add(pid)
+
     if exhaustive:
         candidates = {pid for pid in ids if sem_score.get(pid, 0.0) >= floor} | set(bm_ids)
     else:
@@ -424,6 +443,8 @@ def find_facts(
             s += 1.0 / (rrf_k + sem_rank[pid])
         if pid in bm_rank:
             s += 1.0 / (rrf_k + bm_rank[pid])
+        if pid in owner_pids:
+            s += owner_boost
         return s
 
     out: list[dict[str, Any]] = []
@@ -440,6 +461,7 @@ def find_facts(
                 "thread_id": r["thread_id"],
                 "cosine": round(sem_score.get(pid, 0.0), 4),
                 "bm25": pid in bm_rank,
+                "owner": pid in owner_pids,
             }
         )
         if len(out) >= cap:
