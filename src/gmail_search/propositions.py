@@ -260,8 +260,108 @@ def backfill(
     return stats
 
 
-# Query tokens carrying no discriminative signal for BM25 matching.
-_STOP = {"my", "the", "a", "an", "of", "is", "are", "was", "were", "to", "for", "and", "or", "in", "on", "me", "i"}
+# Query tokens carrying no discriminative signal for BM25 matching. Includes
+# interrogatives, light/possession verbs, and pronouns/determiners so a natural
+# question like "what cars do I own" reduces to its content words ("cars"); entity
+# words (tesla/car/plate/vin/etc.) are deliberately NOT here.
+_STOP = frozenset(
+    {
+        "my",
+        "the",
+        "a",
+        "an",
+        "of",
+        "is",
+        "are",
+        "was",
+        "were",
+        "to",
+        "for",
+        "and",
+        "or",
+        "in",
+        "on",
+        "me",
+        "i",
+        "what",
+        "who",
+        "whom",
+        "whose",
+        "which",
+        "where",
+        "when",
+        "why",
+        "how",
+        "do",
+        "does",
+        "did",
+        "doing",
+        "done",
+        "own",
+        "owns",
+        "owned",
+        "have",
+        "has",
+        "had",
+        "get",
+        "got",
+        "can",
+        "will",
+        "would",
+        "should",
+        "mine",
+        "your",
+        "yours",
+        "our",
+        "ours",
+        "their",
+        "his",
+        "her",
+        "its",
+        "it",
+        "you",
+        "we",
+        "they",
+        "he",
+        "she",
+        "that",
+        "this",
+        "these",
+        "those",
+        "all",
+        "any",
+        "some",
+        "as",
+        "at",
+        "by",
+        "from",
+        "with",
+        "but",
+        "not",
+    }
+)
+
+
+def _singularize(tok: str) -> str | None:
+    """Best-effort rule-based singular of a query token, or None when no distinct
+    singular applies. Stdlib-only (the project formatter strips unused imports, so
+    no NLTK/inflect dependency). Conservative: guards short tokens and "...ss"
+    (so "address" is never mangled to "addres")."""
+    if len(tok) <= 3 or tok.endswith("ss"):
+        return None
+    if tok.endswith("ies"):
+        return tok[:-3] + "y"
+    if tok.endswith(("ches", "shes", "xes", "ses", "zes")):
+        return tok[:-2]
+    if tok.endswith("s"):
+        return tok[:-1]
+    return None
+
+
+def _query_terms(query: str) -> list[str]:
+    """Discriminative lowercase tokens for the BM25 path: alphanumerics minus
+    stopwords. The single source of truth for query tokenization."""
+    return [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 1 and t not in _STOP]
 
 
 def ensure_bm25_index(conn) -> None:
@@ -278,10 +378,19 @@ def _bm25_ids(conn, user_id: str, query: str, limit: int) -> list[int]:
     """IDs of propositions whose text matches the query terms, BM25-ranked.
     A bare `@@@ 'license plate'` parses against the key_field (id), so we
     field-qualify each token against `text` (the same gotcha as messages)."""
-    toks = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 1 and t not in _STOP]
+    toks = _query_terms(query)
     if not toks:
         return []
-    pq = " OR ".join(f"text:{t}" for t in toks)
+    # Match each content token and its singular variant, so "cars" also recalls
+    # facts phrased with "car". Bare alphanumerics (plates/VINs) get no variant.
+    groups = []
+    for t in toks:
+        sing = _singularize(t)
+        if sing and sing != t and sing not in _STOP:
+            groups.append(f"(text:{t} OR text:{sing})")
+        else:
+            groups.append(f"text:{t}")
+    pq = " OR ".join(groups)
     try:
         rows = conn.execute(
             """SELECT id FROM propositions
@@ -401,6 +510,9 @@ def find_facts(
     mat = np.zeros((len(rows), dims), dtype=np.float32)
     for i, r in enumerate(rows):
         mat[i] = np.frombuffer(r["embedding"], dtype=np.float32)[:dims]
+    # NB: embed the FULL natural-language query here on purpose — stopword
+    # stripping is only for the BM25 lexical path (_query_terms). The embedding
+    # benefits from the full phrasing; do not "fix" this to use _query_terms.
     qv = np.asarray(embedder.embed_query(query), dtype=np.float32)[:dims]
     mat_n = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-8)
     qn = qv / (np.linalg.norm(qv) + 1e-8)
