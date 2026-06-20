@@ -60,6 +60,7 @@ def test_openrouter_chat_auth_model_json(monkeypatch):
 def test_openrouter_base_url_override_and_model(monkeypatch):
     monkeypatch.setenv("OPENROUTER_KEY", "k")
     monkeypatch.setenv("OPENROUTER_BASE_URL", "https://proxy.local/v1")
+    monkeypatch.setenv("OPENROUTER_ALLOW_CUSTOM_BASE_URL", "1")  # required opt-in
     monkeypatch.setenv("PROP_LLM_MODEL", "custom/model")
     b = OpenRouterBackend()
     assert b.model_id == "custom/model"
@@ -67,6 +68,22 @@ def test_openrouter_base_url_override_and_model(monkeypatch):
     b.chat(cl, [{"role": "user", "content": "x"}], max_tokens=10)  # json_format default False
     assert cl.calls[0]["url"] == "https://proxy.local/v1/chat/completions"
     assert "response_format" not in cl.calls[0]["json"]
+
+
+def test_openrouter_custom_base_url_requires_optin(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_KEY", "k")
+    monkeypatch.delenv("OPENROUTER_ALLOW_CUSTOM_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://proxy.local/v1")
+    with pytest.raises(RuntimeError):  # custom base without opt-in is refused
+        OpenRouterBackend()
+
+
+def test_openrouter_custom_base_url_must_be_https(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_KEY", "k")
+    monkeypatch.setenv("OPENROUTER_ALLOW_CUSTOM_BASE_URL", "1")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "http://insecure.local/v1")
+    with pytest.raises(RuntimeError):  # http never allowed (bearer would leak in clear)
+        OpenRouterBackend()
 
 
 # ── propositionize_pending (Postgres fixture) ─────────────────────────────

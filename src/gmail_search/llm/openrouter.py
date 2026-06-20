@@ -31,7 +31,18 @@ class OpenRouterBackend:
         self._key = os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")
         if not self._key:
             raise RuntimeError("OPENROUTER_KEY is not set; cannot use the OpenRouter backend")
-        self._base = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+        # The API key is sent as a bearer to this base URL, so a custom endpoint
+        # is a secret-exfiltration risk: require https and an explicit opt-in.
+        base = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+        if base != DEFAULT_BASE_URL:
+            if not base.startswith("https://"):
+                raise RuntimeError("OPENROUTER_BASE_URL must be https (the API key is sent to it)")
+            if os.environ.get("OPENROUTER_ALLOW_CUSTOM_BASE_URL") != "1":
+                raise RuntimeError(
+                    "custom OPENROUTER_BASE_URL requires OPENROUTER_ALLOW_CUSTOM_BASE_URL=1 "
+                    "(the API key is sent to this host)"
+                )
+        self._base = base
 
     # No spawn/teardown — satisfy the optional context-manager protocol as no-ops.
     def __enter__(self) -> "OpenRouterBackend":

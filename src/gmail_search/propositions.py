@@ -305,7 +305,15 @@ def propositionize_pending(
     Idempotent via prop_processed; per-message atomic replace (delete old facts +
     insert new + stamp marker in one commit) so find_facts never sees a gap. A
     message that fails extraction is left unstamped to retry next pass. Designed
-    to run in its own daemon — it never touches the latency-sensitive ingest path."""
+    to run in its own daemon — it never touches the latency-sensitive ingest path.
+
+    Concurrency: the supervisor runs a single daemon per user, so passes don't
+    overlap in normal operation. If a manual run races a supervised one, two
+    passes could select the same unstamped message before either marker commits —
+    on Postgres this at worst yields a few duplicate facts (no corruption; the
+    atomic replace keeps each message's row set consistent), which query-time
+    collapse and the dedup pass absorb. A per-user pg advisory lock is the
+    follow-up if strict single-flight is ever required."""
     rows = conn.execute(
         """SELECT m.id, m.thread_id, m.date, m.from_addr, m.to_addr, m.subject, m.body_text
            FROM messages m
@@ -655,7 +663,11 @@ def find_facts(
     out: list[dict[str, Any]] = []
     seen_text: set[str] = set()
     for pid in sorted(candidates, key=_rrf, reverse=True):
-        r = by_id[pid]
+        r = by_id.get(pid)
+        if r is None:
+            # A concurrent propositionize replace can delete a BM25-matched id
+            # between the keyword query and the row load — skip rather than crash.
+            continue
         if r["text"] in seen_text:
             continue
         if collapse_near_dups:
