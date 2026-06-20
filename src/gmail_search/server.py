@@ -947,6 +947,7 @@ def create_app(
         exhaustive: bool = Query(True),
         k: int = Query(200, ge=1, le=500),
         hybrid: bool = Query(True),
+        collapse: bool = Query(False),
         user_id: str = Depends(require_user_id),
     ):
         """Enumerate atomic facts (propositions) matching `q` across this
@@ -979,6 +980,7 @@ def create_app(
                 exhaustive=exhaustive,
                 cap=k,
                 hybrid=hybrid,
+                collapse_near_dups=collapse,
             )
         finally:
             conn.close()

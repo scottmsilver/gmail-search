@@ -414,6 +414,27 @@ def _query_terms(query: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 1 and t not in _STOP]
 
 
+def _value_tokens(s: str) -> set[str]:
+    """Tokens containing a digit (numbers, dates, plates, VINs, IDs). Used to
+    refuse collapsing two facts that differ by a concrete value."""
+    return set(re.findall(r"[a-z]*\d[a-z0-9]*", s.lower()))
+
+
+def _has_conflicting_value(a: str, b: str) -> bool:
+    """True if a and b carry different digit-bearing tokens — guards against
+    merging e.g. two registration dates or two plate numbers."""
+    return _value_tokens(a) != _value_tokens(b)
+
+
+def _shares_entity(a: str, b: str) -> bool:
+    """True if the two facts share at least one content token (non-stopword,
+    len>=3) — a cheap proxy for 'about the same thing', the lexical half of the
+    collapse guard alongside the high cosine gate."""
+    ca = {t for t in re.findall(r"[a-z0-9]+", a.lower()) if len(t) >= 3 and t not in _STOP}
+    cb = {t for t in re.findall(r"[a-z0-9]+", b.lower()) if len(t) >= 3 and t not in _STOP}
+    return bool(ca & cb)
+
+
 def ensure_bm25_index(conn) -> None:
     """ParadeDB BM25 index over proposition text — the keyword half of hybrid.
     This is what rescues bare alphanumeric facts (plates/VINs/codes) that
@@ -517,6 +538,8 @@ def find_facts(
     rrf_k: int = 60,
     max_load: int = 8000,
     owner_boost: float = 0.02,
+    collapse_near_dups: bool = False,
+    collapse_threshold: float = 0.97,
 ) -> list[dict[str, Any]]:
     """Hybrid (semantic ∪ keyword) retrieval over this user's propositions.
 
@@ -609,24 +632,54 @@ def find_facts(
             s += owner_boost
         return s
 
+    idx_of = {pid: i for i, pid in enumerate(ids)}
+
+    def _is_near_dup(pid: int, survivors: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Return the survivor `pid` duplicates (cosine >= threshold + shares an
+        entity + no conflicting value), else None. Non-mutating: caller bumps the
+        survivor's dup_count. Cannot compare a pid that wasn't embedding-loaded."""
+        if pid not in idx_of:
+            return None
+        text = by_id[pid]["text"]
+        v = mat_n[idx_of[pid]]
+        for s in survivors:
+            sp = s["_pid"]
+            if sp not in idx_of:
+                continue
+            if float(v @ mat_n[idx_of[sp]]) < collapse_threshold:
+                continue
+            if _shares_entity(text, s["fact"]) and not _has_conflicting_value(text, s["fact"]):
+                return s
+        return None
+
     out: list[dict[str, Any]] = []
     seen_text: set[str] = set()
     for pid in sorted(candidates, key=_rrf, reverse=True):
         r = by_id[pid]
         if r["text"] in seen_text:
             continue
+        if collapse_near_dups:
+            dup = _is_near_dup(pid, out)
+            if dup is not None:
+                dup["dup_count"] = dup.get("dup_count", 0) + 1
+                continue
         seen_text.add(r["text"])
-        out.append(
-            {
-                "fact": r["text"],
-                "message_id": r["message_id"],
-                "thread_id": r["thread_id"],
-                "cosine": round(sem_score.get(pid, 0.0), 4),
-                "bm25": pid in bm_rank,
-                "owner": pid in owner_pids,
-            }
-        )
+        entry: dict[str, Any] = {
+            "fact": r["text"],
+            "message_id": r["message_id"],
+            "thread_id": r["thread_id"],
+            "cosine": round(sem_score.get(pid, 0.0), 4),
+            "bm25": pid in bm_rank,
+            "owner": pid in owner_pids,
+        }
+        if collapse_near_dups:
+            entry["dup_count"] = 0
+            entry["_pid"] = pid  # internal: for near-dup comparison; stripped below
+        out.append(entry)
         if len(out) >= cap:
             logger.warning("find_facts hit cap=%d — results may be incomplete", cap)
             break
+    if collapse_near_dups:
+        for e in out:
+            e.pop("_pid", None)
     return out
