@@ -1234,6 +1234,109 @@ def reconcile(ctx, batch, loop, loop_sleep):
         _time.sleep(loop_sleep)
 
 
+@main.command(help="Extract atomic facts (propositions) from newly-ingested mail")
+@click.option("--batch", type=int, default=500, help="Max messages propositionized per pass.")
+@click.option("--loop", is_flag=True, default=False, help="Keep running. Sleeps between passes.")
+@click.option(
+    "--loop-sleep",
+    type=float,
+    default=30.0,
+    help="Seconds to sleep between passes when --loop is set (default 30).",
+)
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account to propositionize. Defaults to GMS_BOOTSTRAP_EMAIL env. "
+    "The supervisor spawns one daemon per user with --email set.",
+)
+@common_options
+@click.pass_context
+def propositionize(ctx, batch, loop, loop_sleep, email):
+    """Decoupled per-user daemon: turn newly-ingested messages into atomic facts
+    via OpenRouter nova-lite, embed them, and store them idempotently
+    (prop_processed marker). Deliberately OFF the latency-sensitive ingest path —
+    the same decoupling pattern as summarize/reindex. Requires OPENROUTER_KEY.
+    """
+    import logging as _logging
+    import os as _os
+    import time as _time
+
+    import httpx as _httpx
+
+    from gmail_search import propositions as _P
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+    from gmail_search.embed.client import GeminiEmbedder
+    from gmail_search.llm.openrouter import OpenRouterBackend
+    from gmail_search.store.db import JobProgress, get_connection
+
+    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = _logging.getLogger("propositionize")
+
+    cfg = ctx.obj["config"]
+    db_path = ctx.obj["db_path"]
+
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+
+    # Per-user job_progress key so two users' daemons don't collide.
+    _conn = get_connection(db_path)
+    try:
+        active_user_id = _resolve_uid(_conn)
+    finally:
+        _conn.close()
+
+    job_id = f"propositionize:{active_user_id}"
+    progress = JobProgress(db_path, job_id, start_completed=0)
+
+    # Pin extraction to nova via OpenRouter regardless of LLM_BACKEND.
+    backend = OpenRouterBackend()
+    embedder = GeminiEmbedder(cfg)
+
+    conn0 = get_connection(db_path)
+    try:
+        _P.ensure_table(conn0)
+        _P.ensure_bm25_index(conn0)
+        _P.ensure_processed_table(conn0)
+        owner = _P.owner_string_for_user(conn0, active_user_id)
+    finally:
+        conn0.close()
+
+    def _one_pass() -> dict:
+        conn = get_connection(db_path)
+        try:
+            with _httpx.Client() as client:
+                return _P.propositionize_pending(
+                    conn, client, backend, embedder, user_id=active_user_id, owner=owner, batch=batch
+                )
+        finally:
+            conn.close()
+
+    pass_no = 0
+    while True:
+        pass_no += 1
+        start = _time.time()
+        try:
+            stats = _one_pass()
+        except Exception as e:
+            log.exception(f"pass crashed: {e}")
+            progress.update("error", pass_no, 0, f"{type(e).__name__}: {str(e)[:100]}")
+            if not loop:
+                raise
+            _time.sleep(loop_sleep)
+            continue
+        elapsed = _time.time() - start
+        detail = (
+            f"pass {pass_no}: {stats['messages']} msgs -> {stats['facts']} facts, "
+            f"{stats['errors']} err in {elapsed:.2f}s"
+        )
+        progress.update("propositionizing", pass_no, 0, detail)
+        log.info(detail)
+        if not loop:
+            break
+        _time.sleep(loop_sleep)
+
+
 @main.command(help="Watchdog that keeps each enrolled user's watch/update/summarize alive")
 @click.option("--interval", type=int, default=30, help="Seconds between heartbeat checks")
 @click.option(
@@ -1299,7 +1402,21 @@ def supervise(ctx, interval, restart_delay):
             "argv": ["reindex", "--loop", "--quantum", "60", "--min-new", "10000", "--max-age", "900"],
             "log_suffix": "reindex.log",
         },
+        # Proposition (atomic-fact) extraction for new mail — decoupled like
+        # summarize/reindex. Skipped automatically per-user if OPENROUTER_KEY is
+        # unset (the daemon would just crash-loop otherwise).
+        {
+            "key": "propositionize",
+            "argv": ["propositionize", "--loop", "--loop-sleep", "30"],
+            "log_suffix": "propositionize.log",
+        },
     ]
+
+    # Proposition extraction needs an OpenRouter key; without it the daemon would
+    # crash-loop, so drop it from the supervised set rather than respawn forever.
+    if not (os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")):
+        PER_USER_DAEMONS = [d for d in PER_USER_DAEMONS if d["key"] != "propositionize"]
+        _log.info("OPENROUTER_KEY unset — propositionize daemon disabled")
 
     # Global daemons — no user_id needed (they scan across all users).
     GLOBAL_DAEMONS = [

@@ -31,7 +31,11 @@ def get_backend() -> Backend:
         from gmail_search.llm.vllm import VLLMBackend
 
         return VLLMBackend()
-    raise ValueError(f"unknown LLM_BACKEND: {name!r} (expected 'vllm' or 'ollama')")
+    if name == "openrouter":
+        from gmail_search.llm.openrouter import OpenRouterBackend
+
+        return OpenRouterBackend()
+    raise ValueError(f"unknown LLM_BACKEND: {name!r} (expected 'vllm', 'ollama', or 'openrouter')")
 
 
 __all__ = ["Backend", "get_backend"]

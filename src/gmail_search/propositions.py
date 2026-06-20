@@ -260,85 +260,135 @@ def backfill(
     return stats
 
 
-# Query tokens carrying no discriminative signal for BM25 matching. Includes
-# interrogatives, light/possession verbs, and pronouns/determiners so a natural
-# question like "what cars do I own" reduces to its content words ("cars"); entity
-# words (tesla/car/plate/vin/etc.) are deliberately NOT here.
+def ensure_processed_table(conn) -> None:
+    """Marker table so the live daemon is idempotent: a message is reprocessed
+    only until it has been successfully propositionized once."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS prop_processed (user_id text, message_id text, PRIMARY KEY(user_id, message_id))"
+    )
+    conn.commit()
+
+
+def owner_string_for_user(conn, user_id: str) -> str:
+    """`Name (email)` for a SPECIFIC user, resolved from the users table.
+
+    The global owner_string() reads one env var, which is wrong in multi-tenant:
+    a per-user daemon must attribute each user's "my X" facts to that user, not
+    to a single hardcoded owner. Falls back to the env owner if the row is bare."""
+    try:
+        row = conn.execute("SELECT email, name FROM users WHERE id = %s", (user_id,)).fetchone()
+    except Exception:
+        conn.rollback()
+        row = None
+    if row:
+        name = (row["name"] or "").strip()
+        email = (row["email"] or "").strip()
+        if name and email:
+            return f"{name} ({email})"
+        if name or email:
+            return name or email
+    return owner_string()
+
+
+def propositionize_pending(
+    conn,
+    client,
+    backend,
+    embedder,
+    *,
+    user_id: str,
+    owner: str,
+    batch: int = 500,
+) -> dict[str, int]:
+    """One bounded pass over messages NOT yet propositionized for this user.
+
+    Idempotent via prop_processed; per-message atomic replace (delete old facts +
+    insert new + stamp marker in one commit) so find_facts never sees a gap. A
+    message that fails extraction is left unstamped to retry next pass. Designed
+    to run in its own daemon — it never touches the latency-sensitive ingest path."""
+    rows = conn.execute(
+        """SELECT m.id, m.thread_id, m.date, m.from_addr, m.to_addr, m.subject, m.body_text
+           FROM messages m
+           WHERE m.user_id = %s
+             AND NOT EXISTS (
+               SELECT 1 FROM prop_processed pp WHERE pp.user_id = m.user_id AND pp.message_id = m.id
+             )
+           ORDER BY m.date DESC
+           LIMIT %s""",
+        (user_id, batch),
+    ).fetchall()
+    stats = {"messages": 0, "facts": 0, "errors": 0}
+    for r in rows:
+        stats["messages"] += 1
+        try:
+            facts = extract_propositions(
+                client,
+                backend,
+                owner=owner,
+                date=str(r["date"] or ""),
+                from_addr=r["from_addr"] or "",
+                to_addr=r["to_addr"] or "",
+                subject=r["subject"] or "",
+                body=r["body_text"] or "",
+            )
+            vectors = embedder.embed_texts_batch(facts) if facts else []
+            # Atomic replace + marker in a single transaction.
+            conn.execute("DELETE FROM propositions WHERE user_id = %s AND message_id = %s", (user_id, r["id"]))
+            if facts:
+                from gmail_search.embed.client import embedding_to_blob
+
+                model_tag = f"{embedder.model}+{PROPOSITIONIZER_VERSION}"
+                for fact, vec in zip(facts, vectors):
+                    conn.execute(
+                        """INSERT INTO propositions (user_id, message_id, thread_id, text, embedding, model, date)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        (
+                            user_id,
+                            r["id"],
+                            r["thread_id"],
+                            fact,
+                            embedding_to_blob(vec),
+                            model_tag,
+                            str(r["date"] or ""),
+                        ),
+                    )
+            conn.execute(
+                "INSERT INTO prop_processed (user_id, message_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (user_id, r["id"]),
+            )
+            conn.commit()
+            stats["facts"] += len(facts)
+        except Exception:
+            conn.rollback()
+            stats["errors"] += 1
+            logger.exception("propositionize_pending failed for message %s", r["id"])
+    return stats
+
+
+# Stopwords for the BM25/lexical query path. This is the canonical NLTK / Snowball
+# English stopword set (the standard linguistic list — not a bespoke hand-curated
+# one), vendored as a constant so there is no runtime NLTK dependency. It is the
+# right tool *only* here on the keyword side: it includes interrogatives and
+# possessives (what/do/own/my/how/who) that broke "what cars do I own", which
+# neither ParadeDB's minimal built-in list nor corpus document-frequency can catch
+# (those words are rarer in declarative facts than real content words). It is
+# deliberately NOT applied to the embedding query, where dropping function words
+# would corrupt meaning (e.g. "to be or not to be" -> "be be").
 _STOP = frozenset(
-    {
-        "my",
-        "the",
-        "a",
-        "an",
-        "of",
-        "is",
-        "are",
-        "was",
-        "were",
-        "to",
-        "for",
-        "and",
-        "or",
-        "in",
-        "on",
-        "me",
-        "i",
-        "what",
-        "who",
-        "whom",
-        "whose",
-        "which",
-        "where",
-        "when",
-        "why",
-        "how",
-        "do",
-        "does",
-        "did",
-        "doing",
-        "done",
-        "own",
-        "owns",
-        "owned",
-        "have",
-        "has",
-        "had",
-        "get",
-        "got",
-        "can",
-        "will",
-        "would",
-        "should",
-        "mine",
-        "your",
-        "yours",
-        "our",
-        "ours",
-        "their",
-        "his",
-        "her",
-        "its",
-        "it",
-        "you",
-        "we",
-        "they",
-        "he",
-        "she",
-        "that",
-        "this",
-        "these",
-        "those",
-        "all",
-        "any",
-        "some",
-        "as",
-        "at",
-        "by",
-        "from",
-        "with",
-        "but",
-        "not",
-    }
+    (
+        "i me my myself we our ours ourselves you you're you've you'll you'd your yours "
+        "yourself yourselves he him his himself she she's her hers herself it it's its "
+        "itself they them their theirs themselves what which who whom this that that'll "
+        "these those am is are was were be been being have has had having do does did "
+        "doing a an the and but if or because as until while of at by for with about "
+        "against between into through during before after above below to from up down in "
+        "out on off over under again further then once here there when where why how all "
+        "any both each few more most other some such no nor not only own same so than too "
+        "very s t can will just don don't should should've now d ll m o re ve y ain aren "
+        "aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven "
+        "haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't "
+        "shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't"
+    ).split()
 )
 
 
