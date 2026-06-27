@@ -906,6 +906,21 @@ def stop(ctx):
     click.echo(f"Stopped watch daemon (PID {pid})")
 
 
+def _set_gmail_health(db_path, user_id: str, status: str, reason) -> None:
+    """Best-effort persist of Gmail credential health; never breaks the cycle."""
+    try:
+        from gmail_search.gmail.auth import record_credential_health
+        from gmail_search.store.db import get_connection
+
+        conn = get_connection(db_path)
+        try:
+            record_credential_health(conn, user_id, status, reason)
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("could not record gmail health", exc_info=True)
+
+
 @main.command(help="Watch for new emails and process them continuously")
 @click.option("--interval", type=int, default=120, help="Seconds between sync checks")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
@@ -996,8 +1011,21 @@ def watch(ctx, interval, budget, max_cycles, email):
                     data_dir=data_dir,
                     max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
                 )
+                _set_gmail_health(db_path, active_user_id, "healthy", None)
             except Exception as e:
-                logger.warning(f"Sync failed: {e}")
+                from gmail_search.gmail.auth import CREDENTIAL_HINTS, classify_credential_error
+
+                reason = classify_credential_error(e)
+                if reason:
+                    # A credential/scope failure must NOT look like "no new mail":
+                    # record health + a loud, actionable status (visible in the
+                    # admin console) so a dead/scope-stripped token is caught fast.
+                    _set_gmail_health(db_path, active_user_id, "unhealthy", reason)
+                    hint = CREDENTIAL_HINTS.get(reason, "reconnect Gmail")
+                    logger.error("Gmail sync blocked — %s: %s", reason, e)
+                    progress.update("credentials", cycle, 0, f"⚠ CREDENTIALS: {hint}")
+                else:
+                    logger.warning(f"Sync failed: {e}")
                 count = 0
 
             if count > 0:

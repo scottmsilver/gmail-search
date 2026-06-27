@@ -2609,6 +2609,9 @@ def create_app(
                    FROM users u
                    ORDER BY u.email"""
             ).fetchall()
+            from gmail_search.gmail.auth import get_credential_health
+
+            health_by_uid = {r["id"]: get_credential_health(conn, r["id"]) for r in rows}
         finally:
             conn.close()
         users = []
@@ -2629,6 +2632,7 @@ def create_app(
                     "summarize": _daemon_status(_user_job_id("summarize", uid)),
                     "reindex": _daemon_status(_user_job_id("reindex", uid)),
                     "gmail": _user_gmail_status(r["email"]),
+                    "credential_health": health_by_uid.get(uid),
                 }
             )
         # Plus the global supervisor row so admin can see if it's alive.

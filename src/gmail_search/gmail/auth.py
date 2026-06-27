@@ -127,3 +127,67 @@ def get_credentials(data_dir: Path, *, email: Optional[str] = None) -> Credentia
 def build_gmail_service(data_dir: Path, *, email: Optional[str] = None):
     creds = get_credentials(data_dir, email=email)
     return build("gmail", "v1", credentials=creds)
+
+
+def classify_credential_error(exc: BaseException) -> Optional[str]:
+    """Map a sync exception to a credential-health reason, or None when it's not
+    a credential/scope failure. Lets the watch loop surface a loud 'reconnect
+    Gmail' state instead of silently reporting 'no new messages' (the failure
+    mode that hid a 3-day ingestion outage behind an expired/scope-stripped token)."""
+    s = str(exc).lower()
+    if isinstance(exc, PermissionError):
+        return "gmail_scope_missing"
+    if "insufficientpermissions" in s or "insufficient authentication scopes" in s or "insufficient permission" in s:
+        return "gmail_scope_missing"
+    if "invalid_grant" in s or "expired or revoked" in s:
+        return "credentials_revoked"
+    if "no gmail credentials" in s or "connect-gmail" in s or "hasn't connected gmail" in s:
+        return "not_connected"
+    return None
+
+
+# Human-readable, action-oriented hints per reason (shown in logs + admin console).
+CREDENTIAL_HINTS = {
+    "gmail_scope_missing": "reconnect Gmail — token is missing the gmail.readonly scope",
+    "credentials_revoked": "reconnect Gmail — token expired or was revoked",
+    "not_connected": "connect Gmail via /api/auth/connect-gmail",
+}
+
+
+def record_credential_health(conn, user_id: str, status: str, reason: Optional[str] = None) -> None:
+    """Persist Gmail credential health (status: 'healthy' | 'unhealthy') under
+    sync_state so a silent 403/invalid_grant becomes visible. Preserves the
+    original `since` timestamp across consecutive failures."""
+    import json
+    from datetime import datetime, timezone
+
+    from gmail_search.store.queries import get_sync_state, set_sync_state
+
+    key = f"gmail_health:{user_id}"
+    now = datetime.now(timezone.utc).isoformat()
+    since = now
+    prev = get_sync_state(conn, key)
+    if prev:
+        try:
+            p = json.loads(prev)
+            if p.get("status") == "unhealthy" and status == "unhealthy":
+                since = p.get("since", now)
+        except (ValueError, TypeError):
+            pass
+    set_sync_state(conn, key, json.dumps({"status": status, "reason": reason, "since": since, "updated": now}))
+    conn.commit()
+
+
+def get_credential_health(conn, user_id: str) -> Optional[dict]:
+    """Read the persisted Gmail credential health for a user, or None."""
+    import json
+
+    from gmail_search.store.queries import get_sync_state
+
+    raw = get_sync_state(conn, f"gmail_health:{user_id}")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
