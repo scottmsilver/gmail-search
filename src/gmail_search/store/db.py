@@ -493,14 +493,20 @@ def _build_topic_tree(vectors, indices, subjects, senders, topic_id, parent_id, 
     return nodes + left_nodes + right_nodes
 
 
-def _auto_label_topics(conn):
-    """Use Gemini Flash Lite to generate short topic labels from cluster summaries."""
+def _auto_label_topics(conn, user_id):
+    """Use Gemini Flash Lite to generate short topic labels from cluster summaries.
+
+    Scoped to one user: topic_id is generated per-user (sequential "0"/"0.0"…) so
+    it is NOT globally unique — reading/updating across users would relabel another
+    tenant's topics. Filter every read and write by user_id."""
     import json
     import logging
 
     logger = logging.getLogger(__name__)
     topic_rows = conn.execute(
-        "SELECT topic_id, parent_id, depth, top_senders, sample_subjects, message_count FROM topics ORDER BY depth, message_count DESC"
+        "SELECT topic_id, parent_id, depth, top_senders, sample_subjects, message_count "
+        "FROM topics WHERE user_id = %s ORDER BY depth, message_count DESC",
+        (user_id,),
     ).fetchall()
 
     summaries = []
@@ -539,7 +545,7 @@ def _auto_label_topics(conn):
         label_map = json.loads(text)
 
         for tid, label in label_map.items():
-            conn.execute("UPDATE topics SET label = %s WHERE topic_id = %s", (label, tid))
+            conn.execute("UPDATE topics SET label = %s WHERE topic_id = %s AND user_id = %s", (label, tid, user_id))
         conn.commit()
         logger.info(f"Auto-labeled {len(label_map)} topic nodes")
 
@@ -548,7 +554,10 @@ def _auto_label_topics(conn):
         for t in topic_rows:
             sndrs = json.loads(t["top_senders"])
             label = sndrs[0] if sndrs else f"Topic {t['topic_id']}"
-            conn.execute("UPDATE topics SET label = %s WHERE topic_id = %s", (label, t["topic_id"]))
+            conn.execute(
+                "UPDATE topics SET label = %s WHERE topic_id = %s AND user_id = %s",
+                (label, t["topic_id"], user_id),
+            )
         conn.commit()
 
 
@@ -615,9 +624,9 @@ def rebuild_topics(
     conn.commit()
     logger.info(f"Built {len(nodes)} topic nodes")
 
-    _auto_label_topics(conn)
+    _auto_label_topics(conn, uid)
 
-    count = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM topics WHERE user_id = %s", (uid,)).fetchone()[0]
     conn.close()
     return count
 

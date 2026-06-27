@@ -1201,7 +1201,7 @@ def reconcile(ctx, batch, loop, loop_sleep):
         try:
             watermark = int(_get_state(conn, "last_reconciled_history_id") or 0)
             rows = conn.execute(
-                """SELECT DISTINCT thread_id
+                """SELECT DISTINCT thread_id, user_id
                      FROM messages
                     WHERE history_id > %s
                     ORDER BY thread_id
@@ -1213,9 +1213,10 @@ def reconcile(ctx, batch, loop, loop_sleep):
                 # from thread_summary — catches historical data that
                 # predated the inline touch + a zero watermark.
                 missing = conn.execute(
-                    """SELECT DISTINCT m.thread_id
+                    """SELECT DISTINCT m.thread_id, m.user_id
                          FROM messages m
-                         LEFT JOIN thread_summary ts USING (thread_id)
+                         LEFT JOIN thread_summary ts
+                           ON ts.thread_id = m.thread_id AND ts.user_id = m.user_id
                         WHERE ts.thread_id IS NULL
                         LIMIT %s""",
                     (batch,),
@@ -1224,7 +1225,7 @@ def reconcile(ctx, batch, loop, loop_sleep):
 
             count = 0
             for r in rows:
-                if recompute_thread_summary(conn, r["thread_id"]):
+                if recompute_thread_summary(conn, r["thread_id"], user_id=r["user_id"]):
                     count += 1
 
             # Advance watermark to the max history_id seen so far, so

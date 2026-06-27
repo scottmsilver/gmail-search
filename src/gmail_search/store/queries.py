@@ -60,6 +60,13 @@ def recompute_thread_summary(
         makes the inline call a fast path rather than a correctness
         requirement.
     """
+    # Scope the aggregation to the thread's owner. Tenant-safety: without the
+    # user_id filter a (vanishingly unlikely) cross-account thread_id collision
+    # would mix two users' messages into one summary, and the global `reconcile`
+    # daemon would otherwise resolve uid to the bootstrap user. Resolve uid first
+    # and filter by it so the summary is always built from exactly one tenant's
+    # mail. (No-op on current data: no thread_id spans >1 user.)
+    uid = resolve_write_user_id(conn, user_id=user_id)
     row = conn.execute(
         """SELECT
              count(*)                                   AS message_count,
@@ -67,11 +74,11 @@ def recompute_thread_summary(
              max(date)                                  AS date_last,
              min(subject) FILTER (WHERE date =
                  (SELECT min(date) FROM messages
-                  WHERE thread_id = %s))                AS subject,
+                  WHERE thread_id = %s AND user_id = %s))   AS subject,
              array_agg(DISTINCT from_addr ORDER BY from_addr) AS from_addrs,
              string_agg(DISTINCT labels, '|')           AS labels_raw
-           FROM messages WHERE thread_id = %s""",
-        (thread_id, thread_id),
+           FROM messages WHERE thread_id = %s AND user_id = %s""",
+        (thread_id, uid, thread_id, uid),
     ).fetchone()
     if row is None or not row["message_count"]:
         return False
@@ -85,7 +92,6 @@ def recompute_thread_summary(
         except Exception:
             continue
     from_addrs = list(row["from_addrs"] or [])
-    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
         """INSERT INTO thread_summary
              (thread_id, subject, participants, all_from_addrs, all_labels,
