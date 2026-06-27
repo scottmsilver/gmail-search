@@ -97,7 +97,7 @@ def recompute_thread_summary(
              (thread_id, subject, participants, all_from_addrs, all_labels,
               message_count, date_first, date_last, user_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT(thread_id) DO UPDATE SET
+           ON CONFLICT(thread_id, user_id) DO UPDATE SET
              subject = excluded.subject,
              participants = excluded.participants,
              all_from_addrs = excluded.all_from_addrs,

@@ -638,6 +638,37 @@ BEGIN
     END LOOP;
 END $$;
 
+-- Multi-tenant PK hardening: thread_summary.thread_id and topics.topic_id are
+-- only unique within ONE mailbox (Gmail thread ids; per-user sequential topic
+-- ids), so the primary key must include user_id or two tenants with a colliding
+-- id can't coexist. Idempotent: only swaps a single-column PK, so re-runs and
+-- fresh installs (which already land here after user_id is added) are no-ops.
+-- Re-keys the message_topics -> topics FK to the composite key.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'thread_summary_pkey' AND conrelid = 'thread_summary'::regclass
+           AND array_length(conkey, 1) = 1
+    ) THEN
+        ALTER TABLE thread_summary DROP CONSTRAINT thread_summary_pkey,
+            ADD PRIMARY KEY (thread_id, user_id);
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'topics_pkey' AND conrelid = 'topics'::regclass
+           AND array_length(conkey, 1) = 1
+    ) THEN
+        ALTER TABLE message_topics DROP CONSTRAINT IF EXISTS message_topics_topic_id_fkey;
+        ALTER TABLE topics DROP CONSTRAINT topics_pkey,
+            ADD PRIMARY KEY (topic_id, user_id);
+        ALTER TABLE message_topics
+            ADD CONSTRAINT message_topics_topic_id_fkey
+            FOREIGN KEY (topic_id, user_id) REFERENCES topics(topic_id, user_id);
+    END IF;
+END $$;
+
 -- conversation_messages doesn't have its own user_id — scope through
 -- the parent conversation. Subquery RLS is slower per row but at
 -- household scale (2-5 users) it's unmeasurable.
