@@ -1910,9 +1910,24 @@ def create_app(
             "mime_type": row["mime_type"],
             "size_bytes": size,
             "fetch_url": f"/api/attachment/{attachment_id}",
-            "fetch_url_note": "fetch_url needs an authenticated browser session; it is NOT fetchable by the model — use the base64 field, or download via the web UI.",
+            "fetch_url_note": "Relative URL needs an authenticated browser session (for the web UI). For a model-fetchable link see blob_token / the MCP-rewritten fetch_url.",
             "base64": None,
         }
+        # Mint a short-lived signed capability token so a model (or its sandbox)
+        # can fetch the bytes WITHOUT a session: the MCP server exposes a public
+        # /attachment?t=<token> route that verifies this (scope=this attachment +
+        # this user, ~15 min) and proxies the bytes. The signature is the auth.
+        import time as _time
+
+        import jwt as _jwt
+
+        _secret = os.environ.get("GMS_SESSION_SECRET")
+        if _secret and len(_secret) >= 32:
+            out["blob_token"] = _jwt.encode(
+                {"aid": attachment_id, "uid": user_id, "exp": int(_time.time()) + 900},
+                _secret,
+                algorithm="HS256",
+            )
         if inline and size <= max_inline_bytes:
             data = resolved.read_bytes()
             out["sha256"] = _hashlib.sha256(data).hexdigest()

@@ -483,3 +483,28 @@ def test_publish_artifact_falls_back_to_scratch_root(tmp_path, monkeypatch):
     assert result["id"] == 99
     assert result["name"] == "from_sandbox.txt"
     mts.unregister_session("sess-pub")
+
+
+def test_rewrite_blob_urls_makes_absolute_signed_url(monkeypatch):
+    monkeypatch.setenv("GMAIL_MCP_PUBLIC_URL", "https://gmail-mcp.example.com")
+    from gmail_search.agents import mcp_tools_server as M
+
+    resp = {
+        "results": [
+            {"input": {"attachment_id": 5, "mode": "raw"},
+             "result": {"attachment_id": 5, "blob_token": "TOK123", "fetch_url": "/api/attachment/5"}}
+        ]
+    }
+    M._rewrite_blob_urls(resp)
+    r = resp["results"][0]["result"]
+    assert r["fetch_url"] == "https://gmail-mcp.example.com/attachment?t=TOK123"
+    assert "blob_token" not in r  # token folded into the URL, not exposed separately
+
+
+def test_rewrite_blob_urls_noop_without_public_url(monkeypatch):
+    monkeypatch.delenv("GMAIL_MCP_PUBLIC_URL", raising=False)
+    from gmail_search.agents import mcp_tools_server as M
+
+    resp = {"results": [{"input": {}, "result": {"blob_token": "X", "fetch_url": "/api/attachment/5"}}]}
+    M._rewrite_blob_urls(resp)
+    assert resp["results"][0]["result"]["fetch_url"] == "/api/attachment/5"  # unchanged when no public URL

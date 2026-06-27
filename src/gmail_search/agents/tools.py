@@ -463,10 +463,10 @@ async def get_attachment(
       extraction is empty or unhelpful (scans, complex layouts) AND
       the model can read images.
     - `raw`: the original bytes. Returns metadata + sha256 + base64 of
-      the bytes (default, for files <= ~1 MB). `fetch_url` is included
-      but is NOT fetchable by the model (needs an authed browser
-      session); use the base64 field. Pass `inline=false` for
-      reference-only, or raise the size cap server-side for big files.
+      the bytes (default, for files <= ~1 MB) AND a signed `fetch_url`
+      (via the MCP host, expires ~15 min) you can GET directly with no
+      auth — use that for files too big to inline. Pass `inline=false`
+      for url-only.
 
     `attachment_id` comes from `get_thread`'s `attachments[*].id`."""
     if mode not in _ATTACHMENT_VALID_MODES:

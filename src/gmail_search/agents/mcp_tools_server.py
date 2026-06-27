@@ -646,10 +646,24 @@ async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
     return response
 
 
+def _rewrite_blob_urls(response: dict) -> None:
+    """Turn serve's per-attachment `blob_token` into an absolute, model-fetchable
+    `fetch_url` on this MCP host's public /attachment route. Mutates in place."""
+    base = os.environ.get("GMAIL_MCP_PUBLIC_URL", "").rstrip("/")
+    if not base:
+        return
+    for item in response.get("results", []) or []:
+        r = item.get("result")
+        if isinstance(r, dict) and r.get("blob_token"):
+            r["fetch_url"] = f"{base}/attachment?t={r.pop('blob_token')}"
+            r["fetch_url_note"] = "Signed link, expires in ~15 min — fetch directly (no auth, no session needed)."
+
+
 async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
     ctx = _resolve_ctx(session_id)
     args = {"items": items}
     response = await _get_attachment_batch_impl(items, user_id=ctx.user_id)
+    _rewrite_blob_urls(response)
     _record_call(session_id, "get_attachment_batch", args, response)
     return response
 
@@ -900,10 +914,10 @@ ATTACHMENT_BATCH_DESC = (
     "one of: 'meta' (filename/mime/size only — cheap), 'text' "
     "(extracted text from PDFs/docx/OCR — the usual choice, default), "
     "'rendered_pages' (PDF pages as base64 PNGs — heavy, only when "
-    "text is empty/unhelpful), 'raw' (ORIGINAL BYTES: returns base64 of "
-    "the file by default for files <=1MB plus sha256/metadata — use the "
-    "base64 field; fetch_url is NOT fetchable by the model; inline:false "
-    "for reference-only). `attachment_id` comes from a thread's "
+    "text is empty/unhelpful), 'raw' (ORIGINAL BYTES: base64 inline for "
+    "files <=1MB by default, PLUS a signed fetch_url (expires ~15 min) "
+    "you can GET directly with no auth for any size; inline:false for "
+    "url-only). `attachment_id` comes from a thread's "
     "`attachments[].id`. Returns `{results: [{input, result}, ...]}` "
     f"aligned with input. Even a single attachment goes through this tool. {SESSION_PARAM_NOTE}"
 )
@@ -1043,6 +1057,57 @@ def _check_admin_token(request) -> bool:
     if not header.startswith("Bearer "):
         return False
     return _secrets.compare_digest(header[len("Bearer ") :], expected)
+
+
+def _register_blob_route(app) -> None:
+    """Public, signature-gated attachment download. The MCP host is the only
+    publicly-reachable surface, so a model-fetchable attachment URL must live
+    here. Auth is the JWT capability token minted by serve's /api/attachment/{id}/raw
+    (claims: aid, uid, exp ~15 min, signed with the shared GMS_SESSION_SECRET) — NOT
+    a session. We verify the signature + expiry, then proxy to serve scoped to the
+    token's uid (so it can't cross tenants), streaming the bytes back."""
+    import httpx
+    import jwt
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    @app.custom_route("/attachment", methods=["GET"])
+    async def serve_attachment_blob(request: Request):
+        token = request.query_params.get("t")
+        if not token:
+            return JSONResponse({"error": "missing token"}, status_code=400)
+        secret = os.environ.get("GMS_SESSION_SECRET")
+        if not secret or len(secret) < 32:
+            return JSONResponse({"error": "attachment links not configured"}, status_code=503)
+        try:
+            claims = jwt.decode(token, secret, algorithms=["HS256"], options={"require": ["exp"]})
+        except Exception:
+            return JSONResponse({"error": "invalid or expired link"}, status_code=403)
+        aid, uid = claims.get("aid"), claims.get("uid")
+        if aid is None or not uid:
+            return JSONResponse({"error": "malformed token"}, status_code=403)
+        # Proxy to serve's own attachment endpoint, scoped to the token's uid.
+        base = os.environ.get("GMAIL_SEARCH_API_URL", "http://127.0.0.1:8090").rstrip("/")
+        headers = {"X-User-Id": str(uid)}
+        admin = os.environ.get("GMAIL_MCP_ADMIN_TOKEN")
+        if admin:
+            headers["Authorization"] = f"Bearer {admin}"
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                r = await client.get(f"{base}/api/attachment/{aid}", headers=headers)
+        except Exception:
+            return JSONResponse({"error": "upstream unavailable"}, status_code=502)
+        if r.status_code != 200:
+            return JSONResponse({"error": "attachment unavailable"}, status_code=r.status_code)
+        out_headers = {}
+        cd = r.headers.get("content-disposition")
+        if cd:
+            out_headers["content-disposition"] = cd
+        return Response(
+            content=r.content,
+            media_type=r.headers.get("content-type", "application/octet-stream"),
+            headers=out_headers,
+        )
 
 
 def _register_admin_routes(app) -> None:
@@ -1390,6 +1455,7 @@ def _make_fastmcp_app(host: str, port: int):
     app.tool(name="publish_artifact_batch", description=PUBLISH_ARTIFACT_BATCH_DESC)(_tool_publish_artifact_batch)
 
     _register_admin_routes(app)
+    _register_blob_route(app)
 
     if oauth_provider is not None:
         mcp_oauth.register_oauth_callback_route(app, oauth_provider)
