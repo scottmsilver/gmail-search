@@ -397,10 +397,10 @@ async def test_get_attachment_raw_mode_by_reference(monkeypatch):
 
     await tools.get_attachment(7, mode="raw", user_id="u1")
     assert captured["url"].endswith("/api/attachment/7/raw")
-    assert captured["params"]["inline"] == "false"  # by-reference default, no base64
+    assert captured["params"]["inline"] == "true"  # bytes inlined by default (only usable delivery)
 
-    await tools.get_attachment(7, mode="raw", inline=True, user_id="u1")
-    assert captured["params"]["inline"] == "true"  # opt-in inline base64
+    await tools.get_attachment(7, mode="raw", inline=False, user_id="u1")
+    assert captured["params"]["inline"] == "false"  # explicit reference-only
 
     bad = await tools.get_attachment(7, mode="bogus", user_id="u1")
     assert "error" in bad

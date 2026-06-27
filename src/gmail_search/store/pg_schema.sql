@@ -646,11 +646,14 @@ END $$;
 -- Re-keys the message_topics -> topics FK to the composite key.
 DO $$
 BEGIN
+    -- NULL guard: on an un-backfilled install user_id may be NULL; adding it to
+    -- the PK would abort the whole schema apply. Skip until backfilled (no-op),
+    -- so init_db never fails on a partially-migrated DB.
     IF EXISTS (
         SELECT 1 FROM pg_constraint
          WHERE conname = 'thread_summary_pkey' AND conrelid = 'thread_summary'::regclass
            AND array_length(conkey, 1) = 1
-    ) THEN
+    ) AND NOT EXISTS (SELECT 1 FROM thread_summary WHERE user_id IS NULL) THEN
         ALTER TABLE thread_summary DROP CONSTRAINT thread_summary_pkey,
             ADD PRIMARY KEY (thread_id, user_id);
     END IF;
@@ -659,7 +662,7 @@ BEGIN
         SELECT 1 FROM pg_constraint
          WHERE conname = 'topics_pkey' AND conrelid = 'topics'::regclass
            AND array_length(conkey, 1) = 1
-    ) THEN
+    ) AND NOT EXISTS (SELECT 1 FROM topics WHERE user_id IS NULL) THEN
         ALTER TABLE message_topics DROP CONSTRAINT IF EXISTS message_topics_topic_id_fkey;
         ALTER TABLE topics DROP CONSTRAINT topics_pkey,
             ADD PRIMARY KEY (topic_id, user_id);

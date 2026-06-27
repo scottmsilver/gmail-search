@@ -1872,15 +1872,16 @@ def create_app(
     @app.get("/api/attachment/{attachment_id}/raw")
     async def api_attachment_raw(
         attachment_id: int,
-        inline: bool = Query(False),
-        max_inline_bytes: int = Query(5 * 1024 * 1024, ge=0, le=10 * 1024 * 1024),
+        inline: bool = Query(True),
+        max_inline_bytes: int = Query(1024 * 1024, ge=0, le=10 * 1024 * 1024),
         user_id: str = Depends(require_user_id),
     ):
-        """Raw attachment bytes BY REFERENCE: metadata + sha256 + a `fetch_url` to
-        the binary download endpoint. The actual bytes are base64-inlined ONLY when
-        `inline=true` and the file is <= `max_inline_bytes` — base64 bloats ~33% and
-        burns model context, so prefer `fetch_url` (or a tool that reads the file).
-        user_id-scoped + path-traversal guarded (mirrors GET /api/attachment/{id})."""
+        """Raw attachment bytes for the model. `fetch_url` is NOT directly fetchable
+        by an LLM (it needs an authenticated session and the on-disk path is
+        server-local), so the bytes are base64-inlined BY DEFAULT for files <=
+        `max_inline_bytes` (1 MB) — that's the only way a context-only caller can get
+        them. Larger files return reference-only (use the web UI to download). Pass
+        `inline=false` to force reference-only. user_id-scoped + path-traversal guarded."""
         import base64 as _b64
         import hashlib as _hashlib
 
@@ -1899,23 +1900,28 @@ def create_app(
             return JSONResponse({"error": "Invalid attachment path"}, status_code=403)
         if not resolved.exists():
             return JSONResponse({"error": "Attachment file missing"}, status_code=404)
-        data = resolved.read_bytes()
+        # Stat for size BEFORE reading — never load a large file into the worker
+        # just to hash it or to reject it (a multi-GB raw_path would DoS the
+        # process otherwise). Only read when we'll actually inline.
+        size = resolved.stat().st_size
         out = {
             "attachment_id": attachment_id,
             "filename": row["filename"],
             "mime_type": row["mime_type"],
-            "size_bytes": len(data),
-            "sha256": _hashlib.sha256(data).hexdigest(),
+            "size_bytes": size,
             "fetch_url": f"/api/attachment/{attachment_id}",
+            "fetch_url_note": "fetch_url needs an authenticated browser session; it is NOT fetchable by the model — use the base64 field, or download via the web UI.",
             "base64": None,
         }
-        if inline:
-            if len(data) <= max_inline_bytes:
-                out["base64"] = _b64.b64encode(data).decode("ascii")
-            else:
-                out["base64_omitted"] = (
-                    f"{len(data)} bytes exceeds max_inline_bytes={max_inline_bytes}; fetch the binary via fetch_url"
-                )
+        if inline and size <= max_inline_bytes:
+            data = resolved.read_bytes()
+            out["sha256"] = _hashlib.sha256(data).hexdigest()
+            out["base64"] = _b64.b64encode(data).decode("ascii")
+        elif inline:
+            out["base64_omitted"] = (
+                f"{size} bytes exceeds max_inline_bytes={max_inline_bytes}; raise max_inline_bytes (<=10MB) "
+                f"or download via the web UI — the model cannot fetch fetch_url"
+            )
         return out
 
     @app.get("/api/attachment/{attachment_id}/text")

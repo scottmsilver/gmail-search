@@ -449,7 +449,7 @@ _ATTACHMENT_VALID_MODES = ("meta", "text", "rendered_pages", "raw")
 
 
 async def get_attachment(
-    attachment_id: int, mode: str = "text", inline: bool = False, *, user_id: str | None = None
+    attachment_id: int, mode: str = "text", inline: bool = True, *, user_id: str | None = None
 ) -> dict:
     """Fetch an email attachment in one of four shapes:
 
@@ -462,11 +462,11 @@ async def get_attachment(
       (multiple MB per page), token-expensive — only use when text
       extraction is empty or unhelpful (scans, complex layouts) AND
       the model can read images.
-    - `raw`: the original bytes, BY REFERENCE — returns metadata +
-      sha256 + a `fetch_url` to the binary. Pass `inline=true` to also
-      get base64 of the bytes (only for small files; base64 is bloated
-      and burns context — prefer the reference or a tool that reads
-      `fetch_url`). Use for handing a file to a code/conversion tool.
+    - `raw`: the original bytes. Returns metadata + sha256 + base64 of
+      the bytes (default, for files <= ~1 MB). `fetch_url` is included
+      but is NOT fetchable by the model (needs an authed browser
+      session); use the base64 field. Pass `inline=false` for
+      reference-only, or raise the size cap server-side for big files.
 
     `attachment_id` comes from `get_thread`'s `attachments[*].id`."""
     if mode not in _ATTACHMENT_VALID_MODES:
