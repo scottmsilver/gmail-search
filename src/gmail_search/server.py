@@ -693,6 +693,15 @@ def create_app(
     # weak refs to tasks, so without this an unreferenced close task can be GC'd
     # mid-sleep — silently leaking the index copy we meant to free.
     _pending_closes: set = set()
+    # Strong refs to background tasks. asyncio holds only weak refs to tasks,
+    # so without this an unreferenced task can be GC'd mid-run (mirrors the
+    # _pending_closes pattern at server.py:692-695).
+    _background_tasks: set = set()
+    # Flipped True once the bootstrap engine is warm OR we've determined there's
+    # no index to warm yet. Read by GET /healthz?ready=1. Dict-wrapped so the
+    # nested _prewarm_engine / healthz closures mutate the same cell without a
+    # `nonlocal` declaration.
+    _ready = {"value": False}
 
     def _user_index_dir(user_id: str) -> Path:
         # Per-user fallback dir; resolve_active_index_dir uses the DB
@@ -728,9 +737,12 @@ def create_app(
             return built
 
     async def _prewarm_engine() -> None:
-        """Startup hook: prewarm the bootstrap user's engine so the
-        operator's first search isn't a 185ms cold load. Other users
-        get lazy-loaded on first request."""
+        """Startup hook (runs in the BACKGROUND, not awaited): prewarm the
+        bootstrap user's engine so the operator's first search isn't a cold
+        load. Never raises into the task — a failed prewarm just means the
+        first request cold-loads. Always flips `_ready` so /healthz?ready=1
+        stops 503ing once we've either warmed or determined there's nothing
+        to warm."""
         import asyncio as _asyncio
         import time as _time
 
@@ -738,21 +750,36 @@ def create_app(
         from gmail_search.store.db import get_connection as _get_conn
 
         try:
-            _conn = _get_conn(db_path)
             try:
-                bootstrap_uid = get_bootstrap_user_id(_conn)
-            finally:
-                _conn.close()
-        except Exception as e:
-            logger.warning(f"engine prewarm: no bootstrap user yet ({e}); deferring")
-            return
-        start = _time.time()
-        current = resolve_active_index_dir(db_path, _user_index_dir(bootstrap_uid), user_id=bootstrap_uid)
-        built = await _asyncio.to_thread(_build_engine, bootstrap_uid, current)
-        with _engine_lock:
-            _engines[bootstrap_uid] = built
-            _engine_index_dirs[bootstrap_uid] = current
-        logger.info(f"engine prewarmed for {bootstrap_uid} in {_time.time() - start:.1f}s (index={current.name})")
+                _conn = _get_conn(db_path)
+                try:
+                    bootstrap_uid = get_bootstrap_user_id(_conn)
+                finally:
+                    _conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"engine prewarm: no bootstrap user yet ({e}); serving cold")
+                return  # finally still flips _ready
+
+            start = _time.time()
+            current = resolve_active_index_dir(db_path, _user_index_dir(bootstrap_uid), user_id=bootstrap_uid)
+            try:
+                built = await _asyncio.to_thread(_build_engine, bootstrap_uid, current)
+            except FileNotFoundError:
+                # No index to warm ⇒ legitimately ready (R7). The first
+                # search returns pending_index via api_search's own handler.
+                logger.info("engine prewarm: no index for %s yet; serving as ready", bootstrap_uid)
+                return
+            with _engine_lock:
+                # setdefault (NOT `=`): if a concurrent first request already
+                # built + cached the engine via get_engine, do not clobber it
+                # (R4/R5). The prewarm-built instance is discarded in that case.
+                _engines.setdefault(bootstrap_uid, built)
+                _engine_index_dirs.setdefault(bootstrap_uid, current)
+            logger.info(f"engine prewarmed for {bootstrap_uid} in {_time.time() - start:.1f}s (index={current.name})")
+        except Exception as e:  # noqa: BLE001 — never let prewarm kill startup (R6)
+            logger.warning(f"engine prewarm failed, will cold-load on first request: {e}")
+        finally:
+            _ready["value"] = True
 
     def _schedule_retired_searcher_close(old_searcher: object, user_id: str) -> None:
         """Free a hot-swapped-out searcher promptly after a short grace delay.
@@ -842,11 +869,33 @@ def create_app(
         # mount lags. The check is also re-run per-turn in
         # service.py:_real_run as belt-and-suspenders.
         sync_credentials_if_stale()
-        # Block startup on the initial build so the first incoming
-        # request hits a warm engine, not a cold one.
-        await _prewarm_engine()
-        # Then fire off the poller as a background task.
-        _asyncio.create_task(_engine_swap_watcher())
+        # Prewarm in the BACKGROUND so the port accepts traffic immediately
+        # instead of hanging for the full multi-GB ScaNN load. The first
+        # search either finds the warmed engine or builds it itself via
+        # get_engine() (single-winner under _engine_lock). /healthz?ready=1
+        # reports 503 until the bootstrap engine is warm (or there's no index).
+        _prewarm_task = _asyncio.create_task(_prewarm_engine())
+        _background_tasks.add(_prewarm_task)
+        _prewarm_task.add_done_callback(_background_tasks.discard)
+        # Fire the hot-swap poller as a background task too. Keep a strong ref.
+        _swap_task = _asyncio.create_task(_engine_swap_watcher())
+        _background_tasks.add(_swap_task)
+        _swap_task.add_done_callback(_background_tasks.discard)
+
+    @app.get("/healthz")
+    async def healthz(ready: int = Query(0)):
+        # Liveness (default): always 200 — the process is up and the event
+        # loop is responsive. Readiness (?ready=1): 200 only once the bootstrap
+        # engine is warm (or there's no index to warm); 503 while warming so a
+        # load balancer / systemd readiness probe holds traffic off a cold node.
+        # NB: readiness reflects the BOOTSTRAP user's engine only, not per-tenant
+        # warmth — other users lazy-load on first request. It means "the
+        # operator's hot path won't cold-stall," not "all tenants warm."
+        if not ready:
+            return {"ok": True}
+        if _ready["value"]:
+            return {"ok": True, "ready": True}
+        return JSONResponse({"ok": False, "ready": False, "reason": "index warming"}, status_code=503)
 
     @app.get("/", response_class=HTMLResponse)
     async def home():
