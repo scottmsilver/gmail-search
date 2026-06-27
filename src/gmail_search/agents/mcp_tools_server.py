@@ -1069,7 +1069,9 @@ def _register_blob_route(app) -> None:
     import httpx
     import jwt
     from starlette.requests import Request
-    from starlette.responses import JSONResponse, Response
+    from starlette.responses import JSONResponse, StreamingResponse
+
+    _BLOB_MAX_BYTES = 30 * 1024 * 1024  # bound the proxy: reject oversized, stream the rest
 
     @app.custom_route("/attachment", methods=["GET"])
     async def serve_attachment_blob(request: Request):
@@ -1092,21 +1094,40 @@ def _register_blob_route(app) -> None:
         admin = os.environ.get("GMAIL_MCP_ADMIN_TOKEN")
         if admin:
             headers["Authorization"] = f"Bearer {admin}"
+        # Stream (don't buffer) + reject oversized, so a valid link can't pin
+        # memory proportional to file size x concurrency.
+        client = httpx.AsyncClient(timeout=120)
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                r = await client.get(f"{base}/api/attachment/{aid}", headers=headers)
+            upstream = await client.send(
+                client.build_request("GET", f"{base}/api/attachment/{aid}", headers=headers), stream=True
+            )
         except Exception:
+            await client.aclose()
             return JSONResponse({"error": "upstream unavailable"}, status_code=502)
-        if r.status_code != 200:
-            return JSONResponse({"error": "attachment unavailable"}, status_code=r.status_code)
+        if upstream.status_code != 200:
+            await upstream.aclose()
+            await client.aclose()
+            return JSONResponse({"error": "attachment unavailable"}, status_code=upstream.status_code)
+        clen = upstream.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > _BLOB_MAX_BYTES:
+            await upstream.aclose()
+            await client.aclose()
+            return JSONResponse({"error": "attachment too large for fetch"}, status_code=413)
         out_headers = {}
-        cd = r.headers.get("content-disposition")
+        cd = upstream.headers.get("content-disposition")
         if cd:
             out_headers["content-disposition"] = cd
-        return Response(
-            content=r.content,
-            media_type=r.headers.get("content-type", "application/octet-stream"),
-            headers=out_headers,
+
+        async def _body():
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            _body(), media_type=upstream.headers.get("content-type", "application/octet-stream"), headers=out_headers
         )
 
 
