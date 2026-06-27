@@ -896,11 +896,14 @@ DESCRIBE_SCHEMA_DESC = (
 
 ATTACHMENT_BATCH_DESC = (
     "Fetch many email attachments concurrently in ONE call. `items` "
-    "is a list (1-100) of `{attachment_id, mode?}` dicts. `mode` is "
+    "is a list (1-100) of `{attachment_id, mode?, inline?}` dicts. `mode` is "
     "one of: 'meta' (filename/mime/size only — cheap), 'text' "
     "(extracted text from PDFs/docx/OCR — the usual choice, default), "
     "'rendered_pages' (PDF pages as base64 PNGs — heavy, only when "
-    "text is empty/unhelpful). `attachment_id` comes from a thread's "
+    "text is empty/unhelpful), 'raw' (original bytes BY REFERENCE: "
+    "metadata + sha256 + fetch_url; add inline:true for capped base64 of "
+    "small files — prefer the reference, base64 bloats context). "
+    "`attachment_id` comes from a thread's "
     "`attachments[].id`. Returns `{results: [{input, result}, ...]}` "
     f"aligned with input. Even a single attachment goes through this tool. {SESSION_PARAM_NOTE}"
 )

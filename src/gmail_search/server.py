@@ -1869,6 +1869,55 @@ def create_app(
         finally:
             conn.close()
 
+    @app.get("/api/attachment/{attachment_id}/raw")
+    async def api_attachment_raw(
+        attachment_id: int,
+        inline: bool = Query(False),
+        max_inline_bytes: int = Query(5 * 1024 * 1024, ge=0, le=10 * 1024 * 1024),
+        user_id: str = Depends(require_user_id),
+    ):
+        """Raw attachment bytes BY REFERENCE: metadata + sha256 + a `fetch_url` to
+        the binary download endpoint. The actual bytes are base64-inlined ONLY when
+        `inline=true` and the file is <= `max_inline_bytes` — base64 bloats ~33% and
+        burns model context, so prefer `fetch_url` (or a tool that reads the file).
+        user_id-scoped + path-traversal guarded (mirrors GET /api/attachment/{id})."""
+        import base64 as _b64
+        import hashlib as _hashlib
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT raw_path, mime_type, filename FROM attachments WHERE id = %s AND user_id = %s",
+                (attachment_id, user_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or not row["raw_path"]:
+            return JSONResponse({"error": "Attachment not found"}, status_code=404)
+        resolved = Path(row["raw_path"]).resolve()
+        if not resolved.is_relative_to(data_dir.resolve()):
+            return JSONResponse({"error": "Invalid attachment path"}, status_code=403)
+        if not resolved.exists():
+            return JSONResponse({"error": "Attachment file missing"}, status_code=404)
+        data = resolved.read_bytes()
+        out = {
+            "attachment_id": attachment_id,
+            "filename": row["filename"],
+            "mime_type": row["mime_type"],
+            "size_bytes": len(data),
+            "sha256": _hashlib.sha256(data).hexdigest(),
+            "fetch_url": f"/api/attachment/{attachment_id}",
+            "base64": None,
+        }
+        if inline:
+            if len(data) <= max_inline_bytes:
+                out["base64"] = _b64.b64encode(data).decode("ascii")
+            else:
+                out["base64_omitted"] = (
+                    f"{len(data)} bytes exceeds max_inline_bytes={max_inline_bytes}; fetch the binary via fetch_url"
+                )
+        return out
+
     @app.get("/api/attachment/{attachment_id}/text")
     async def api_attachment_text(
         attachment_id: int,

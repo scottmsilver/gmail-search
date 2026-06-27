@@ -445,11 +445,13 @@ async def describe_schema(*, user_id: str | None = None) -> dict:
 # ── get_attachment ─────────────────────────────────────────────────
 
 
-_ATTACHMENT_VALID_MODES = ("meta", "text", "rendered_pages")
+_ATTACHMENT_VALID_MODES = ("meta", "text", "rendered_pages", "raw")
 
 
-async def get_attachment(attachment_id: int, mode: str = "text", *, user_id: str | None = None) -> dict:
-    """Fetch an email attachment in one of three shapes:
+async def get_attachment(
+    attachment_id: int, mode: str = "text", inline: bool = False, *, user_id: str | None = None
+) -> dict:
+    """Fetch an email attachment in one of four shapes:
 
     - `meta`: filename + mime_type + size_bytes + thread_id, no body.
       Cheap, useful for "what's attached?" queries before deciding
@@ -460,6 +462,11 @@ async def get_attachment(attachment_id: int, mode: str = "text", *, user_id: str
       (multiple MB per page), token-expensive — only use when text
       extraction is empty or unhelpful (scans, complex layouts) AND
       the model can read images.
+    - `raw`: the original bytes, BY REFERENCE — returns metadata +
+      sha256 + a `fetch_url` to the binary. Pass `inline=true` to also
+      get base64 of the bytes (only for small files; base64 is bloated
+      and burns context — prefer the reference or a tool that reads
+      `fetch_url`). Use for handing a file to a code/conversion tool.
 
     `attachment_id` comes from `get_thread`'s `attachments[*].id`."""
     if mode not in _ATTACHMENT_VALID_MODES:
@@ -468,6 +475,12 @@ async def get_attachment(attachment_id: int, mode: str = "text", *, user_id: str
         return await _get(f"/api/attachment/{attachment_id}/meta", user_id=user_id)
     if mode == "text":
         return await _get(f"/api/attachment/{attachment_id}/text", user_id=user_id)
+    if mode == "raw":
+        return await _get(
+            f"/api/attachment/{attachment_id}/raw",
+            params={"inline": "true" if inline else "false"},
+            user_id=user_id,
+        )
     return await _get(f"/api/attachment/{attachment_id}/render_pages", user_id=user_id)
 
 

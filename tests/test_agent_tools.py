@@ -353,3 +353,54 @@ def test_build_retrieval_tools_assembles_expected_set():
         "sql_query",
         "sql_query_batch",
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_attachment_raw_mode_by_reference(monkeypatch):
+    """raw mode hits /raw by-reference; inline flag is threaded; bad mode rejected."""
+    import httpx
+
+    from gmail_search.agents import tools
+
+    captured = {}
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"attachment_id": 7, "fetch_url": "/api/attachment/7", "base64": None}
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url, params=None, headers=None):  # noqa: ARG002
+            captured["url"] = url
+            captured["params"] = params
+            return _R()
+
+        async def post(self, url, json=None, headers=None):  # noqa: ARG002
+            return _R()
+
+    monkeypatch.setattr(tools.httpx, "AsyncClient", _C)
+    monkeypatch.setattr(httpx, "AsyncClient", _C)
+
+    await tools.get_attachment(7, mode="raw", user_id="u1")
+    assert captured["url"].endswith("/api/attachment/7/raw")
+    assert captured["params"]["inline"] == "false"  # by-reference default, no base64
+
+    await tools.get_attachment(7, mode="raw", inline=True, user_id="u1")
+    assert captured["params"]["inline"] == "true"  # opt-in inline base64
+
+    bad = await tools.get_attachment(7, mode="bogus", user_id="u1")
+    assert "error" in bad
