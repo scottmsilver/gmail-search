@@ -272,6 +272,8 @@ def extract(ctx):
                         continue
                     title, text = result
                     try:
+                        from gmail_search.store.queries import fill_drive_attachment
+
                         fill_drive_attachment(conn, attachment_id=att.id, title=title, text=text, drive_id=drive_id)
                         conn.commit()
                         drive_fetched += 1
@@ -955,7 +957,6 @@ def watch(ctx, interval, budget, max_cycles, email):
     db_path = ctx.obj["db_path"]
     data_dir = ctx.obj["data_dir"]
     att_config = cfg.get("attachments", {})
-    index_dir = data_dir / "scann_index"
 
     if budget:
         cfg["budget"]["max_usd"] = budget

@@ -44,6 +44,11 @@ from gmail_search.agents.tools import get_thread_batch as _get_thread_batch_impl
 from gmail_search.agents.tools import query_emails_batch as _query_emails_batch_impl
 from gmail_search.agents.tools import search_emails_batch as _search_emails_batch_impl
 from gmail_search.agents.tools import sql_query_batch as _sql_query_batch_impl
+from gmail_search.trace import (  # noqa: F401  (used in tool wrappers + _log_tool_call; keep against import-stripper)
+    current_trace_id,
+    new_trace_id,
+    set_trace_id,
+)
 
 logger = logging.getLogger(__name__)
 

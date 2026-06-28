@@ -90,7 +90,6 @@ def strip_quoted_replies(body: str) -> str:
 
     lines = body.split("\n")
     cleaned: list[str] = []
-    skip_rest = False
 
     for line in lines:
         stripped = line.strip()

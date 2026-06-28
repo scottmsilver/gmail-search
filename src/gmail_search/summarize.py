@@ -29,6 +29,7 @@ from typing import Iterable
 import httpx
 
 from gmail_search.llm import get_backend
+from gmail_search.llm.backend import Backend
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)

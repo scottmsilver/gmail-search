@@ -471,7 +471,7 @@ def test_publish_artifact_missing_file_returns_clean_error(tmp_path, monkeypatch
 def test_publish_artifact_falls_back_to_scratch_root(tmp_path, monkeypatch):
     """If a session has BOTH workspace and conversation_id and the
     file isn't in the workspace, the resolver tries the scratch root."""
-    ws_dir = _setup_publish_session(tmp_path, monkeypatch, conversation_id="conv-fb")
+    _setup_publish_session(tmp_path, monkeypatch, conversation_id="conv-fb")
     scratch_dir = tmp_path / "scratch" / "conv-fb"
     (scratch_dir / "from_sandbox.txt").write_bytes(b"hi")
 
@@ -491,8 +491,10 @@ def test_rewrite_blob_urls_makes_absolute_signed_url(monkeypatch):
 
     resp = {
         "results": [
-            {"input": {"attachment_id": 5, "mode": "raw"},
-             "result": {"attachment_id": 5, "blob_token": "TOK123", "fetch_url": "/api/attachment/5"}}
+            {
+                "input": {"attachment_id": 5, "mode": "raw"},
+                "result": {"attachment_id": 5, "blob_token": "TOK123", "fetch_url": "/api/attachment/5"},
+            }
         ]
     }
     M._rewrite_blob_urls(resp)

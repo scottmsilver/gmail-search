@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from gmail_search.index.builder import build_index_delta, build_index_sharded, shard_size_from_budget
 from gmail_search.store.db import (

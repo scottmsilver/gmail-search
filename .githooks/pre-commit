@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# Structural commit gate: NO commit unless lint + tests pass.
+#
+# This is what stops "the formatter stripped an import -> NameError" (and the
+# whole class of broken-on-commit bugs) from ever landing again. `ruff check`
+# catches undefined names (F821) / unused imports (F401) statically; `pytest`
+# catches the rest at runtime.
+#
+# Enabled via:  git config core.hooksPath .githooks   (see scripts/setup-dev.sh)
+# Override (use sparingly, you own the consequences):  git commit --no-verify
+# Skip for one commit without --no-verify:             SKIP_HOOKS=1 git commit ...
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ "${SKIP_HOOKS:-}" = "1" ]; then
+  echo "[pre-commit] SKIP_HOOKS=1 set — skipping lint + tests"
+  exit 0
+fi
+
+RUFF="${GMS_RUFF:-ruff}"
+PY="${GMS_PYTHON:-python}"
+
+echo "[pre-commit] ruff check (undefined names / unused imports / redefinitions)…"
+if ! "$RUFF" check src/ tests/; then
+  echo "[pre-commit] ✗ ruff failed — fix the above (or bypass with: git commit --no-verify)" >&2
+  exit 1
+fi
+
+echo "[pre-commit] pytest (fast suite — integration/perf excluded)…"
+if ! "$PY" -m pytest -q; then
+  echo "[pre-commit] ✗ tests failed — fix them (or bypass with: git commit --no-verify)" >&2
+  exit 1
+fi
+
+echo "[pre-commit] ✓ lint + tests passed"

@@ -62,7 +62,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "requests"]
+dev = ["pytest", "requests", "ruff>=0.5"]
 
 [project.scripts]
 gmail-search = "gmail_search.cli:main"
@@ -78,3 +78,18 @@ markers = [
     "perf_slow: search perf gate that builds a ~10GB ScaNN engine (~100s) or drives live HTTP; opt-in via pytest -m perf_slow",
 ]
 addopts = "-m 'not integration and not perf_slow'"
+
+[tool.ruff.lint]
+# Gate on Pyflakes (F) — these are correctness bugs, not style: F821 undefined
+# names (e.g. an import the auto-formatter stripped while the name is still
+# used — the exact failure the pre-commit gate exists to stop), F401 unused
+# imports, F811 redefinitions. Keep this tight so the gate has ~zero false
+# positives and stays trustworthy.
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Pre-existing: tests/test_index_builder.py has two diverged copies of the same
+# test names (only the later set runs under pytest). That's a real test bug to
+# resolve separately; ignore F811 here so the gate is green meanwhile.
+# TODO: dedupe the shadowed tests and remove this ignore.
+"tests/test_index_builder.py" = ["F811"]

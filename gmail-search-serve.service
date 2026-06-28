@@ -1,0 +1,29 @@
+[Unit]
+Description=Gmail Search — FastAPI serve (web/API backend, port 8090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/development/gmail-search
+# Secrets serve needs (GEMINI_API_KEY, GMS_SESSION_SECRET, GMAIL_MCP_ADMIN_TOKEN,
+# GMAIL_MULTI_TENANT, …) all live here. DB_DSN is unset -> the local default.
+EnvironmentFile=%h/.config/gmail-search/multi-tenant.env
+# JSON logs on disk (not a secret, so inline + tracked). serve itself also sets
+# GMS_DEFAULT_STATEMENT_TIMEOUT_MS via setdefault.
+Environment=GMS_LOG_JSON=1
+ExecStart=%h/anaconda3/bin/gmail-search serve --port 8090 --data-dir %h/development/gmail-search/data
+StandardOutput=append:%h/development/gmail-search/data/serve.log
+StandardError=append:%h/development/gmail-search/data/serve.log
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+
+# Install + run NOW (deliberately NOT enabled for boot):
+#   cp gmail-search-serve.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user start gmail-search-serve.service
+# To also auto-start on boot later: systemctl --user enable gmail-search-serve.service
+# Tail the log: tail -f data/serve.log   (JSON; browse with lnav — see deploy/lnav/)
