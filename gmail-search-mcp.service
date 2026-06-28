@@ -1,0 +1,26 @@
+[Unit]
+Description=Gmail Search — MCP tools server (streamable-HTTP transport, port 7878)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/development/gmail-search
+ExecStart=%h/anaconda3/bin/python -m gmail_search.agents.mcp_tools_server
+EnvironmentFile=%h/.config/gmail-search/mcp.env
+# Log MCP server output (incl. the per-tool-call "MCP CALL ..." lines emitted
+# by _log_tool_call) to a real file on disk instead of the journal. `append:`
+# keeps appending across restarts. Requires systemd >= 240.
+StandardOutput=append:%h/development/gmail-search/data/mcp.log
+StandardError=append:%h/development/gmail-search/data/mcp.log
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+
+# Install (per-user):
+#   cp gmail-search-mcp.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gmail-search-mcp.service
+# Tail the log:  tail -f data/mcp.log

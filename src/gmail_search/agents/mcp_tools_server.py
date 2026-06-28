@@ -154,6 +154,34 @@ _SESSION_CALLS: dict[str, list[dict]] = {}
 _SESSION_CAP_WARNED: set[str] = set()
 
 
+def _log_tool_call(session_id: str, name: str, args: dict, response: dict) -> None:
+    """Emit one concise, on-disk log line per MCP tool call: tool name, a
+    truncated arg summary (the caller's own queries — not secrets), and the
+    outcome (ok / N-items-with-K-errors / ERROR). With the service's stdout
+    redirected to data/mcp.log, this is the human-readable MCP call log."""
+    import json as _json
+
+    try:
+        argstr = _json.dumps(args, default=str)
+    except Exception:  # noqa: BLE001
+        argstr = str(args)
+    if len(argstr) > 400:
+        argstr = argstr[:400] + "…"
+
+    if isinstance(response, dict) and "error" in response:
+        outcome = f"ERROR: {str(response['error'])[:200]}"
+    elif isinstance(response, dict) and isinstance(response.get("results"), list):
+        results = response["results"]
+        errs = sum(
+            1 for r in results if isinstance(r, dict) and isinstance(r.get("result"), dict) and "error" in r["result"]
+        )
+        outcome = f"ok ({len(results)} items" + (f", {errs} errors)" if errs else ")")
+    else:
+        outcome = "ok"
+
+    logger.info("MCP CALL tool=%s session=%s args=%s -> %s", name, (session_id or "")[:12], argstr, outcome)
+
+
 def _record_call(session_id: str, name: str, args: dict, response: dict) -> None:
     """Append one tool call to two stores:
 
@@ -168,6 +196,8 @@ def _record_call(session_id: str, name: str, args: dict, response: dict) -> None
        pane reads from. Best-effort: a failed DB write logs and
        continues — the in-memory log is the fallback."""
     import time as _time
+
+    _log_tool_call(session_id, name, args, response)
 
     bucket = _SESSION_CALLS.setdefault(session_id, [])
     over_cap = len(bucket) >= _MAX_CALLS_PER_SESSION
