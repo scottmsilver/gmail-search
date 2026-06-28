@@ -146,6 +146,26 @@ def get_message(conn, message_id: str, *, user_id: Optional[str] = None) -> Mess
     )
 
 
+def get_message_bodies_bulk(conn, message_ids: list[str], *, user_id: Optional[str] = None) -> dict[str, str]:
+    """Fetch plain-text bodies for many messages at once, keyed by id.
+
+    Used by the search endpoint's `match_detail=full` mode so an agent can
+    read whole emails per match in one round-trip instead of N get_thread
+    calls. Scoped to `user_id` when given so one user's search can never
+    surface another user's body text."""
+    if not message_ids:
+        return {}
+    ids = list(message_ids)
+    if user_id is not None:
+        rows = conn.execute(
+            "SELECT id, body_text FROM messages WHERE id = ANY(%s) AND user_id = %s",
+            (ids, user_id),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT id, body_text FROM messages WHERE id = ANY(%s)", (ids,)).fetchall()
+    return {r["id"]: (r["body_text"] or "") for r in rows}
+
+
 def get_messages_without_embeddings(
     conn, model: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
 ) -> list[Message]:

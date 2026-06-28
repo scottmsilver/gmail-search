@@ -183,6 +183,32 @@ def _capture_get_request(monkeypatch, response_json: dict):
 
 
 @pytest.mark.asyncio
+async def test_search_emails_batch_isolates_failures(monkeypatch):
+    """A single failing/slow search must NOT nuke the whole batch — it lands
+    as a per-item {error} while siblings still return. This is the regression
+    that caused multi-item search_emails_batch to error while singles worked
+    (one httpx ReadTimeout propagated through a bare asyncio.gather)."""
+    from gmail_search.agents import tools
+
+    async def fake_search(**kwargs):
+        if kwargs.get("query") == "boom":
+            raise RuntimeError("simulated timeout")
+        return {"results": [{"thread_id": "t1"}]}
+
+    monkeypatch.setattr(tools, "search_emails", fake_search)
+
+    out = await tools.search_emails_batch([{"query": "ok"}, {"query": "boom"}, {"query": "ok2"}])
+    assert len(out["results"]) == 3
+    assert out["results"][0]["result"] == {"results": [{"thread_id": "t1"}]}
+    assert "RuntimeError" in out["results"][1]["result"]["error"]
+    assert out["results"][2]["result"] == {"results": [{"thread_id": "t1"}]}
+
+    # A malformed (non-dict) item is isolated too, not a crash.
+    out = await tools.search_emails_batch([{"query": "ok"}, "notadict"])
+    assert "error" in out["results"][1]["result"]
+
+
+@pytest.mark.asyncio
 async def test_find_facts_constructs_url_and_params(monkeypatch):
     """find_facts must GET /api/find_facts with q + cap (k) + the
     boolean flags coerced to lowercase strings the FastAPI bool Query
@@ -200,6 +226,23 @@ async def test_find_facts_constructs_url_and_params(monkeypatch):
     assert captured["params"]["exhaustive"] == "true"
     assert captured["params"]["hybrid"] == "true"
     assert data == payload
+
+
+@pytest.mark.asyncio
+async def test_search_emails_detail_param(monkeypatch):
+    """search_emails forwards `detail` as the match_detail query param,
+    defaulting to the compact 'snippet' level so agents don't pay for
+    per-message summaries/bodies they didn't ask for."""
+    from gmail_search.agents.tools import search_emails
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("flights")
+    assert captured["url"].endswith("/api/search")
+    assert captured["params"]["match_detail"] == "snippet"
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("flights", detail="full")
+    assert captured["params"]["match_detail"] == "full"
 
 
 @pytest.mark.asyncio

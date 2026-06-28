@@ -112,6 +112,10 @@ const SearchInner = () => {
         url.searchParams.set("q", trimmed);
         url.searchParams.set("k", "30");
         url.searchParams.set("sort", s);
+        // The result rows prefer the LLM summary over the raw snippet — ask
+        // for the richer per-match shape. (The API default is snippet-only,
+        // tuned for agents/token budget.)
+        url.searchParams.set("match_detail", "summary");
         const res = await fetch(url.toString(), { cache: "no-store" });
         if (!res.ok) {
           setResults([]);

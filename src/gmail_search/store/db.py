@@ -288,7 +288,12 @@ def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> i
     conn = get_connection(db_path)
     uid = resolve_write_user_id(conn, user_id=user_id)
 
-    conn.execute("DELETE FROM thread_summary WHERE user_id = %s", (uid,))
+    # NOTE: we deliberately do NOT `DELETE FROM thread_summary WHERE user_id`
+    # here. This function runs on every (frequent) reindex pass, and a
+    # wipe-and-reinsert churned ~308K dead tuples per cycle — 294M ins/del
+    # over time, bloating the table to 25 GB and seq-scanning search to ~10s.
+    # Instead we UPSERT with a no-op guard (unchanged rows write nothing, so
+    # zero dead tuples) and delete only threads that truly no longer exist.
 
     # Pull user_id along with the thread fields — every thread is
     # owned by the user whose messages compose it. The (user_id,
@@ -321,11 +326,31 @@ def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> i
 
     for tid, t in threads.items():
         participants = list(dict.fromkeys(t["from_addrs"]))  # ordered unique
+        # UPSERT with a no-op guard: the DO UPDATE only fires (and only then
+        # writes a new row version) when at least one column actually changed.
+        # Unchanged threads — the vast majority each cycle — produce no write
+        # and therefore no dead tuple. Computed values are identical to the
+        # previous wipe-and-reinsert, so search ranking is unaffected.
         conn.execute(
             """INSERT INTO thread_summary
                (thread_id, subject, participants, all_from_addrs, all_labels,
                 message_count, date_first, date_last, user_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (thread_id, user_id) DO UPDATE SET
+                 subject = excluded.subject,
+                 participants = excluded.participants,
+                 all_from_addrs = excluded.all_from_addrs,
+                 all_labels = excluded.all_labels,
+                 message_count = excluded.message_count,
+                 date_first = excluded.date_first,
+                 date_last = excluded.date_last
+               WHERE thread_summary.subject        IS DISTINCT FROM excluded.subject
+                  OR thread_summary.participants    IS DISTINCT FROM excluded.participants
+                  OR thread_summary.all_from_addrs  IS DISTINCT FROM excluded.all_from_addrs
+                  OR thread_summary.all_labels      IS DISTINCT FROM excluded.all_labels
+                  OR thread_summary.message_count   IS DISTINCT FROM excluded.message_count
+                  OR thread_summary.date_first      IS DISTINCT FROM excluded.date_first
+                  OR thread_summary.date_last       IS DISTINCT FROM excluded.date_last""",
             (
                 tid,
                 t["subject"],
@@ -338,6 +363,18 @@ def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> i
                 t["user_id"],
             ),
         )
+
+    # Drop summaries for threads that no longer have any messages (deleted /
+    # purged). This is the only DELETE — it touches just the genuinely-stale
+    # rows (normally zero), not the whole table, so it adds no meaningful churn.
+    conn.execute(
+        """DELETE FROM thread_summary ts
+           WHERE ts.user_id = %s
+             AND NOT EXISTS (
+               SELECT 1 FROM messages m
+               WHERE m.thread_id = ts.thread_id AND m.user_id = %s)""",
+        (uid, uid),
+    )
 
     conn.commit()
     count = len(threads)
@@ -1515,10 +1552,34 @@ def _connect_pg():
     """Return a `_PgConnWrapper` around a fresh psycopg connection.
     We don't pool here because the existing call sites open/close
     connections freely.
+
+    Optionally applies a default `statement_timeout`, gated by the
+    `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` env var so it only binds in
+    processes that opt in. The serve (user-facing) process sets it, so a
+    runaway query — e.g. a future seq-scan regression like the
+    thread_summary bloat — can't tie up a request indefinitely. Daemons
+    (separate processes: reindex/backfill/summarize/vacuum) leave it
+    unset and stay unbounded; they are the "marked specially"
+    long-running work. An empty/0/invalid value disables the cap.
     """
+    import os as _os
+
     import psycopg
 
     raw = psycopg.connect(_pg_dsn(), row_factory=_compat_row_factory)
+    raw_timeout = _os.environ.get("GMS_DEFAULT_STATEMENT_TIMEOUT_MS")
+    if raw_timeout:
+        try:
+            ms = int(raw_timeout)
+        except ValueError:
+            ms = 0
+        if ms > 0:
+            # autocommit so the SET persists at session scope (a SET inside a
+            # rolled-back txn would revert); restore the txn mode callers expect.
+            raw.autocommit = True
+            with raw.cursor() as cur:
+                cur.execute(f"SET statement_timeout = {ms}")
+            raw.autocommit = False
     return _PgConnWrapper(raw)
 
 

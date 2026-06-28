@@ -71,5 +71,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "integration: requires live MCP+claudebox+postgres+gmail-search stack; opt-in via pytest -m integration",
+    "perf_slow: search perf gate that builds a ~10GB ScaNN engine (~100s) or drives live HTTP; opt-in via pytest -m perf_slow",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not perf_slow'"

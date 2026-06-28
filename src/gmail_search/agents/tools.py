@@ -37,7 +37,23 @@ SEARCH_ENRICH_BODY_CHARS = 4000
 QUERY_ENRICH_BODY_CHARS = 2000
 THREAD_BODY_CHAR_CAP = 20_000
 SQL_CELL_CHAR_CAP = 8_000
-DEFAULT_TIMEOUT_SECONDS = 30
+
+
+# HTTP timeout for the in-process /api/* calls. Env-overridable so it can be
+# tuned without a code change (never a hardcoded URL — just a duration). A
+# single search is normally <2s; the headroom covers concurrent batch fan-out.
+def _agent_http_timeout() -> float:
+    """Parse GMAIL_AGENT_HTTP_TIMEOUT, falling back to 60s on a bad/empty/
+    non-positive value. Must never raise: this runs at import time and a
+    crash here would take down both serve and the MCP tools server."""
+    try:
+        v = float(os.environ.get("GMAIL_AGENT_HTTP_TIMEOUT", "60"))
+        return v if v > 0 else 60.0
+    except (TypeError, ValueError):
+        return 60.0
+
+
+DEFAULT_TIMEOUT_SECONDS = _agent_http_timeout()
 
 
 def _default_base_url() -> str:
@@ -99,11 +115,18 @@ async def _get(
     crash the whole turn on one bad SQL syntax mistake.
     """
     url = (base_url or _default_base_url()) + path
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.get(url, params=params or {}, headers=_service_headers(user_id))
-        if resp.status_code >= 400:
-            return _error_payload(resp)
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            resp = await client.get(url, params=params or {}, headers=_service_headers(user_id))
+            if resp.status_code >= 400:
+                return _error_payload(resp)
+            return resp.json()
+    except httpx.HTTPError as exc:
+        # Transport-level failures (timeouts, connection resets) must NOT raise:
+        # a single slow search would otherwise propagate through the batch
+        # gather and kill every other search in the call. Surface it as a
+        # tool-visible error instead, like 4xx/5xx above.
+        return {"error": f"request failed: {type(exc).__name__}: {exc}", "kind": "transport"}
 
 
 async def _post(
@@ -114,11 +137,14 @@ async def _post(
     user_id: str | None = None,
 ) -> dict:
     url = (base_url or _default_base_url()) + path
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
-        resp = await client.post(url, json=json, headers=_service_headers(user_id))
-        if resp.status_code >= 400:
-            return _error_payload(resp)
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            resp = await client.post(url, json=json, headers=_service_headers(user_id))
+            if resp.status_code >= 400:
+                return _error_payload(resp)
+            return resp.json()
+    except httpx.HTTPError as exc:
+        return {"error": f"request failed: {type(exc).__name__}: {exc}", "kind": "transport"}
 
 
 def _error_payload(resp) -> dict:
@@ -142,6 +168,7 @@ async def search_emails(
     date_from: str = "",
     date_to: str = "",
     top_k: int = 10,
+    detail: str = "snippet",
     *,
     user_id: str | None = None,
 ) -> dict:
@@ -152,11 +179,22 @@ async def search_emails(
     date filter. `top_k` caps the number of threads returned; default
     10 is a sensible middle ground.
 
+    `detail` controls how much content comes back per match — pick the
+    cheapest level that answers your question, since bigger levels cost
+    far more tokens:
+      - "snippet" (default): the matched-text snippet only. Best for
+        inventories / "how many" / locating which threads to look at.
+      - "summary": + a one-line LLM summary of each matched message.
+        Often enough to answer without opening the thread.
+      - "full": + the WHOLE email body of each match. Use when you
+        need to actually read the matches; avoids N get_thread calls
+        but can be large, so keep top_k modest.
+
     Returns {"results": [{thread_id, cite_ref, subject, participants,
-    score, matches: [...]}]}. Each match carries the top-hit message
-    id + a short snippet; call `get_thread` for full bodies.
+    score, matches: [...]}]}. Each match always carries the top-hit
+    message id + snippet; "summary"/"full" add `summary`/`body`.
     """
-    params: dict[str, Any] = {"q": query, "k": top_k}
+    params: dict[str, Any] = {"q": query, "k": top_k, "match_detail": detail}
     if date_from:
         params["date_from"] = date_from
     if date_to:
@@ -285,24 +323,49 @@ async def get_thread(thread_id: str, *, user_id: str | None = None) -> dict:
 BATCH_MAX_ITEMS = 100
 
 
+async def _gather_batch(make_coro, items: list) -> list:
+    """Run one coroutine per item concurrently, isolating per-item failures.
+
+    Any item that raises — whether building the coroutine (e.g. `**item` with
+    a bad key) or running it (an exception escaping the underlying tool) —
+    becomes an `{"error": ...}` result instead of aborting the whole batch.
+    This is what makes the *_batch tools' documented per-item error contract
+    actually hold: previously a bare `gather` let one failure (e.g. an httpx
+    timeout on a single slow search) propagate and kill every sibling.
+    """
+    import asyncio as _asyncio
+
+    async def _one(item):
+        try:
+            coro = make_coro(item)
+        except Exception as exc:  # noqa: BLE001 — malformed item (bad/missing keys)
+            return {"error": f"invalid item: {type(exc).__name__}: {exc}"}
+        try:
+            return await coro
+        except Exception as exc:  # noqa: BLE001 — exception escaping the tool
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    return await _asyncio.gather(*[_one(it) for it in items])
+
+
 async def search_emails_batch(searches: list[dict], *, user_id: str | None = None) -> dict:
     """Run many semantic searches concurrently. Each item is a dict
     matching `search_emails`'s signature: `{query, date_from?,
-    date_to?, top_k?}`. Use this whenever you have ≥1 search to
-    issue — even one search goes through the batch tool.
+    date_to?, top_k?, detail?}`. `detail` is "snippet" (default,
+    compact), "summary", or "full" (whole email body per match) — pick
+    the cheapest level that answers the question. Use this whenever you
+    have ≥1 search to issue — even one search goes through the batch tool.
 
     Returns `{"results": [{"input": <input dict>, "result": <search_emails shape>}, ...]}`.
     Per-search errors land in that entry's `result` as `{"error": ...}`.
 
     Cap: BATCH_MAX_ITEMS searches per call.
     """
-    import asyncio as _asyncio
-
     if not isinstance(searches, list) or not searches:
         return {"error": "searches must be a non-empty list of dicts"}
     if len(searches) > BATCH_MAX_ITEMS:
         return {"error": f"searches cap is {BATCH_MAX_ITEMS}; got {len(searches)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[search_emails(**s, user_id=user_id) for s in searches])
+    results = await _gather_batch(lambda s: search_emails(**s, user_id=user_id), searches)
     return {"results": [{"input": s, "result": r} for s, r in zip(searches, results)]}
 
 
@@ -316,13 +379,11 @@ async def query_emails_batch(filters: list[dict], *, user_id: str | None = None)
 
     Cap: BATCH_MAX_ITEMS filters per call.
     """
-    import asyncio as _asyncio
-
     if not isinstance(filters, list) or not filters:
         return {"error": "filters must be a non-empty list of dicts"}
     if len(filters) > BATCH_MAX_ITEMS:
         return {"error": f"filters cap is {BATCH_MAX_ITEMS}; got {len(filters)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[query_emails(**f, user_id=user_id) for f in filters])
+    results = await _gather_batch(lambda f: query_emails(**f, user_id=user_id), filters)
     return {"results": [{"input": f, "result": r} for f, r in zip(filters, results)]}
 
 
@@ -339,13 +400,11 @@ async def get_thread_batch(thread_ids: list[str], *, user_id: str | None = None)
 
     Cap: BATCH_MAX_ITEMS thread_ids per call. Beyond that, split.
     """
-    import asyncio as _asyncio
-
     if not isinstance(thread_ids, list) or not thread_ids:
         return {"error": "thread_ids must be a non-empty list of strings"}
     if len(thread_ids) > BATCH_MAX_ITEMS:
         return {"error": f"thread_ids cap is {BATCH_MAX_ITEMS}; got {len(thread_ids)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[get_thread(tid, user_id=user_id) for tid in thread_ids])
+    results = await _gather_batch(lambda tid: get_thread(tid, user_id=user_id), thread_ids)
     return {"results": [{"thread_id": tid, "result": r} for tid, r in zip(thread_ids, results)]}
 
 
@@ -415,13 +474,11 @@ async def sql_query_batch(queries: list[str], *, user_id: str | None = None) -> 
     (BM25 enforcement, read-only, 500-row + 10s timeout each).
     Cap: BATCH_MAX_ITEMS queries per call. Beyond that, split.
     """
-    import asyncio as _asyncio
-
     if not isinstance(queries, list) or not queries:
         return {"error": "queries must be a non-empty list of SQL strings"}
     if len(queries) > BATCH_MAX_ITEMS:
         return {"error": f"queries cap is {BATCH_MAX_ITEMS}; got {len(queries)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[sql_query(q, user_id=user_id) for q in queries])
+    results = await _gather_batch(lambda q: sql_query(q, user_id=user_id), queries)
     return {"results": [{"query": q, "result": r} for q, r in zip(queries, results)]}
 
 
@@ -493,13 +550,11 @@ async def get_attachment_batch(items: list[dict], *, user_id: str | None = None)
 
     Cap: BATCH_MAX_ITEMS attachments per call.
     """
-    import asyncio as _asyncio
-
     if not isinstance(items, list) or not items:
         return {"error": "items must be a non-empty list of dicts"}
     if len(items) > BATCH_MAX_ITEMS:
         return {"error": f"items cap is {BATCH_MAX_ITEMS}; got {len(items)}. Split into multiple batches."}
-    results = await _asyncio.gather(*[get_attachment(**it, user_id=user_id) for it in items])
+    results = await _gather_batch(lambda it: get_attachment(**it, user_id=user_id), items)
     return {"results": [{"input": it, "result": r} for it, r in zip(items, results)]}
 
 

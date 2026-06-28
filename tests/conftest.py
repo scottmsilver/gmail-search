@@ -78,7 +78,14 @@ def _pg_dsn_for_schema(schema_name: str) -> str:
     trick — the server applies it at connection start so every statement
     resolves unqualified names against our fresh schema, not `public`.
     """
-    return f"{_PG_BASE_DSN}?options=-csearch_path%3D{schema_name}"
+    # Pin a tight idle-in-transaction timeout (60s) on every test connection.
+    # A test that leaks a connection (opens a txn, never commits/closes) would
+    # otherwise pin the cluster-wide xmin horizon and starve autovacuum on the
+    # SHARED production tables — exactly the leak that bloated prod
+    # thread_summary to 25 GB / 68M dead tuples. 60s self-terminates any such
+    # zombie. (The database-level default is a looser 10min for app code.)
+    # %20 = space between -c options, %3D = '='.
+    return f"{_PG_BASE_DSN}?options=-csearch_path%3D{schema_name}" f"%20-cidle_in_transaction_session_timeout%3D60000"
 
 
 @pytest.fixture(autouse=True)

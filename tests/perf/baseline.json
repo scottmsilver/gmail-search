@@ -1,0 +1,31 @@
+{
+  "_meta": {
+    "generated_at": "2026-06-27T16:53:46",
+    "needs_blessed_regen": false,
+    "note": "Initial values: per_stage_ms + a few e2e numbers seeded from the debugging-session measurements documented in the gate's commission (thread_summary fetch ~9.8s was the hidden culprit). end_to_end_http_ms[clear_winner] is a real live measurement (12.2s). REGENERATE after the main engineer's thread_summary fix lands: `pytest tests/perf -m perf_slow --update-baseline`, then commit.",
+    "tolerance_policy": "regression when measured > max(baseline*1.5, baseline+150ms)"
+  },
+  "batch": {
+    "budget_ms": 5000.0,
+    "wall_ms": 50.0
+  },
+  "end_to_end_http_ms": {
+    "bm25_identifier": 524.1,
+    "clear_winner": 586.9,
+    "date_filtered": 6379.6,
+    "tightly_clustered": 754.3
+  },
+  "per_stage_ms": {
+    "_collapse_repeat_senders": 0.4,
+    "_embed_query": 7.5,
+    "_fetch_embedding_rows": 8.3,
+    "_filter_offtopic": 0.0,
+    "_resolve_candidate_msg_ids": 0.0,
+    "bm25_messages_fetch": 17.9,
+    "bm25_search_fts": 245.1,
+    "scann_search": 22.1,
+    "scoring_loop_residual": 353.9,
+    "thread_summary_fetch": 4.4,
+    "total": 659.5
+  }
+}

@@ -818,11 +818,20 @@ SESSION_PARAM_NOTE = (
 
 SEARCH_BATCH_DESC = (
     "Run many semantic searches concurrently in ONE call. `searches` "
-    "is a list (1-100) of `{query, date_from?, date_to?, top_k?}` "
-    'dicts; `top_k` defaults to 10. Use for relevance lookups ("what '
-    'did we decide about X", "find messages mentioning Y"). Returns '
-    "`{results: [{input, result}, ...]}` aligned with input. "
-    "Per-search errors land in that entry's `result` as `{error: ...}`.\n\n"
+    "is a list (1-100) of `{query, date_from?, date_to?, top_k?, "
+    "detail?}` dicts; `top_k` defaults to 10. Use for relevance "
+    'lookups ("what did we decide about X", "find messages mentioning '
+    'Y"). Returns `{results: [{input, result}, ...]}` aligned with '
+    "input. Per-search errors land in that entry's `result` as "
+    "`{error: ...}`.\n\n"
+    "`detail` controls per-match payload — pick the cheapest that "
+    "answers the question, since larger levels cost far more tokens:\n"
+    '  - "snippet" (default): matched-text snippet only — best for '
+    "inventories / counting / locating threads.\n"
+    '  - "summary": + a one-line LLM summary per matched message.\n'
+    '  - "full": + the WHOLE email body per match — use when you '
+    "must read the matches; avoids N get_thread calls but is large, "
+    "so keep top_k modest.\n\n"
     "ALWAYS use this for multi-angle investigations — fan out across "
     "phrasings/date-windows in ONE call. Even a single search goes "
     f"through this tool (pass a one-item list). {SESSION_PARAM_NOTE}"

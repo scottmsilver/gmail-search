@@ -1978,9 +1978,17 @@ def crawl_urls(ctx, concurrency, limit, loop, loop_batch, loop_sleep):
 @common_options
 @click.pass_context
 def serve(ctx, host, port):
+    import os
+
     import uvicorn
 
     from gmail_search.server import create_app
+
+    # User-facing safety net: bound every DB query this (serve) process runs so
+    # a runaway query can't tie up a request for >10min. Daemons run in separate
+    # processes that don't set this, so their long jobs (reindex/backfill/vacuum)
+    # stay unbounded. Override with GMS_DEFAULT_STATEMENT_TIMEOUT_MS (0 disables).
+    os.environ.setdefault("GMS_DEFAULT_STATEMENT_TIMEOUT_MS", "600000")  # 10 min
 
     cfg = ctx.obj["config"]
     h = host or cfg["server"]["host"]

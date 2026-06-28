@@ -12,7 +12,12 @@ from gmail_search.auth import require_user_id
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import _pg_dsn, get_connection
-from gmail_search.store.queries import extract_attachment_on_demand, get_attachments_for_message, get_message
+from gmail_search.store.queries import (
+    extract_attachment_on_demand,
+    get_attachments_for_message,
+    get_message,
+    get_message_bodies_bulk,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,21 @@ except ValueError:
 # back to the default and clamp to a sane [1, 120]s window.
 if SQL_TIMEOUT_SEC != SQL_TIMEOUT_SEC or SQL_TIMEOUT_SEC <= 0 or SQL_TIMEOUT_SEC > 120:
     SQL_TIMEOUT_SEC = 30.0
+
+# Pre-flight plan-cost ceiling for agent-supplied SQL. Before running a query we
+# EXPLAIN it (plan-only, no execution) and reject anything whose estimated total
+# cost exceeds this — catching pathological plans (cartesian joins, per-row
+# correlated subplans, unfiltered big seq scans) BEFORE they consume time and,
+# given serve's blocking DB calls, before they can wedge the event loop. Healthy
+# agent queries plan well under ~1M; a real footgun we hit planned at 23.8
+# BILLION. 50M leaves huge headroom for legit analytics. Tunable via env; 0 or a
+# bad value disables the gate (statement_timeout remains the backstop).
+try:
+    SQL_MAX_PLAN_COST = float(os.environ.get("GMS_SQL_MAX_PLAN_COST", "50000000"))
+except (TypeError, ValueError):
+    SQL_MAX_PLAN_COST = 50_000_000.0
+if SQL_MAX_PLAN_COST != SQL_MAX_PLAN_COST or SQL_MAX_PLAN_COST < 0:  # NaN / negative
+    SQL_MAX_PLAN_COST = 50_000_000.0
 
 # How long to keep a hot-swapped-out ScaNN searcher alive before closing it.
 # Long enough for any in-flight query that captured the old searcher to finish
@@ -233,6 +253,45 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+class SqlTooExpensiveError(Exception):
+    """Raised when an agent SQL query's estimated plan cost exceeds
+    SQL_MAX_PLAN_COST. Carries the cost so the caller can build a
+    helpful, actionable rejection message."""
+
+    def __init__(self, cost: float):
+        self.cost = cost
+        super().__init__(f"estimated plan cost {cost:,.0f} exceeds limit {SQL_MAX_PLAN_COST:,.0f}")
+
+
+def _estimate_plan_cost(conn, query: str) -> float | None:
+    """Return the planner's estimated total cost for `query` via EXPLAIN
+    (FORMAT JSON). EXPLAIN plans but does NOT execute — instant and safe.
+    Returns None if the cost can't be parsed (caller then skips the gate
+    and lets statement_timeout be the backstop)."""
+    import json as _json
+
+    with conn.cursor() as cur:
+        cur.execute(f"EXPLAIN (FORMAT JSON) {query}")
+        raw = cur.fetchone()[0]
+    plan = _json.loads(raw) if isinstance(raw, str) else raw
+    try:
+        return float(plan[0]["Plan"]["Total Cost"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _reject_if_too_expensive(conn, query: str) -> None:
+    """Pre-flight cost gate: EXPLAIN the query and raise SqlTooExpensiveError
+    if its estimated total cost exceeds SQL_MAX_PLAN_COST. Disabled when the
+    ceiling is 0. A planner/parse failure here is non-fatal — we let the real
+    execute (and statement_timeout) handle it rather than block a valid query."""
+    if SQL_MAX_PLAN_COST <= 0:
+        return
+    cost = _estimate_plan_cost(conn, query)
+    if cost is not None and cost > SQL_MAX_PLAN_COST:
+        raise SqlTooExpensiveError(cost)
+
+
 def _run_sql_with_timeout(db_path: Path, query: str, *, user_id: str | None = None) -> dict:
     """Execute a SELECT and capture the first SQL_MAX_ROWS rows.
 
@@ -249,6 +308,9 @@ def _run_sql_with_timeout(db_path: Path, query: str, *, user_id: str | None = No
     """
     conn = _open_readonly_connection(user_id=user_id)
     try:
+        # Pre-flight: reject pathological plans before executing (raises
+        # SqlTooExpensiveError, caught by the endpoint and surfaced as a 400).
+        _reject_if_too_expensive(conn, query)
         with conn.cursor() as cursor:
             cursor.execute(query)
             columns = [d[0] for d in cursor.description or []]
@@ -860,6 +922,22 @@ def create_app(
     async def _on_startup() -> None:  # noqa: RUF029
         import asyncio as _asyncio
 
+        # Cap the threadpool that now runs our (synchronous) DB endpoints.
+        # The route handlers are plain `def`, so Starlette runs each in a
+        # worker thread — that's what keeps one slow query from freezing the
+        # event loop (a single blocking psycopg call used to stall ALL
+        # requests). But each in-flight handler can hold one PG connection,
+        # and PG max_connections is 50 (shared with daemons + MCP), so we
+        # bound concurrency well under that. Env-tunable.
+        try:
+            import anyio.to_thread
+
+            cap = int(os.environ.get("GMS_SERVE_THREADPOOL", "24"))
+            if cap > 0:
+                anyio.to_thread.current_default_thread_limiter().total_tokens = cap
+        except Exception as _exc:  # noqa: BLE001 — never block startup on this
+            logger.warning("could not set serve threadpool limiter: %s", _exc)
+
         from gmail_search.claudebox_creds import sync_credentials_if_stale
 
         # Sync host Claude OAuth creds into the claudebox bind-mount
@@ -883,7 +961,7 @@ def create_app(
         _swap_task.add_done_callback(_background_tasks.discard)
 
     @app.get("/healthz")
-    async def healthz(ready: int = Query(0)):
+    def healthz(ready: int = Query(0)):
         # Liveness (default): always 200 — the process is up and the event
         # loop is responsive. Readiness (?ready=1): 200 only once the bootstrap
         # engine is warm (or there's no index to warm); 503 while warming so a
@@ -898,7 +976,7 @@ def create_app(
         return JSONResponse({"ok": False, "ready": False, "reason": "index warming"}, status_code=503)
 
     @app.get("/", response_class=HTMLResponse)
-    async def home():
+    def home():
         html_file = templates_dir / "index.html"
         return html_file.read_text()
 
@@ -922,15 +1000,24 @@ def create_app(
         return result
 
     @app.get("/api/search")
-    async def api_search(
+    def api_search(
         q: str = Query(..., min_length=1, max_length=1000),
         k: int = Query(20, ge=1, le=100),
         sort: str = Query("relevance", pattern="^(relevance|recent)$"),
         filter: bool = Query(True, alias="filter"),
         date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
         date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
+        match_detail: str = Query("snippet", pattern="^(snippet|summary|full)$"),
         user_id: str = Depends(require_user_id),
     ):
+        # How much content to return per match. The default is COMPACT for
+        # agents — just the snippet — because the per-message extras are what
+        # blew the payload (a top_k=5 search ran ~93KB with summaries attached).
+        # The caller chooses how much it needs per match:
+        #   - "snippet" (default): snippet only — cheap, good for inventories.
+        #   - "summary": + the pre-computed LLM summary (the web UI default).
+        #   - "full":    + the whole email body, so an agent can read matches
+        #                without N follow-up get_thread calls.
         from gmail_search.summarize import get_summaries_bulk_meta
 
         try:
@@ -959,18 +1046,25 @@ def create_app(
         all_msg_ids = _collect_result_message_ids(results)
         msg_topics = _lookup_message_topics(all_msg_ids)
 
-        # Pre-computed per-message summaries — lets the agent answer many
-        # questions without fetching full thread bodies via get_thread.
-        # We pull the freshest row regardless of model/prompt version
-        # AND surface the key + created_at so the UI debug panel can
-        # show where each summary came from.
-        conn_s = get_connection(db_path)
-        summary_meta = get_summaries_bulk_meta(conn_s, all_msg_ids)
-        conn_s.close()
+        # Per-match content, fetched in bulk only at the requested detail level.
+        # summary: pre-computed per-message summaries (freshest row regardless of
+        # model/prompt version, with key + created_at for the UI debug panel).
+        # full: whole email bodies so an agent can read matches in one round-trip.
+        summary_meta: dict = {}
+        bodies: dict = {}
+        if match_detail in ("summary", "full"):
+            conn_s = get_connection(db_path)
+            try:
+                if match_detail == "summary":
+                    summary_meta = get_summaries_bulk_meta(conn_s, all_msg_ids)
+                else:
+                    bodies = get_message_bodies_bulk(conn_s, all_msg_ids, user_id=user_id)
+            finally:
+                conn_s.close()
 
         facets = _compute_topic_facets(results, msg_topics)
 
-        # Tag each result with its topic IDs + attach match-level summaries.
+        # Tag each result with its topic IDs + attach per-match content.
         formatted = []
         for r in results:
             fr = _format_thread_result(r)
@@ -979,10 +1073,13 @@ def create_app(
                 topics.update(msg_topics.get(m.message_id, []))
             fr["topic_ids"] = list(topics)
             for match in fr["matches"]:
-                meta = summary_meta.get(match["message_id"])
-                match["summary"] = (meta or {}).get("summary", "") or ""
-                match["summary_model"] = (meta or {}).get("model")
-                match["summary_created_at"] = (meta or {}).get("created_at")
+                if match_detail == "summary":
+                    meta = summary_meta.get(match["message_id"])
+                    match["summary"] = (meta or {}).get("summary", "") or ""
+                    match["summary_model"] = (meta or {}).get("model")
+                    match["summary_created_at"] = (meta or {}).get("created_at")
+                elif match_detail == "full":
+                    match["body"] = bodies.get(match["message_id"], "")
             formatted.append(fr)
 
         return {
@@ -991,7 +1088,7 @@ def create_app(
         }
 
     @app.get("/api/find_facts")
-    async def api_find_facts(
+    def api_find_facts(
         q: str = Query(..., min_length=1, max_length=1000),
         exhaustive: bool = Query(True),
         k: int = Query(200, ge=1, le=500),
@@ -1036,7 +1133,7 @@ def create_app(
         return {"facts": facts}
 
     @app.get("/api/query")
-    async def api_query(
+    def api_query(
         sender: str | None = Query(None, description="Substring match on from_addr"),
         subject_contains: str | None = Query(None),
         date_from: str | None = Query(None, description="ISO date (YYYY-MM-DD)"),
@@ -1062,7 +1159,7 @@ def create_app(
         return {"results": threads}
 
     @app.get("/api/inbox")
-    async def api_inbox(
+    def api_inbox(
         limit: int = Query(50, le=200),
         offset: int = Query(0, ge=0),
         user_id: str = Depends(require_user_id),
@@ -1093,7 +1190,7 @@ def create_app(
             conn.close()
 
     @app.get("/api/priority-inbox")
-    async def api_priority_inbox(
+    def api_priority_inbox(
         limit: int = Query(25, le=100),
         offset: int = Query(0, ge=0),
         user_id: str = Depends(require_user_id),
@@ -1133,11 +1230,17 @@ def create_app(
             # section's thread should appear exactly once on the page.
             everything_else = _inbox_rows(
                 conn,
+                # NOT EXISTS correlated on thread_id (indexed) — NOT the old
+                # `thread_id NOT IN (SELECT … WHERE m2.user_id = m.user_id)`,
+                # which the planner ran as a per-row full seq-scan of messages
+                # (SubPlan re-executed per outer row → ~O(messages²), plan cost
+                # ~23.8 billion, 13+ min). Same semantics: an INBOX message
+                # whose thread has no important+unread+inbox and no starred msg.
                 (
                     "m.labels LIKE %s"
-                    " AND m.thread_id NOT IN ("
-                    "   SELECT m2.thread_id FROM messages m2"
-                    "   WHERE m2.user_id = m.user_id"
+                    " AND NOT EXISTS ("
+                    "   SELECT 1 FROM messages m2"
+                    "   WHERE m2.thread_id = m.thread_id AND m2.user_id = m.user_id"
                     "     AND ("
                     "       (m2.labels LIKE %s AND m2.labels LIKE %s AND m2.labels LIKE %s)"
                     "       OR (m2.labels LIKE %s)"
@@ -1178,7 +1281,7 @@ def create_app(
             conn.close()
 
     @app.get("/api/thread/{thread_id}")
-    async def api_thread(thread_id: str, user_id: str = Depends(require_user_id)):
+    def api_thread(thread_id: str, user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
         rows = conn.execute(
             "SELECT id FROM messages WHERE thread_id = %s AND user_id = %s ORDER BY date",
@@ -1213,7 +1316,7 @@ def create_app(
         return {"thread_id": thread_id, "messages": messages}
 
     @app.get("/api/topics")
-    async def api_topics(user_id: str = Depends(require_user_id)):
+    def api_topics(user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
         rows = conn.execute(
             "SELECT topic_id, parent_id, label, depth, message_count, top_senders FROM topics "
@@ -1236,7 +1339,7 @@ def create_app(
         ]
 
     @app.get("/api/message/{message_id}")
-    async def api_message(message_id: str, user_id: str = Depends(require_user_id)):
+    def api_message(message_id: str, user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)
         msg = get_message(conn, message_id, user_id=user_id)
         if msg is None:
@@ -1257,7 +1360,7 @@ def create_app(
         }
 
     @app.get("/api/thread_lookup")
-    async def api_thread_lookup(
+    def api_thread_lookup(
         cite_ref: str = Query(..., min_length=4, max_length=20),
         user_id: str = Depends(require_user_id),
     ):
@@ -1288,7 +1391,7 @@ def create_app(
         return {"thread_id": rows[0]["thread_id"], "subject": rows[0]["subject"]}
 
     @app.post("/api/sql")
-    async def api_sql(
+    def api_sql(
         payload: dict = Body(...),
         user_id: str = Depends(require_user_id),
     ):
@@ -1320,6 +1423,23 @@ def create_app(
             return JSONResponse({"error": err}, status_code=400)
         try:
             return _run_sql_with_timeout(db_path, query, user_id=user_id)
+        except SqlTooExpensiveError as e:
+            # Pre-flight plan-cost gate tripped — reject BEFORE running so a
+            # pathological query never consumes time. Give the agent something
+            # actionable to fix rather than a bare cost number.
+            return JSONResponse(
+                {
+                    "error": (
+                        f"Query rejected: estimated plan cost {e.cost:,.0f} exceeds the limit "
+                        f"({SQL_MAX_PLAN_COST:,.0f}). This usually means a missing/!indexed filter, "
+                        f"a cartesian join, or a correlated subquery doing a per-row scan. Add a "
+                        f"WHERE on an indexed column (id/thread_id/message_id/date), narrow the date "
+                        f"range, replace `LIKE '%...%'` with BM25 (`@@@`), or rewrite `NOT IN "
+                        f"(correlated SELECT)` as `NOT EXISTS (... correlated on an indexed column)`."
+                    )
+                },
+                status_code=400,
+            )
         except psycopg.errors.QueryCanceled as e:
             # statement_timeout tripped — surface as 408 so the UI can
             # tell timeout apart from a syntax error.
@@ -1328,7 +1448,7 @@ def create_app(
             return JSONResponse({"error": f"SQL error: {e!s}"}, status_code=400)
 
     @app.post("/api/battle/vote")
-    async def api_battle_vote(payload: dict = Body(...)):
+    def api_battle_vote(payload: dict = Body(...)):
         """Record a model battle outcome.
 
         Body: {question, variant_a, variant_b, winner, request_id_a?, request_id_b?}
@@ -1380,7 +1500,7 @@ def create_app(
         return {"ok": True, "id": row_id}
 
     @app.get("/api/battle/stats")
-    async def api_battle_stats():
+    def api_battle_stats():
         """Per-variant win rate + head-to-head matrix."""
         import json as _json
 
@@ -1436,7 +1556,7 @@ def create_app(
         return {"leaderboard": leaderboard, "battles": len(rows)}
 
     @app.get("/api/conversations")
-    async def api_conversations_list(
+    def api_conversations_list(
         limit: int = Query(100, le=500),
         user_id: str = Depends(require_user_id),
     ):
@@ -1465,7 +1585,7 @@ def create_app(
         }
 
     @app.get("/api/conversations/live")
-    async def api_conversations_live(
+    def api_conversations_live(
         limit: int = Query(100, le=500),
         user_id: str = Depends(require_user_id),
     ):
@@ -1534,7 +1654,7 @@ def create_app(
             conn.close()
 
     @app.get("/api/conversations/{conversation_id}")
-    async def api_conversation_get(
+    def api_conversation_get(
         conversation_id: str,
         user_id: str = Depends(require_user_id),
     ):
@@ -1566,7 +1686,7 @@ def create_app(
         }
 
     @app.put("/api/conversations/{conversation_id}")
-    async def api_conversation_save(
+    def api_conversation_save(
         conversation_id: str,
         payload: dict = Body(...),
         user_id: str = Depends(require_user_id),
@@ -1628,7 +1748,7 @@ def create_app(
         return {"ok": True, "id": conversation_id}
 
     @app.delete("/api/conversations/{conversation_id}")
-    async def api_conversation_delete(
+    def api_conversation_delete(
         conversation_id: str,
         user_id: str = Depends(require_user_id),
     ):
@@ -1656,7 +1776,7 @@ def create_app(
         return {"ok": True}
 
     @app.get("/api/conversations/{conversation_id}/debug")
-    async def api_conversation_debug(
+    def api_conversation_debug(
         conversation_id: str,
         session_limit: int = Query(20, le=200),
         user_id: str = Depends(require_user_id),
@@ -1752,7 +1872,7 @@ def create_app(
             conn.close()
 
     @app.get("/api/conversations/{conversation_id}/workspace/tree")
-    async def api_conversation_workspace_tree(
+    def api_conversation_workspace_tree(
         conversation_id: str,
         user_id: str = Depends(require_user_id),
     ):
@@ -1824,7 +1944,7 @@ def create_app(
         }
 
     @app.get("/api/conversations/{conversation_id}/jsonl")
-    async def api_conversation_jsonl(
+    def api_conversation_jsonl(
         conversation_id: str,
         user_id: str = Depends(require_user_id),
     ):
@@ -1886,7 +2006,7 @@ def create_app(
         return FileResponse(str(jsonl_resolved), media_type="application/jsonl")
 
     @app.get("/api/attachment/{attachment_id}/meta")
-    async def api_attachment_meta(
+    def api_attachment_meta(
         attachment_id: int,
         user_id: str = Depends(require_user_id),
     ):
@@ -1919,7 +2039,7 @@ def create_app(
             conn.close()
 
     @app.get("/api/attachment/{attachment_id}/raw")
-    async def api_attachment_raw(
+    def api_attachment_raw(
         attachment_id: int,
         inline: bool = Query(True),
         max_inline_bytes: int = Query(1024 * 1024, ge=0, le=10 * 1024 * 1024),
@@ -2146,7 +2266,7 @@ def create_app(
             return JSONResponse({"error": f"render failed: {e}"}, status_code=500)
 
     @app.get("/api/attachment/{attachment_id}")
-    async def api_attachment(
+    def api_attachment(
         attachment_id: int,
         user_id: str = Depends(require_user_id),
     ):
@@ -2173,13 +2293,13 @@ def create_app(
         )
 
     @app.get("/api/progress")
-    async def api_progress():
+    def api_progress():
         from gmail_search.store.db import JobProgress
 
         return JobProgress.get(db_path) or []
 
     @app.get("/api/sql_schema")
-    async def api_sql_schema(user_id: str = Depends(require_user_id)):
+    def api_sql_schema(user_id: str = Depends(require_user_id)):
         # Markdown description of every queryable table — surfaced to the
         # chat LLM so the sql_query tool knows the real column shapes.
         # Prepends a multi-tenant preamble so the LLM always scopes its
@@ -2222,7 +2342,7 @@ def create_app(
         return {"markdown": preamble + describe_schema_for_llm()}
 
     @app.get("/api/status")
-    async def api_status(user_id: str = Depends(require_user_id)):
+    def api_status(user_id: str = Depends(require_user_id)):
         from gmail_search.store.db import JobProgress
 
         conn = get_connection(db_path)
@@ -2562,7 +2682,7 @@ def create_app(
         }
 
     @app.get("/api/jobs/running")
-    async def api_jobs_running(user_id: str = Depends(require_user_id)):
+    def api_jobs_running(user_id: str = Depends(require_user_id)):
         """Everything /settings needs: this user's running job_progress
         rows + disk usage + per-daemon (frontfill/backfill/summarize)
         authoritative liveness derived from this user's per-key rows
@@ -2608,7 +2728,7 @@ def create_app(
     # /api/auth/connect-gmail.
 
     @app.post("/api/jobs/frontfill")
-    async def api_jobs_frontfill(
+    def api_jobs_frontfill(
         interval: int = Query(120, ge=10, le=86400),
         user_id: str = Depends(require_user_id),
     ):
@@ -2624,11 +2744,11 @@ def create_app(
         )
 
     @app.post("/api/jobs/frontfill/stop")
-    async def api_jobs_frontfill_stop(user_id: str = Depends(require_user_id)):
+    def api_jobs_frontfill_stop(user_id: str = Depends(require_user_id)):
         return _stop_daemon("frontfill", user_id)
 
     @app.post("/api/jobs/backfill")
-    async def api_jobs_backfill(
+    def api_jobs_backfill(
         min_free_gb: float = Query(5.0, ge=0.1, le=10000.0),
         user_id: str = Depends(require_user_id),
     ):
@@ -2645,11 +2765,11 @@ def create_app(
         )
 
     @app.post("/api/jobs/backfill/stop")
-    async def api_jobs_backfill_stop(user_id: str = Depends(require_user_id)):
+    def api_jobs_backfill_stop(user_id: str = Depends(require_user_id)):
         return _stop_daemon("backfill", user_id)
 
     @app.post("/api/jobs/summarize")
-    async def api_jobs_summarize(
+    def api_jobs_summarize(
         concurrency: int = Query(12, ge=1, le=64),
         batch_size: int = Query(1, ge=1, le=16),
         user_id: str = Depends(require_user_id),
@@ -2672,7 +2792,7 @@ def create_app(
         )
 
     @app.post("/api/jobs/summarize/stop")
-    async def api_jobs_summarize_stop(user_id: str = Depends(require_user_id)):
+    def api_jobs_summarize_stop(user_id: str = Depends(require_user_id)):
         return _stop_daemon("summarize", user_id)
 
     # ── Admin: per-user sync management ──────────────────────────────
@@ -2715,7 +2835,7 @@ def create_app(
         return status
 
     @app.get("/api/admin/users")
-    async def api_admin_users(_admin=Depends(require_admin)):
+    def api_admin_users(_admin=Depends(require_admin)):
         """Return every user + their per-user daemon health (frontfill,
         backfill, summarize) + sync_enabled flag. Powers the /admin UI."""
         conn = get_connection(db_path)
@@ -2758,7 +2878,7 @@ def create_app(
         return {"users": users, "supervisor": _daemon_status("supervisor")}
 
     @app.get("/api/admin/progress")
-    async def api_admin_progress(_admin=Depends(require_admin)):
+    def api_admin_progress(_admin=Depends(require_admin)):
         """Work-remaining stats for /admin: per-user embedding coverage
         (messages embedded vs total) and the URL-crawl queue split into
         fast lane (never tried), slow lane (failed, backing off), abandoned
@@ -2819,7 +2939,7 @@ def create_app(
         }
 
     @app.post("/api/admin/users/{user_id}/sync_enabled")
-    async def api_admin_set_sync_enabled(
+    def api_admin_set_sync_enabled(
         user_id: str,
         payload: dict = Body(...),
         _admin=Depends(require_admin),
@@ -2845,7 +2965,7 @@ def create_app(
         return {"ok": True, "user_id": user_id, "email": row["email"], "sync_enabled": enabled}
 
     @app.post("/api/admin/users/{user_id}/{job_key}/start")
-    async def api_admin_start_user_daemon(
+    def api_admin_start_user_daemon(
         user_id: str,
         job_key: str,
         _admin=Depends(require_admin),
@@ -2878,7 +2998,7 @@ def create_app(
         )
 
     @app.post("/api/admin/users/{user_id}/{job_key}/stop")
-    async def api_admin_stop_user_daemon(
+    def api_admin_stop_user_daemon(
         user_id: str,
         job_key: str,
         _admin=Depends(require_admin),
@@ -2891,7 +3011,7 @@ def create_app(
         return _stop_daemon(job_key, user_id)
 
     @app.post("/api/admin/supervisor/start")
-    async def api_admin_supervisor_start(_admin=Depends(require_admin)):
+    def api_admin_supervisor_start(_admin=Depends(require_admin)):
         """Start the multi-user supervisor — the reconciler that keeps
         each sync-enabled user's watch/update/summarize alive and
         converges disabled users down. 409 if already running. Spawned
@@ -2906,7 +3026,7 @@ def create_app(
         return {"ok": True, "pid": pid}
 
     @app.post("/api/admin/supervisor/stop")
-    async def api_admin_supervisor_stop(_admin=Depends(require_admin)):
+    def api_admin_supervisor_stop(_admin=Depends(require_admin)):
         """SIGTERM the supervisor. Supervised daemons keep running — the
         supervisor only respawns/converges, it doesn't own them."""
         import os as _os

@@ -70,6 +70,9 @@ export const searchEmailsBackend = async (args: {
   const url = new URL(`${pythonApiUrl()}/api/search`);
   url.searchParams.set("q", args.query);
   url.searchParams.set("k", String(args.top_k ?? 10));
+  // The assistant uses the per-match summary to answer without get_thread; the
+  // API default is snippet-only, so opt into the summary detail level here.
+  url.searchParams.set("match_detail", "summary");
   if (args.date_from) url.searchParams.set("date_from", args.date_from);
   if (args.date_to) url.searchParams.set("date_to", args.date_to);
   const res = await fetch(url.toString());
