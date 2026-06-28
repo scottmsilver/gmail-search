@@ -279,57 +279,6 @@ def test_disk_builder_empty_db(tmp_path):
 # ─── sharded builder ──────────────────────────────────────────────────────
 
 
-def test_shard_size_from_budget_scales_with_budget():
-    s1 = shard_size_from_budget(ram_budget_mb=1024, dimensions=3072)
-    s2 = shard_size_from_budget(ram_budget_mb=2048, dimensions=3072)
-    assert s2 == 2 * s1
-    assert s1 > 0
-
-
-def test_shard_size_from_budget_scales_inversely_with_dims():
-    s_small = shard_size_from_budget(ram_budget_mb=1024, dimensions=768)
-    s_large = shard_size_from_budget(ram_budget_mb=1024, dimensions=3072)
-    assert s_small > s_large
-
-
-def test_shard_size_from_budget_minimum_one():
-    assert shard_size_from_budget(ram_budget_mb=0, dimensions=3072) >= 1
-
-
-def test_sharded_builder_writes_manifest_and_partitions_ids(tmp_path):
-    dims = 64
-    db_path = tmp_path / "test.db"
-    _seed_db_with_random_embeddings(db_path, n=250, dims=dims)
-    index_dir = tmp_path / "scann_sharded"
-
-    # build_index_sharded with a pointer-enabled DB writes to a
-    # versioned sibling and returns the actual path.
-    actual_dir = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
-
-    manifest = json.loads((actual_dir / "manifest.json").read_text())
-    assert manifest["num_shards"] == 3
-    assert manifest["dimensions"] == dims
-    assert manifest["shard_size"] == 100
-
-    all_ids = load_index_metadata(actual_dir)
-    assert len(all_ids) == 250
-
-    shard_id_sets: list[list[int]] = []
-    for i in range(3):
-        shard_dir = actual_dir / f"shard_{i}"
-        assert shard_dir.is_dir()
-        shard_ids = json.loads((shard_dir / "ids.json").read_text())
-        shard_id_sets.append(shard_ids)
-
-    flat = [i for ids in shard_id_sets for i in ids]
-    assert flat == all_ids
-    assert len(set(flat)) == len(flat)
-
-    for i in range(3):
-        tmp_files = [p.name for p in (actual_dir / f"shard_{i}").iterdir() if ".tmp" in p.name]
-        assert tmp_files == []
-
-
 def test_sharded_brute_force_equals_unsharded_brute_force_exactly(tmp_path):
     """Exact parity: with brute-force shards (size < 100) on a brute-force
     unsharded baseline (N < 100), merged per-shard top-K is provably equal
@@ -387,35 +336,6 @@ def test_sharded_single_shard_degenerate_case_equals_unsharded(tmp_path):
         ram_ids, _ = ram.search(qvec, top_k=10)
         sharded_ids, _ = sharded.search(qvec, top_k=10)
         assert ram_ids == sharded_ids
-
-
-def test_sharded_builder_rebuild_cleans_old_shards(tmp_path):
-    """A fresh build over an existing sharded dir must remove shard_N
-    directories left from a previous larger run.
-    """
-    dims = 32
-    db_path = tmp_path / "test.db"
-    _seed_db_with_random_embeddings(db_path, n=250, dims=dims)
-    index_dir = tmp_path / "scann_sharded"
-
-    first = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=100)
-    assert (first / "shard_2").is_dir()
-
-    second = build_index_sharded(db_path, index_dir, model="test-model", dimensions=dims, shard_size=300)
-    manifest = json.loads((second / "manifest.json").read_text())
-    assert manifest["num_shards"] == 1
-    assert not (second / "shard_1").exists()
-    assert not (second / "shard_2").exists()
-    # Old build directory should have been GC'd once the pointer flipped.
-    assert not first.exists(), "old versioned build should have been removed after promotion"
-
-
-def test_sharded_builder_empty_db(tmp_path):
-    db_path = tmp_path / "test.db"
-    init_db(db_path)
-    index_dir = tmp_path / "scann_sharded"
-    actual = build_index_sharded(db_path, index_dir, model="test-model", dimensions=16, shard_size=100)
-    assert load_index_metadata(actual) == []
 
 
 def test_scann_searcher_loads_legacy_single_index_unchanged(tmp_path):

@@ -86,10 +86,3 @@ addopts = "-m 'not integration and not perf_slow'"
 # imports, F811 redefinitions. Keep this tight so the gate has ~zero false
 # positives and stays trustworthy.
 select = ["F"]
-
-[tool.ruff.lint.per-file-ignores]
-# Pre-existing: tests/test_index_builder.py has two diverged copies of the same
-# test names (only the later set runs under pytest). That's a real test bug to
-# resolve separately; ignore F811 here so the gate is green meanwhile.
-# TODO: dedupe the shadowed tests and remove this ignore.
-"tests/test_index_builder.py" = ["F811"]
