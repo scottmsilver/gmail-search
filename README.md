@@ -2,6 +2,8 @@
 
 A self-hosted, semantically-aware Gmail front end. Downloads your mailbox into Postgres, embeds messages and attachments with Gemini, summarizes them with a local LLM, and serves a Next.js web app with hybrid search, a Priority Inbox, a chat agent that can query your email, and an opt-in deep-analysis multi-agent that can read, run code, and write reports against your corpus.
 
+It also ships an **MCP server**, so you can connect **Claude** — Claude Desktop, claude.ai, Claude Code, or any MCP client — straight to your mailbox and ask it to search, enumerate, and read your email and attachments with the same retrieval engine the web app uses.
+
 ## Why this exists
 
 Gmail search is keyword-only. It can't find "that email about the construction budget" unless those exact words appear. It can't search inside PDF attachments. It doesn't understand that your accountant's emails about "engagement letter" are related to your search for "tax documents." And asking Gmail a question — "what's the status of the kitchen remodel?" — is something it simply won't do.
@@ -10,6 +12,7 @@ Gmail Search fixes this with hybrid search (semantic + BM25 + Gmail signals + yo
 
 **What makes it good:**
 
+- **Connect Claude over MCP** — a streamable-HTTP MCP server exposes the retrieval engine as 8 tools (relevance search, structured filters, fact enumeration, full-thread fetch, read-only SQL, schema, attachment fetch, artifact publish). Point Claude Desktop / claude.ai / Claude Code at it and ask questions over your real mailbox. OAuth 2.1 (owner-gated Google login) for remote access, or a bearer token locally. See [Connect Claude (MCP)](#connect-claude-mcp).
 - **Hybrid ranking with 8 signals** — semantic similarity, BM25 keyword match, recency, Gmail labels (IMPORTANT/PERSONAL/PROMOTIONS), contact frequency, thread engagement, match density, and thread size. Each signal catches things the others miss.
 - **Searches inside attachments** — PDFs get text extracted and pages rendered as images. Office docs (docx, xlsx, pptx, xls), HEIC photos, calendar invites, plain text, CSVs, and ZIP archives are all extracted recursively. Drive links in email bodies are followed and ingested too.
 - **URL crawler** — links in emails get fetched, distilled, and folded into the thread's summary. Tracker domains are denylisted (Disconnect's tracker list + custom blocks), bulk mail with too many links is skipped, and crawls go newest-first.
@@ -111,17 +114,60 @@ cd web && bun dev
 
 Open the web UI (default: http://localhost:3000). The API server backs it on port 8080.
 
+## Connect Claude (MCP)
+
+Beyond the web app, Gmail Search exposes its retrieval engine as a [Model Context Protocol](https://modelcontextprotocol.io) server. Any MCP client — **Claude Desktop, claude.ai, Claude Code** — can connect and query your mailbox directly. Claude does the reasoning; this server does the grounded retrieval.
+
+### What Claude gets — 8 tools
+
+| Tool | What it does |
+|------|--------------|
+| `search_emails_batch` | Relevance search (semantic + BM25 blend). `detail` = `snippet` (default, compact) / `summary` / `full` (whole email per match). Batches many searches in one call. |
+| `query_emails_batch` | Structured-metadata filters (`from`, `subject`, date range, label, `has_attachment`) — no ranking. |
+| `find_facts` | Enumerate **every** instance of an entity/attribute across the whole mailbox in one call (e.g. "all my account numbers", "every flight I've booked") from pre-mined atomic facts. |
+| `get_thread_batch` | Full message bodies + attachment manifest for many threads at once. |
+| `sql_query_batch` | Read-only SQL (SELECT/WITH only) against the corpus. BM25-enforced, **pre-flight cost-gated** (rejects pathological plans), 500-row + timeout capped, RLS-scoped to the owner. |
+| `describe_schema` | The queryable table/column shape for `sql_query_batch`. |
+| `get_attachment_batch` | Attachment `text` / `rendered_pages` / `raw` bytes — fetchable by the model via short-lived signed URLs. |
+| `publish_artifact_batch` | Publish a generated file (report/CSV/image) and get a link back. |
+
+All tools are batch-first (fan out many queries in one call) and isolate per-item failures, so one slow query never sinks the whole call.
+
+### Run the server
+
+```bash
+# Streamable-HTTP MCP server. Port via GMAIL_MCP_TOOLS_PORT (default 7878),
+# endpoint at /mcp. Reads the same DB/config as `serve`.
+python -m gmail_search.agents.mcp_tools_server
+```
+
+It connects to the same Postgres corpus as the web app — run the ingest pipeline first (steps above) so there's something to query.
+
+### Auth & exposure
+
+- **Local / trusted client** — a bearer token (`GMAIL_MCP_ADMIN_TOKEN`) gates the endpoint. The server refuses to start on a public bind with an auto-generated token unless you set `GMAIL_MCP_ALLOW_INSECURE=1`.
+- **Remote (claude.ai / Claude Desktop)** — turn on OAuth 2.1 with `GMAIL_MCP_OAUTH_ENABLED=1` and `GMAIL_MCP_PUBLIC_URL=https://<your-host>`. `/authorize` is gated behind a broker-mediated Google login and an **owner-email allow-list** (`GMAIL_MCP_OAUTH_OWNER_EMAIL`), so only you can complete the flow. The MCP endpoint is the *only* surface meant to be public; the web app and FastAPI server stay localhost-only. The reference deployment fronts it with a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) tunnel.
+
+### Point a client at it
+
+In claude.ai / Claude Desktop, add a custom connector with the URL `https://<your-host>/mcp` and complete the OAuth login. For a local token-based client, send `Authorization: Bearer <GMAIL_MCP_ADMIN_TOKEN>` to `http://localhost:7878/mcp`.
+
 ## Architecture
 
 ```
-                  ┌─────────────────────────────────────────────┐
-                  │           Next.js Web App (web/)            │
-                  │  Inbox · Priority · Search · Chat · Deep ·  │
-                  │            Settings (shadcn/ui)              │
-                  └────────────┬────────────────────────────────┘
-                               │ /api/*
-                  ┌────────────▼────────────────────────────────┐
-                  │     FastAPI server (gmail_search.server)    │
+        ┌──────────────────────────────┐   ┌──────────────────────────────┐
+        │      Next.js Web App (web/)  │   │   MCP clients — Claude        │
+        │  Inbox·Priority·Search·Chat· │   │   Desktop / claude.ai / Code  │
+        │       Deep·Settings          │   └───────────────┬──────────────┘
+        └──────────────┬───────────────┘                   │ /mcp  (OAuth 2.1 / bearer)
+                       │ /api/*              ┌──────────────▼───────────────┐
+                       │                     │  MCP server (FastMCP, :7878)  │
+                       │                     │  8 batch tools (agents/       │
+                       │                     │  mcp_tools_server) → reuse    │
+                       │                     │  the same retrieval engine    │
+                       │                     └──────────────┬───────────────┘
+                  ┌────▼─────────────────────────────────┐  │
+                  │     FastAPI server (gmail_search.server)│◄─┘
                   │  /api/search · /api/inbox · /api/priority · │
                   │  /api/thread · /api/agent · /api/battle ·   │
                   │  /api/conversations · /api/deep (SSE) ·     │
@@ -256,6 +302,11 @@ src/gmail_search/
                        writer→critic, revision loop, MAX_CRITIC_ROUNDS=2)
     planner.py / retriever.py / analyst.py / writer.py / critic.py
     runtime_claude.py / runtime_claude_native.py — Anthropic chat path
+    mcp_tools_server.py — FastMCP streamable-HTTP server: wraps the batch
+                       tools for external MCP clients (Claude Desktop/.ai/Code),
+                       per-session state, signed attachment URLs, SQL cost gate
+    mcp_oauth.py    — OAuth 2.1 AS for the MCP endpoint (broker-gated Google
+                       login + owner-email allow-list)
     auto_publish.py — SSE event fanout to /api/deep
     gc.py           — Artifact retention sweeper
     cost.py         — Per-stage cost tally
@@ -279,6 +330,11 @@ deploy/
   caddy/            — Reverse proxy config (gms.i.oursilverfamily.com)
   claudebox/        — Containerized Anthropic agent sandbox (deep mode)
 ```
+
+The MCP server (`python -m gmail_search.agents.mcp_tools_server`, port 7878) is
+the only surface intended for public exposure; the reference deployment fronts
+it with a cloudflared tunnel while `serve` (FastAPI) and the web app stay
+localhost-only.
 
 ## Commands
 
@@ -304,6 +360,10 @@ deploy/
 | `gmail-search logs` | Tail the watch daemon log |
 | `gmail-search status` | Show message count, embeddings, cost |
 | `gmail-search cost --breakdown` | Embedding spend by operation |
+
+The MCP server is started separately (it's a module, not a `gmail-search`
+subcommand): `python -m gmail_search.agents.mcp_tools_server` — see
+[Connect Claude (MCP)](#connect-claude-mcp).
 
 ## Configuration
 
@@ -434,6 +494,8 @@ Benchmarked on 20k messages / 32k embeddings:
 - **Ollama / vLLM** — local LLM backend for summaries (gemma-class default)
 - **crawl4ai** — headless URL crawler with denylist + content cleaning
 - **FastAPI** — API server
+- **FastMCP (MCP, streamable HTTP)** — exposes the retrieval engine to Claude / any MCP client, with OAuth 2.1 (broker-gated, owner-allow-listed) for remote access
+- **cloudflared** — tunnel that publicly exposes only the MCP endpoint (web + API stay localhost)
 - **Next.js 15 + assistant-ui + shadcn/ui** — web app
 - **Docker** — Analyst sandbox in deep mode
 - **Caddy** — reverse proxy for the deployed instance (`gms.i.oursilverfamily.com`)
@@ -447,6 +509,7 @@ Your email stays on your machine. The only data sent externally:
 - **Search queries** to Gemini API (query embedding on cache miss; conditional reranking)
 - **Topic summaries** to Gemini Flash Lite (one-time at reindex)
 - **Chat / deep-mode prompts** to Gemini (only when you use those features)
+- **MCP tool calls + results** to Anthropic — only if you connect Claude over the MCP server. The email content Claude requests (search hits, thread bodies, attachments) is returned to the connected Claude client; nothing is sent to Anthropic unless you use that connection.
 - **Crawled URLs** — fetched directly from the originating sites (no third-party proxy)
 
 Spell correction, abbreviation expansion, query caching, and per-thread summaries (when using Ollama/vLLM) are fully local — no API calls.
