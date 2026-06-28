@@ -18,8 +18,12 @@ def _setup_context(ctx, data_dir, config_path, verbose):
     has_override = data_dir or (config_path and config_path != "config.yaml") or verbose
     if ctx.obj and ctx.obj.get("_initialised") and not has_override:
         return
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    level = "DEBUG" if verbose else "INFO"
+    # Shared config: human-readable by default, JSON when GMS_LOG_JSON=1, every
+    # line stamped with trace_id. Replaces the old bare basicConfig.
+    from gmail_search.log_config import setup_logging
+
+    setup_logging(level=level)
 
     data_path = Path(data_dir) if data_dir else Path.cwd() / "data"
     cfg = load_config(
@@ -1184,12 +1188,13 @@ def reconcile(ctx, batch, loop, loop_sleep):
     import logging as _logging
     import time as _time
 
+    from gmail_search.log_config import setup_logging as _setup_logging
     from gmail_search.store.db import JobProgress, get_connection
     from gmail_search.store.queries import get_sync_state as _get_state
     from gmail_search.store.queries import recompute_thread_summary
     from gmail_search.store.queries import set_sync_state as _set_state
 
-    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _setup_logging()
     log = _logging.getLogger("reconcile")
 
     db_path = ctx.obj["db_path"]
@@ -1297,9 +1302,10 @@ def propositionize(ctx, batch, loop, loop_sleep, email):
     from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
     from gmail_search.embed.client import GeminiEmbedder
     from gmail_search.llm.openrouter import OpenRouterBackend
+    from gmail_search.log_config import setup_logging as _setup_logging
     from gmail_search.store.db import JobProgress, get_connection
 
-    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _setup_logging()
     log = _logging.getLogger("propositionize")
 
     cfg = ctx.obj["config"]
@@ -1398,9 +1404,10 @@ def supervise(ctx, interval, restart_delay):
     from datetime import datetime, timezone
 
     from gmail_search.jobs import gmail_search_command, is_daemon_running, spawn_detached
+    from gmail_search.log_config import setup_logging as _setup_logging
     from gmail_search.store.db import JobProgress
 
-    _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _setup_logging()
     _log = _logging.getLogger("supervisor")
 
     data_dir = ctx.obj["data_dir"]
@@ -1846,7 +1853,6 @@ def status(ctx):
 @common_options
 @click.pass_context
 def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep, email):
-    import logging
     import os as _os
     import time
 
@@ -1856,7 +1862,9 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep,
     if email:
         _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    from gmail_search.log_config import setup_logging as _setup_logging
+
+    _setup_logging()
     backend = get_backend()
     pass_limit = limit if limit is not None else (loop_batch if loop else None)
     click.echo(
@@ -1996,7 +2004,11 @@ def serve(ctx, host, port):
 
     app = create_app(ctx.obj["db_path"], ctx.obj["data_dir"], cfg)
     click.echo(f"Starting server at http://{h}:{p}")
-    uvicorn.run(app, host=h, port=p)
+    # Route uvicorn's own access/error loggers through our formatter + trace
+    # filter (they set propagate=False, so the root config alone won't reach them).
+    from gmail_search.log_config import uvicorn_log_config
+
+    uvicorn.run(app, host=h, port=p, log_config=uvicorn_log_config())
 
 
 @main.command(help="Delete deep-analysis artifacts older than the retention window")

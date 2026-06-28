@@ -80,16 +80,26 @@ def _service_headers(user_id: str | None) -> dict[str, str]:
     deep-mode session's user. The admin-token check is constant-time
     on the receiving end; without the token, X-User-Id is ignored
     (raises 401), so the bearer + X-User-Id pair is what unlocks the
-    cross-user scoping path."""
+    cross-user scoping path.
+
+    Also propagates the current trace id outbound as a W3C `traceparent`
+    header (when a trace is active), so a tool call's serve request + DB query
+    join to the originating MCP call on one id."""
+    from gmail_search.trace import current_trace_id, make_traceparent
+
+    headers: dict[str, str] = {}
+    tid = current_trace_id()
+    if tid:
+        headers["traceparent"] = make_traceparent(tid)
     if user_id is None:
-        return {}
+        return headers
     admin = os.environ.get("GMAIL_MCP_ADMIN_TOKEN")
-    if not admin:
-        # No admin token configured — fall through with no scoping
-        # headers so /api/* falls back to the bootstrap user. This
-        # matches single-pool behaviour.
-        return {"X-User-Id": user_id}
-    return {"X-User-Id": user_id, "Authorization": f"Bearer {admin}"}
+    headers["X-User-Id"] = user_id
+    if admin:
+        # Without the token, X-User-Id is ignored on the serve side (401),
+        # so it falls back to the bootstrap user — matches single-pool behaviour.
+        headers["Authorization"] = f"Bearer {admin}"
+    return headers
 
 
 async def _get(

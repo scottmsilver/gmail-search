@@ -179,7 +179,24 @@ def _log_tool_call(session_id: str, name: str, args: dict, response: dict) -> No
     else:
         outcome = "ok"
 
-    logger.info("MCP CALL tool=%s session=%s args=%s -> %s", name, (session_id or "")[:12], argstr, outcome)
+    # trace_id is added to the record by gmail_search.trace.TraceIdFilter (shows
+    # as [trace_id] in text logs and a trace_id field in JSON). The extra fields
+    # carry the FULL session_id (the visible line truncates to 12 chars) + the
+    # structured event so JSON logs are queryable by tool/session/outcome.
+    logger.info(
+        "MCP CALL tool=%s session=%s trace=%s args=%s -> %s",
+        name,
+        (session_id or "")[:12],
+        (current_trace_id() or "-")[:12],
+        argstr,
+        outcome,
+        extra={
+            "event": "mcp_tool_call",
+            "tool": name,
+            "session_id": session_id or "",
+            "outcome": outcome,
+        },
+    )
 
 
 def _record_call(session_id: str, name: str, args: dict, response: dict) -> None:
@@ -621,6 +638,7 @@ async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> di
     /api/* sets the X-User-Id header — FastAPI's `require_user_id`
     honors it iff the request also carries the MCP admin token,
     keeping the per-user gate intact even from the MCP path."""
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"searches": searches}
     response = await _search_emails_batch_impl(searches, user_id=ctx.user_id)
@@ -629,6 +647,7 @@ async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> di
 
 
 async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict:
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"filters": filters}
     response = await _query_emails_batch_impl(filters, user_id=ctx.user_id)
@@ -637,6 +656,7 @@ async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict
 
 
 async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict:
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"thread_ids": thread_ids}
     response = await _get_thread_batch_impl(thread_ids, user_id=ctx.user_id)
@@ -645,6 +665,7 @@ async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict
 
 
 async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"queries": queries}
     response = await _sql_query_batch_impl(queries, user_id=ctx.user_id)
@@ -658,6 +679,7 @@ async def _tool_find_facts(session_id: str, query: str, exhaustive: bool = True,
     session's user via the X-User-Id + admin-token pair."""
     from gmail_search.agents.tools import find_facts as _find_facts_impl
 
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"query": query, "exhaustive": exhaustive, "k": k}
     response = await _find_facts_impl(query, exhaustive=exhaustive, k=k, user_id=ctx.user_id)
@@ -670,6 +692,7 @@ async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
     response is prepended with a scoping preamble pinning the active
     user — the LLM uses that to write correct WHERE user_id = ... clauses.
     """
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     response = await _describe_schema_impl(user_id=ctx.user_id)
     _record_call(session_id, "describe_schema", {}, response)
@@ -690,6 +713,7 @@ def _rewrite_blob_urls(response: dict) -> None:
 
 
 async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"items": items}
     response = await _get_attachment_batch_impl(items, user_id=ctx.user_id)
@@ -807,6 +831,7 @@ async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> di
     in that entry's `result` as `{error: ...}`; the batch as a
     whole still succeeds so the agent can publish every other file
     even if one is missing."""
+    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
     args = {"items": items}
     if not isinstance(items, list) or not items:
@@ -1558,7 +1583,11 @@ def main() -> None:
     lifespan events to it."""
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO)
+    from gmail_search.log_config import setup_logging
+
+    # Shared logging: human-readable by default, JSON when GMS_LOG_JSON=1, every
+    # line stamped with trace_id (so MCP CALL lines join to serve + agent_events).
+    setup_logging()
     token, was_generated = _resolve_admin_token()
     fastmcp = build_app()
     host = fastmcp.settings.host
@@ -1591,7 +1620,9 @@ def main() -> None:
     # then masquerade as loopback and defeat the _admin_guard loopback
     # gate. We bind the real peer address only, so the admin gate can't
     # be spoofed via forwarded headers.
-    uvicorn.run(asgi, host=host, port=port, proxy_headers=False)
+    from gmail_search.log_config import uvicorn_log_config
+
+    uvicorn.run(asgi, host=host, port=port, proxy_headers=False, log_config=uvicorn_log_config())
 
 
 if __name__ == "__main__":

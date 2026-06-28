@@ -1,0 +1,12 @@
+[Unit]
+Description=Rotate gmail-search data/*.log (copytruncate)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate --state %h/.config/gmail-search/logrotate.state %h/development/gmail-search/deploy/logrotate/gmail-search.conf
+
+# Install (per-user):
+#   cp deploy/logrotate/gmail-search-logrotate.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gmail-search-logrotate.timer
+#   systemctl --user start gmail-search-logrotate.service   # rotate now

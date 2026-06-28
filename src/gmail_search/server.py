@@ -649,6 +649,54 @@ def create_app(
     # a global. Phase 1 of PER_USER_LOGIN.
     app.state.data_dir = data_dir
 
+    @app.middleware("http")
+    async def _trace_and_log(request, call_next):
+        """Bind a trace id for the request (from the inbound `traceparent` set
+        by the MCP/agent tools, or a fresh one), emit ONE structured request
+        log line (this is the only per-request log serve had), and echo the id
+        back. ContextVars propagate into Starlette's threadpool, so the sync
+        `def` handlers see the same trace id with no per-handler change."""
+        import time as _t
+
+        from gmail_search.trace import ensure_trace_id, make_traceparent, set_trace_id, trace_id_from_header
+
+        def _safe(v: str) -> str:
+            # Escape control chars (decoded %0A etc.) so an attacker-influenced
+            # path/header can't split or forge a text log line (log integrity).
+            return (v or "").encode("unicode_escape").decode("ascii")
+
+        inbound = trace_id_from_header(request.headers.get("traceparent"))
+        set_trace_id(inbound or None)
+        tid = ensure_trace_id()
+        t0 = _t.perf_counter()
+        status = 500
+        method = _safe(request.method)
+        path = _safe(request.url.path)
+        uid = _safe(request.headers.get("x-user-id", ""))
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            # Echo the trace id so the caller can correlate on its side.
+            response.headers["traceparent"] = make_traceparent(tid)
+            return response
+        finally:
+            dur_ms = (_t.perf_counter() - t0) * 1000.0
+            logger.info(
+                "%s %s -> %s %.0fms",
+                method,
+                path,
+                status,
+                dur_ms,
+                extra={
+                    "event": "http_request",
+                    "method": method,
+                    "path": path,
+                    "status": status,
+                    "dur_ms": round(dur_ms, 1),
+                    "user_id": uid,
+                },
+            )
+
     # Mount the opt-in deep-analysis agent surface. See
     # docs/DEEP_ANALYSIS_AGENT.md. Chat mode is unaffected; the agent
     # endpoints sit under /api/agent/* and /api/artifact/*.

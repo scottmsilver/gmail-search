@@ -482,6 +482,18 @@ Benchmarked on 20k messages / 32k embeddings:
 | Topic filter (client-side) | instant |
 | Inbox time-to-glass | instrumented in Settings |
 
+## Logging & observability
+
+Proportionate for a single host — no agents, collectors, or SaaS. All on disk + stdlib logging.
+
+- **On-disk logs** — each service/daemon writes to `data/*.log` (serve, the MCP server, watch/update/summarize/reindex/reconcile/crawl). The MCP server's per-tool-call lines (`MCP CALL tool=… -> ok (N items, K errors)`) land in `data/mcp.log`.
+- **Rotation** — `logrotate` with `copytruncate` (required: the log writers hold a long-lived FD that never reopens on rename), driven by a `systemctl --user` timer. Config tracked in `deploy/logrotate/`.
+- **Structured logs** — human-readable by default; set `GMS_LOG_JSON=1` for JSON lines (machine-queryable with `jq`). One shared `logging` config (`gmail_search.log_config`) covers serve, MCP, and the daemons, including uvicorn's own access/error loggers.
+- **Trace correlation** — a W3C `traceparent` id is minted per MCP tool call, propagated on the outbound `/api/*` call, bound by a serve middleware, and stamped on **every** log line (`[trace_id]`) — so one `grep` joins an MCP call → its serve request → the engine internals → the originating Postgres query. Zero-dep (`gmail_search.trace`, stdlib `contextvars`).
+- **Browsing** — [`lnav`](https://lnav.org) merges/tails/filters `data/*.log` and runs SQL over them; an lnav format for our JSON schema (queryable `trace_id`/`status`/`dur_ms`/`tool` columns) is in `deploy/lnav/`. For a web UI later, OpenObserve is the lightest option. See `deploy/lnav/README.md`.
+
+Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB-handler concurrency, default 24), `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` (serve query cap, default 10min), `GMS_SQL_MAX_PLAN_COST` (agent-SQL pre-flight cost gate, default 50M), `GMAIL_AGENT_HTTP_TIMEOUT` (in-process API client timeout).
+
 ## Tech stack
 
 - **Gmail API** — message download with OAuth2, batch requests, incremental sync
@@ -495,6 +507,7 @@ Benchmarked on 20k messages / 32k embeddings:
 - **crawl4ai** — headless URL crawler with denylist + content cleaning
 - **FastAPI** — API server
 - **FastMCP (MCP, streamable HTTP)** — exposes the retrieval engine to Claude / any MCP client, with OAuth 2.1 (broker-gated, owner-allow-listed) for remote access
+- **python-json-logger + stdlib logging / contextvars** — opt-in JSON logs and a zero-dep `traceparent` correlation id across MCP → serve → DB; `logrotate` (copytruncate) for retention; `lnav` for browsing
 - **cloudflared** — tunnel that publicly exposes only the MCP endpoint (web + API stay localhost)
 - **Next.js 15 + assistant-ui + shadcn/ui** — web app
 - **Docker** — Analyst sandbox in deep mode

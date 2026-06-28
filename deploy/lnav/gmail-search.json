@@ -1,0 +1,90 @@
+{
+  "$schema": "https://lnav.org/schemas/format-v1.schema.json",
+  "gmail_search_json": {
+    "title": "Gmail Search (JSON logs)",
+    "description": "gmail-search serve / MCP / daemon logs when GMS_LOG_JSON=1",
+    "json": true,
+    "hide-extra": false,
+    "timestamp-field": "asctime",
+    "timestamp-format": [
+      "%Y-%m-%d %H:%M:%S,%L"
+    ],
+    "level-field": "levelname",
+    "level": {
+      "error": "ERROR",
+      "warning": "WARNING",
+      "info": "INFO",
+      "debug": "DEBUG",
+      "critical": "CRITICAL"
+    },
+    "line-format": [
+      {
+        "field": "asctime"
+      },
+      " ",
+      {
+        "field": "levelname",
+        "min-width": 7
+      },
+      " [",
+      {
+        "field": "trace_id"
+      },
+      "] ",
+      {
+        "field": "name"
+      },
+      ": ",
+      {
+        "field": "message"
+      }
+    ],
+    "value": {
+      "trace_id": {
+        "kind": "string",
+        "identifier": true
+      },
+      "name": {
+        "kind": "string"
+      },
+      "event": {
+        "kind": "string",
+        "identifier": true
+      },
+      "tool": {
+        "kind": "string",
+        "identifier": true
+      },
+      "session_id": {
+        "kind": "string",
+        "identifier": true
+      },
+      "user_id": {
+        "kind": "string",
+        "identifier": true
+      },
+      "method": {
+        "kind": "string"
+      },
+      "path": {
+        "kind": "string",
+        "identifier": true
+      },
+      "status": {
+        "kind": "integer",
+        "foreign-key": false
+      },
+      "dur_ms": {
+        "kind": "number"
+      },
+      "outcome": {
+        "kind": "string"
+      }
+    },
+    "sample": [
+      {
+        "line": "{\"asctime\": \"2026-06-28 08:08:03,316\", \"levelname\": \"INFO\", \"name\": \"gmail_search.server\", \"message\": \"GET /api/search -> 200 1799ms\", \"trace_id\": \"0d5cd23e9cf64fc38cc0bbab934f0efe\", \"event\": \"http_request\", \"method\": \"GET\", \"path\": \"/api/search\", \"status\": 200, \"dur_ms\": 1799.0, \"user_id\": \"u_bW4Sa8cN0wT9KPwp\"}"
+      }
+    ]
+  }
+}

@@ -55,6 +55,10 @@ dependencies = [
     # history. Used only inside auth/session.py — not a transitive surface
     # we expose to crawled content or LLM-controlled inputs.
     "pyjwt>=2.9.0",
+    # Structured (JSON) logging — a pure-Python stdlib logging.Formatter, no
+    # transitive deps. Only active when GMS_LOG_JSON=1; otherwise logs stay
+    # human-readable. >=3.1 for the `pythonjsonlogger.json` import path.
+    "python-json-logger>=3.1",
 ]
 
 [project.optional-dependencies]
