@@ -9,5 +9,6 @@ git config core.hooksPath .githooks
 chmod +x .githooks/* 2>/dev/null || true
 
 echo "✓ core.hooksPath = .githooks"
-echo "  Commits now run: ruff check + pytest (fast). Override: git commit --no-verify"
+echo "  pre-commit (fast): ruff + smoke tests   |  pre-push (full): ruff + pytest"
+echo "  Override: git commit/push --no-verify   |  SKIP_HOOKS=1"
 command -v ruff >/dev/null || echo "  ⚠ install ruff:  pip install -e '.[dev]'"

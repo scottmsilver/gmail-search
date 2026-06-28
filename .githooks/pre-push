@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# FULL gate before code is shared: ruff + the complete fast test suite. Runs
+# once per push (not per commit), so the pre-commit hook can stay quick.
+#
+# Override:  git push --no-verify        or   SKIP_HOOKS=1 git push ...
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ "${SKIP_HOOKS:-}" = "1" ]; then
+  echo "[pre-push] SKIP_HOOKS=1 set — skipping ruff + tests"
+  exit 0
+fi
+
+RUFF="${GMS_RUFF:-ruff}"
+PY="${GMS_PYTHON:-python}"
+
+echo "[pre-push] ruff check…"
+if ! "$RUFF" check src/ tests/; then
+  echo "[pre-push] ✗ ruff failed — fix it (or bypass with: git push --no-verify)" >&2
+  exit 1
+fi
+
+echo "[pre-push] pytest (full fast suite — integration/perf excluded)…"
+if ! "$PY" -m pytest -q; then
+  echo "[pre-push] ✗ tests failed — fix them (or bypass with: git push --no-verify)" >&2
+  exit 1
+fi
+
+echo "[pre-push] ✓ ruff + full suite passed"
