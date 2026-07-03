@@ -859,6 +859,29 @@ def _is_watch_running(data_dir: Path) -> tuple[bool, int | None]:
         return False, None
 
 
+def _running_watch_jobs(jobs) -> list:
+    """Per-user watch jobs currently running, from the job registry.
+
+    The watcher moved from a single global daemon (tracked by a PID file) to
+    one 'watch:<user>' job per mailbox. Callers that only consult the legacy
+    PID file wrongly report "not running" while these are alive.
+    """
+    return [j for j in jobs if j["job_id"].startswith("watch") and j["status"] == "running"]
+
+
+def _watch_daemon_status_line(data_dir: Path, jobs) -> str:
+    """One human-readable line describing watch health, checking both the
+    legacy global PID file and the current per-user watch jobs."""
+    running, pid = _is_watch_running(data_dir)
+    if running:
+        return f"Watch daemon: running (PID {pid})"
+    watchers = _running_watch_jobs(jobs)
+    if watchers:
+        n = len(watchers)
+        return f"Watch daemon: running ({n} per-user watcher{'s' if n != 1 else ''})"
+    return "Watch daemon: not running"
+
+
 @main.command(help="Start watching for new emails in the background")
 @click.option("--interval", type=int, default=120, help="Seconds between sync checks")
 @click.option("--budget", type=float, default=None, help="Override budget limit")
@@ -1668,12 +1691,10 @@ def progress(ctx):
 
     data_dir = ctx.obj["data_dir"]
 
-    # Daemon status
-    running, pid = _is_watch_running(data_dir)
-    if running:
-        click.echo(f"Watch daemon: running (PID {pid})")
-    else:
-        click.echo("Watch daemon: not running")
+    # Daemon status — the watcher runs as per-user 'watch:<user>' jobs now, so
+    # consult the job registry, not just the legacy global PID file.
+    jobs = JobProgress.get(ctx.obj["db_path"])
+    click.echo(_watch_daemon_status_line(data_dir, jobs))
 
     # DB stats
     conn = get_connection(ctx.obj["db_path"])
@@ -1687,7 +1708,6 @@ def progress(ctx):
         click.echo(f"Date range: {dates['oldest'][:10]} to {dates['newest'][:10]}")
 
     # Job history
-    jobs = JobProgress.get(ctx.obj["db_path"])
     if jobs:
         click.echo("\nRecent jobs:")
         for j in jobs:
