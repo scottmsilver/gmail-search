@@ -510,3 +510,102 @@ def test_rewrite_blob_urls_noop_without_public_url(monkeypatch):
     resp = {"results": [{"input": {}, "result": {"blob_token": "X", "fetch_url": "/api/attachment/5"}}]}
     M._rewrite_blob_urls(resp)
     assert resp["results"][0]["result"]["fetch_url"] == "/api/attachment/5"  # unchanged when no public URL
+
+
+# ── transport-id instrumentation (cross-wiring investigation) ──────
+
+
+def _set_fake_request_ctx(transport_sid: str | None, rpc_id=42):
+    """Install a low-level MCP RequestContext like the SDK does per
+    incoming call. Returns the reset token."""
+    from mcp.server.lowlevel.server import request_ctx
+    from mcp.shared.context import RequestContext
+
+    class _Req:
+        headers = {"mcp-session-id": transport_sid} if transport_sid else {}
+
+    return request_ctx.set(
+        RequestContext(
+            request_id=rpc_id,
+            meta=None,
+            session=object(),
+            lifespan_context=None,
+            request=_Req(),
+        )
+    )
+
+
+def test_transport_ids_outside_request_context():
+    """Outside an MCP request (e.g. admin routes, tests), _transport_ids
+    degrades to '-' markers — the log path must never crash a tool call."""
+    assert mts._transport_ids() == ("-", "-")
+
+
+def test_transport_ids_from_request_context():
+    """Inside a request, _transport_ids surfaces the streamable-HTTP
+    transport session (mcp-session-id header) + the JSON-RPC request id —
+    the pair that proves/disproves cross-transport response wiring."""
+    from mcp.server.lowlevel.server import request_ctx
+
+    token = _set_fake_request_ctx("tsid-abc123", rpc_id=42)
+    try:
+        assert mts._transport_ids() == ("tsid-abc123", "42")
+    finally:
+        request_ctx.reset(token)
+
+
+def test_transport_ids_no_header_falls_back():
+    """A request without the mcp-session-id header (stdio, first init)
+    yields '-' for the transport but still reports the rpc id."""
+    from mcp.server.lowlevel.server import request_ctx
+
+    token = _set_fake_request_ctx(None, rpc_id=7)
+    try:
+        assert mts._transport_ids() == ("-", "7")
+    finally:
+        request_ctx.reset(token)
+
+
+def test_log_tool_call_includes_transport_fields(caplog):
+    """The per-call log line + JSON extras must carry the transport
+    session id and JSON-RPC id so cross-wiring reports can be checked
+    against which transport actually carried each request."""
+    import logging as _logging
+
+    from mcp.server.lowlevel.server import request_ctx
+
+    token = _set_fake_request_ctx("tsid-abc123", rpc_id=99)
+    try:
+        with caplog.at_level(_logging.INFO, logger=mts.__name__):
+            mts._log_tool_call("sess-1", "search_emails_batch", {}, {"results": []})
+    finally:
+        request_ctx.reset(token)
+
+    rec = next(r for r in caplog.records if "MCP CALL" in r.getMessage())
+    assert "transport=tsid-abc123" in rec.getMessage()
+    assert "rpc=99" in rec.getMessage()
+    assert rec.transport_session_id == "tsid-abc123"
+    assert rec.rpc_id == "99"
+
+
+# ── Stateless transport (duplicate-rpc-id cross-wiring fix) ────────
+
+
+def test_build_app_is_stateless_by_default():
+    """The server must run streamable-HTTP in STATELESS mode: claude.ai
+    reuses JSON-RPC id 1 across concurrent requests on one pooled
+    transport session, and the SDK's stateful per-session routing table
+    (_request_streams, keyed by id alone) swaps/drops responses when
+    duplicate ids are in flight. Stateless mode gives each POST its own
+    transport — collision impossible by construction (verified by
+    reproducer: 12/12 OK stateless vs 1 swapped + 11 hung stateful)."""
+    app = mts.build_app(host="127.0.0.1", port=0)
+    assert app.settings.stateless_http is True
+
+
+def test_stateless_env_kill_switch(monkeypatch):
+    """GMAIL_MCP_STATELESS=0 restores stateful mode — an operational
+    rollback lever if a client ever needs session semantics."""
+    monkeypatch.setenv("GMAIL_MCP_STATELESS", "0")
+    app = mts.build_app(host="127.0.0.1", port=0)
+    assert app.settings.stateless_http is False

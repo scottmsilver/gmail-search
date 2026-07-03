@@ -141,6 +141,12 @@ _SESSIONS: dict[str, SessionContext] = {}
 # `unregister_session` alongside the registered entry.
 _TRANSPORT_SESSIONS: dict[tuple[str, str], SessionContext] = {}
 
+# Streamable-HTTP session-riding guard: mcp-session-id → the first
+# authenticated uid seen on it (see _TransportAuthMiddleware). Bounded;
+# a reset just re-binds live sessions on their next request.
+_TRANSPORT_SESSION_OWNERS: dict[str, str] = {}
+_MAX_TRANSPORT_SESSION_OWNERS = 10_000
+
 
 # ── Side-channel: per-session structured tool-call log ─────────────
 #
@@ -157,6 +163,34 @@ _SESSION_CALLS: dict[str, list[dict]] = {}
 # Track which sessions have already had the cap-warning emitted so we
 # don't spam the log on every dropped call after the cap is hit.
 _SESSION_CAP_WARNED: set[str] = set()
+
+
+def _transport_ids() -> tuple[str, str]:
+    """Return (transport_session_id, jsonrpc_request_id) for the MCP
+    request currently being served, or ('-', '-') outside one.
+
+    Instrumentation for the 2026-07-03 cross-wiring reports: two claude.ai
+    chats of the same user intermittently saw each other's tool responses.
+    Our handler-level logs pair correctly, so the crossing is downstream —
+    either the SDK's streamable-HTTP response routing or claude.ai's
+    connector demux. Logging which TRANSPORT carried each call (plus the
+    JSON-RPC id, to expose id collisions on a shared transport) is the
+    evidence that tells those apart. Must never raise: it runs on the
+    logging path of every tool call."""
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+
+        ctx = request_ctx.get()
+    except Exception:  # noqa: BLE001 — LookupError outside a request; anything else, degrade
+        return ("-", "-")
+    transport = "-"
+    try:
+        headers = getattr(ctx.request, "headers", None)
+        if headers is not None:
+            transport = headers.get("mcp-session-id") or "-"
+    except Exception:  # noqa: BLE001
+        pass
+    return (transport, str(ctx.request_id))
 
 
 def _log_tool_call(session_id: str, name: str, args: dict, response: dict) -> None:
@@ -188,10 +222,13 @@ def _log_tool_call(session_id: str, name: str, args: dict, response: dict) -> No
     # as [trace_id] in text logs and a trace_id field in JSON). The extra fields
     # carry the FULL session_id (the visible line truncates to 12 chars) + the
     # structured event so JSON logs are queryable by tool/session/outcome.
+    transport_sid, rpc_id = _transport_ids()
     logger.info(
-        "MCP CALL tool=%s session=%s trace=%s args=%s -> %s",
+        "MCP CALL tool=%s session=%s transport=%s rpc=%s trace=%s args=%s -> %s",
         name,
         (session_id or "")[:12],
+        transport_sid,
+        rpc_id,
         (current_trace_id() or "-")[:12],
         argstr,
         outcome,
@@ -199,6 +236,8 @@ def _log_tool_call(session_id: str, name: str, args: dict, response: dict) -> No
             "event": "mcp_tool_call",
             "tool": name,
             "session_id": session_id or "",
+            "transport_session_id": transport_sid,
+            "rpc_id": rpc_id,
             "outcome": outcome,
         },
     )
@@ -879,19 +918,26 @@ SESSION_PARAM_NOTE = (
 SEARCH_BATCH_DESC = (
     "Run many semantic searches concurrently in ONE call. `searches` "
     "is a list (1-100) of `{query, date_from?, date_to?, top_k?, "
-    "detail?}` dicts; `top_k` defaults to 10. Use for relevance "
-    'lookups ("what did we decide about X", "find messages mentioning '
-    'Y"). Returns `{results: [{input, result}, ...]}` aligned with '
-    "input. Per-search errors land in that entry's `result` as "
-    "`{error: ...}`.\n\n"
+    "detail?, max_matches?}` dicts; `top_k` defaults to 10. Use for "
+    'relevance lookups ("what did we decide about X", "find messages '
+    'mentioning Y"). Returns `{results: [{input, result}, ...]}` '
+    "aligned with input. Per-search errors land in that entry's "
+    "`result` as `{error: ...}`.\n\n"
     "`detail` controls per-match payload — pick the cheapest that "
     "answers the question, since larger levels cost far more tokens:\n"
+    '  - "refs": ONE LINE per thread ({thread_id, subject, date_last, '
+    "from, score}), no matches array — use for fan-out inventory "
+    "questions across many queries where you only need to know which "
+    "threads exist.\n"
     '  - "snippet" (default): matched-text snippet only — best for '
     "inventories / counting / locating threads.\n"
     '  - "summary": + a one-line LLM summary per matched message.\n'
     '  - "full": + the WHOLE email body per match — use when you '
     "must read the matches; avoids N get_thread calls but is large, "
     "so keep top_k modest.\n\n"
+    "`max_matches` caps matching messages returned per thread "
+    "(top-scoring first; default 3, 0 = unlimited). A bitten cap is "
+    "reported per thread as `matches_truncated`.\n\n"
     "ALWAYS use this for multi-angle investigations — fan out across "
     "phrasings/date-windows in ONE call. Even a single search goes "
     f"through this tool (pass a one-item list). {SESSION_PARAM_NOTE}"
@@ -1439,6 +1485,31 @@ class _TransportAuthMiddleware:
                 # closed). Falls through to the SDK gate, which also can't
                 # scope it, rather than scoping to an empty/default tenant.
 
+        # Session-riding hardening: bind a streamable-HTTP mcp-session-id to
+        # the FIRST authenticated uid that uses it; a different uid on the
+        # same session id is rejected. Server-minted session ids are
+        # unguessable UUIDs, but nothing else stops a client that LEARNED
+        # one from riding another user's transport. Inert in stateless mode
+        # (no session ids exist) and for tenantless service tokens.
+        if authenticated and uid:
+            sid = self._header(scope, b"mcp-session-id")
+            if sid:
+                owner = _TRANSPORT_SESSION_OWNERS.get(sid)
+                if owner is None:
+                    if len(_TRANSPORT_SESSION_OWNERS) >= _MAX_TRANSPORT_SESSION_OWNERS:
+                        # Sessions are ephemeral; a full reset just re-binds
+                        # each live session on its next request.
+                        _TRANSPORT_SESSION_OWNERS.clear()
+                    _TRANSPORT_SESSION_OWNERS[sid] = uid
+                elif owner != uid:
+                    logger.warning(
+                        "transport session %s bound to another identity — rejecting request for uid=%s",
+                        sid[:12],
+                        uid,
+                    )
+                    await self._forbidden(send)
+                    return
+
         if not authenticated:
             # OAuth on: don't emit our plain 401 — pass through so the SDK's
             # RequireAuthMiddleware produces the spec-compliant 401 with the
@@ -1478,6 +1549,28 @@ class _TransportAuthMiddleware:
         return None
 
     @staticmethod
+    def _header(scope, name: bytes) -> str | None:
+        for key, value in scope.get("headers", []):
+            if key == name:
+                return value.decode("latin-1") or None
+        return None
+
+    @staticmethod
+    async def _forbidden(send) -> None:
+        body = b'{"error":"transport session bound to another identity"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
     async def _unauthorized(send) -> None:
         body = b'{"error":"transport token required"}'
         await send(
@@ -1515,6 +1608,18 @@ def _make_fastmcp_app(host: str, port: int):
 
     from gmail_search.agents import mcp_oauth
 
+    # STATELESS streamable-HTTP (2026-07-03 cross-wiring fix): claude.ai
+    # reuses JSON-RPC id 1 for every request and pools one transport
+    # session across a user's chats, so concurrent duplicate ids collide
+    # in the SDK's per-session routing table (_request_streams keyed by
+    # id alone) — one request receives another's response, the other
+    # hangs. Stateless mode creates a fresh transport per POST, making
+    # the collision impossible by construction. We use no session-only
+    # features (no server push, subscriptions, sampling, or event-store
+    # resumability; per-call context rides the session_id TOOL ARG).
+    # GMAIL_MCP_STATELESS=0 is the operational rollback lever.
+    stateless = os.environ.get("GMAIL_MCP_STATELESS", "1").strip().lower() not in ("0", "false", "no", "off")
+
     global _active_oauth_provider
     oauth_provider = None
     if mcp_oauth.is_oauth_enabled():
@@ -1524,6 +1629,7 @@ def _make_fastmcp_app(host: str, port: int):
             host=host,
             port=port,
             streamable_http_path=DEFAULT_PATH,
+            stateless_http=stateless,
             auth_server_provider=oauth_provider,
             auth=auth_settings,
         )
@@ -1533,6 +1639,7 @@ def _make_fastmcp_app(host: str, port: int):
             host=host,
             port=port,
             streamable_http_path=DEFAULT_PATH,
+            stateless_http=stateless,
         )
 
     app.tool(name="search_emails_batch", description=SEARCH_BATCH_DESC)(_tool_search_emails_batch)

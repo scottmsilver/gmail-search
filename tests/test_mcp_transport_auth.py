@@ -846,3 +846,73 @@ def test_admin_route_loopback_valid_token_still_works():
         json={"email": "a@x.com"},
     )
     assert r.status_code == 200
+
+
+# ── transport-session ↔ identity binding (session-riding hardening) ─
+#
+# A streamable-HTTP mcp-session-id is minted by the server but presented
+# by clients as a bare header. Without binding, a client that somehow
+# learned another user's session id could ride their transport. Bind the
+# first authenticated uid seen on a session id; reject a different uid.
+
+
+def _drive_mw(headers: dict[str, str], inner_called: dict):
+    async def app(scope, receive, send):
+        inner_called["yes"] = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    mw = mts._TransportAuthMiddleware(app)
+    scope = {
+        "type": "http",
+        "path": "/mcp",
+        "headers": [(k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers.items()],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    asyncio.run(mw(scope, receive, send))
+    return sent
+
+
+def _uid_token(uid):
+    tok, _ = mts.mint_transport_token(user_id=uid, email=f"{uid}@example.com", ttl_seconds=300)
+    return tok
+
+
+def test_session_binding_rejects_uid_mismatch():
+    mts._TRANSPORT_SESSION_OWNERS.clear()
+    called = {}
+    _drive_mw({"authorization": f"Bearer {_uid_token('u_aaa')}", "mcp-session-id": "tsid-1"}, called)
+    assert called.get("yes")  # first uid binds and passes
+
+    called = {}
+    sent = _drive_mw({"authorization": f"Bearer {_uid_token('u_bbb')}", "mcp-session-id": "tsid-1"}, called)
+    assert not called.get("yes"), "mismatched uid must not reach the app"
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    assert status == 403
+
+
+def test_session_binding_same_uid_passes():
+    mts._TRANSPORT_SESSION_OWNERS.clear()
+    for _ in range(2):
+        called = {}
+        _drive_mw({"authorization": f"Bearer {_uid_token('u_aaa')}", "mcp-session-id": "tsid-2"}, called)
+        assert called.get("yes")
+
+
+def test_no_session_header_no_binding():
+    """Stateless mode: no mcp-session-id header → nothing to bind, both
+    uids pass."""
+    mts._TRANSPORT_SESSION_OWNERS.clear()
+    for uid in ("u_aaa", "u_bbb"):
+        called = {}
+        _drive_mw({"authorization": f"Bearer {_uid_token(uid)}"}, called)
+        assert called.get("yes")
+    assert mts._TRANSPORT_SESSION_OWNERS == {}
