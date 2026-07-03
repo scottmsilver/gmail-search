@@ -31,7 +31,7 @@ def _load_embeddings_matrix(conn, model: str, dimensions: int) -> tuple[list[int
     The previous `[list(struct.unpack(...)) for r in rows]` intermediate
     allocated ~N × dims Python float objects — ~30 GiB for 237K × 3072
     vectors — which caused per-cycle RSS spikes and glibc heap
-    fragmentation in the watch loop. See OOM_INCIDENT_2026-04-18.md.
+    fragmentation in the watch loop. See docs/notes/OOM_INCIDENT_2026-04-18.md.
 
     Stored blobs are little-endian float32 (struct 'f'), which matches
     numpy's native float32 layout on the target platforms, so

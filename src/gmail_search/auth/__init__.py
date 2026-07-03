@@ -1,6 +1,6 @@
 """Multi-tenant identity package — silver-oauth broker pattern.
 
-Phase 1 of PER_USER_LOGIN_2026-04-27.md: schema + CLI + a session-cookie
+Phase 1 of docs/notes/PER_USER_LOGIN_2026-04-27.md: schema + CLI + a session-cookie
 FastAPI dependency that's a no-op when `GMAIL_MULTI_TENANT != "1"`.
 Pivoted from the NextAuth/Bearer-JWT model after recognizing the shared
 silver-oauth broker (../silver-oauth) already solves the per-app

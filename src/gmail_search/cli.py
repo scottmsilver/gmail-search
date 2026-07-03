@@ -2067,7 +2067,7 @@ def prune_artifacts(ctx, retention_days):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Multi-tenant identity (Phase 1 of PER_USER_LOGIN_2026-04-27.md)
+# Multi-tenant identity (Phase 1 of docs/notes/PER_USER_LOGIN_2026-04-27.md)
 # ─────────────────────────────────────────────────────────────────────
 # Op-only commands. They edit `users` / `invited_emails` regardless of
 # whether GMAIL_MULTI_TENANT is set — the env flag gates the *runtime*

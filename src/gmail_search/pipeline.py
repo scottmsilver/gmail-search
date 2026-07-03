@@ -89,7 +89,7 @@ def reindex(
     # subspace + an index-level corpus_full.memmap; the searcher
     # reranks ScaNN's candidates against full-precision vectors at
     # query time. ~+70 ms per query, ~50% AH-index size, NDCG ≥
-    # baseline. See SCANN_COMPACTION_2026-04-27.md. Off by default
+    # baseline. See docs/notes/SCANN_COMPACTION_2026-04-27.md. Off by default
     # via cfg; flip indexing.manual_rerank=true to enable. The
     # searcher auto-detects via manifest, so existing indexes keep
     # working when this is on (until the next reindex rebuilds).

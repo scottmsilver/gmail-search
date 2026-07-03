@@ -79,7 +79,7 @@ class ScannSearcher:
         self._shard_keys: list[str] = []
 
         # Manual-rerank state. When the manifest carries the
-        # `manual_rerank` block (variant C — see SCANN_COMPACTION_2026-04-27.md),
+        # `manual_rerank` block (variant C — see docs/notes/SCANN_COMPACTION_2026-04-27.md),
         # we mmap the index-level corpus_full.memmap and rerank ScaNN's
         # truncated-AH candidates against full-precision vectors at
         # query time. Cost: ~70 ms per query in numpy; payoff: matches

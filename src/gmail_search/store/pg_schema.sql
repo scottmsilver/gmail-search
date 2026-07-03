@@ -422,7 +422,7 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
     ON embeddings (message_id, attachment_id, chunk_type, model);
 
 -- ─────────────────────────────────────────────────────────────────────
--- Multi-tenant identity (Phase 1 of PER_USER_LOGIN_2026-04-27.md)
+-- Multi-tenant identity (Phase 1 of docs/notes/PER_USER_LOGIN_2026-04-27.md)
 -- ─────────────────────────────────────────────────────────────────────
 -- Tables exist unconditionally so the `gmail-search invite` CLI works
 -- against an un-migrated install. Data scoping (user_id columns on
