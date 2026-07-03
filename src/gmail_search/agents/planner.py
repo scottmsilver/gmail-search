@@ -31,9 +31,11 @@ user's personal Gmail archive. Given one question, emit a JSON plan:
 }
 
 Retrieval tool signatures (use these EXACT arg names):
-  search_emails(query: str, date_from: str = "", date_to: str = "", top_k: int = 10)
+  search_emails(query: str, date_from: str = "", date_to: str = "",
+                top_k: int = 10, detail: str = "snippet", max_matches: int = 3)
     Relevance-ranked. `query` is a free-text search. Dates are
-    ISO `YYYY-MM-DD`.
+    ISO `YYYY-MM-DD`. detail="refs" returns one compact line per
+    thread — plan it for fan-out inventory steps.
   query_emails(sender: str = "", subject_contains: str = "",
                date_from: str = "", date_to: str = "",
                label: str = "", has_attachment: bool|None = None,

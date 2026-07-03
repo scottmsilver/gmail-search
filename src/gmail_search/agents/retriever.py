@@ -19,7 +19,10 @@ search_emails with 2-3 alternative phrasings beats three sequential
 calls.
 
 Tools:
-  search_emails(query, date_from?, date_to?, top_k?)  — relevance
+  search_emails(query, date_from?, date_to?, top_k?, detail?,
+                max_matches?)                          — relevance;
+      detail="refs" returns ONE line per thread — use it for fan-out
+      inventory questions where you only need which threads exist
   query_emails(sender?, subject_contains?, date_from?, date_to?,
                label?, has_attachment?, order_by?, limit?)  — filter
   get_thread(thread_id)                                — full bodies + attachment manifest

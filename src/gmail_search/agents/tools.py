@@ -179,6 +179,7 @@ async def search_emails(
     date_to: str = "",
     top_k: int = 10,
     detail: str = "snippet",
+    max_matches: int = 3,
     *,
     user_id: str | None = None,
 ) -> dict:
@@ -192,6 +193,10 @@ async def search_emails(
     `detail` controls how much content comes back per match — pick the
     cheapest level that answers your question, since bigger levels cost
     far more tokens:
+      - "refs": ONE LINE per thread — {thread_id, subject, date_last,
+        from, score}, no matches array. Use for fan-out inventory
+        questions ("which of these N things has an email?") where you
+        only need to know a thread exists and where to look next.
       - "snippet" (default): the matched-text snippet only. Best for
         inventories / "how many" / locating which threads to look at.
       - "summary": + a one-line LLM summary of each matched message.
@@ -200,11 +205,24 @@ async def search_emails(
         need to actually read the matches; avoids N get_thread calls
         but can be large, so keep top_k modest.
 
+    `max_matches` caps how many matching messages come back per thread
+    (top-scoring first; default 3, 0 = unlimited). When the cap bites,
+    the thread carries `matches_truncated` with the dropped count —
+    re-query with a higher cap if you need the rest.
+
     Returns {"results": [{thread_id, cite_ref, subject, participants,
     score, matches: [...]}]}. Each match always carries the top-hit
     message id + snippet; "summary"/"full" add `summary`/`body`.
     """
-    params: dict[str, Any] = {"q": query, "k": top_k, "match_detail": detail}
+    params: dict[str, Any] = {
+        "q": query,
+        "k": top_k,
+        "match_detail": detail,
+        "max_matches": max_matches,
+        # Facets exist for the web UI's filter chips; agents never read
+        # them, so the agent path always opts out.
+        "include_facets": "false",
+    }
     if date_from:
         params["date_from"] = date_from
     if date_to:
@@ -361,10 +379,12 @@ async def _gather_batch(make_coro, items: list) -> list:
 async def search_emails_batch(searches: list[dict], *, user_id: str | None = None) -> dict:
     """Run many semantic searches concurrently. Each item is a dict
     matching `search_emails`'s signature: `{query, date_from?,
-    date_to?, top_k?, detail?}`. `detail` is "snippet" (default,
-    compact), "summary", or "full" (whole email body per match) — pick
-    the cheapest level that answers the question. Use this whenever you
-    have ≥1 search to issue — even one search goes through the batch tool.
+    date_to?, top_k?, detail?, max_matches?}`. `detail` is "refs" (one
+    line per thread), "snippet" (default, compact), "summary", or
+    "full" (whole email body per match) — pick the cheapest level that
+    answers the question. For fan-out inventory questions across many
+    queries, use `detail="refs"`. Use this whenever you have ≥1 search
+    to issue — even one search goes through the batch tool.
 
     Returns `{"results": [{"input": <input dict>, "result": <search_emails shape>}, ...]}`.
     Per-search errors land in that entry's `result` as `{"error": ...}`.

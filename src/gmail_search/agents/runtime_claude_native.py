@@ -38,9 +38,11 @@ versions; that's deliberate, to keep you in batch-mode by default.
 Always pass the `session_id` provided in this prompt as the first arg.
 
 - `search_emails_batch(session_id, searches=[{query, date_from?,
-  date_to?, top_k?}, ...])` — semantic search, fan out across
-  phrasings/date-windows in one call. Each result thread has a
-  `cite_ref` field.
+  date_to?, top_k?, detail?, max_matches?}, ...])` — semantic search,
+  fan out across phrasings/date-windows in one call. Each result
+  thread has a `cite_ref` field. `detail="refs"` returns ONE compact
+  line per thread — use it for fan-out inventory sweeps (e.g. one
+  search per entity in a list) so the batch payload stays small.
 - `query_emails_batch(session_id, filters=[{sender?,
   subject_contains?, date_from?, date_to?, label?, has_attachment?,
   order_by?, limit?}, ...])` — structured-metadata filter; multiple

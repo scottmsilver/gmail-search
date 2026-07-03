@@ -744,6 +744,18 @@ def create_app(
             ],
         }
 
+    def _format_thread_ref(r):
+        """One-line-per-thread shape for match_detail=refs — the cheapest
+        level, sized for agents fanning a batch of searches out across many
+        queries. `from` is the top-scoring match's sender."""
+        return {
+            "thread_id": r.thread_id,
+            "subject": r.subject,
+            "date_last": r.date_last,
+            "from": r.matches[0].from_addr if r.matches else "",
+            "score": r.score,
+        }
+
     def _collect_result_message_ids(results):
         ids = set()
         for r in results:
@@ -1055,17 +1067,25 @@ def create_app(
         filter: bool = Query(True, alias="filter"),
         date_from: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
         date_to: str | None = Query(None, description="ISO date YYYY-MM-DD (inclusive)", max_length=32),
-        match_detail: str = Query("snippet", pattern="^(snippet|summary|full)$"),
+        match_detail: str = Query("snippet", pattern="^(refs|snippet|summary|full)$"),
+        max_matches: int = Query(0, ge=0, le=100),
+        include_facets: bool = Query(True),
         user_id: str = Depends(require_user_id),
     ):
         # How much content to return per match. The default is COMPACT for
         # agents — just the snippet — because the per-message extras are what
         # blew the payload (a top_k=5 search ran ~93KB with summaries attached).
         # The caller chooses how much it needs per match:
+        #   - "refs":    one line per thread (thread_id, subject, date_last,
+        #                from, score) — no matches array at all. The level
+        #                for fan-out inventory questions across many queries.
         #   - "snippet" (default): snippet only — cheap, good for inventories.
         #   - "summary": + the pre-computed LLM summary (the web UI default).
         #   - "full":    + the whole email body, so an agent can read matches
         #                without N follow-up get_thread calls.
+        # max_matches caps the per-thread matches array at the N top-scoring
+        # (0 = unlimited, the web-UI contract); dropped rows are counted in
+        # matches_truncated. include_facets=false omits the facets block.
         from gmail_search.summarize import get_summaries_bulk_meta
 
         try:
@@ -1090,32 +1110,47 @@ def create_app(
             date_to=date_to,
         )
 
+        if match_detail == "refs":
+            response = {"results": [_format_thread_ref(r) for r in results]}
+            if include_facets:
+                all_msg_ids = _collect_result_message_ids(results)
+                msg_topics = _lookup_message_topics(all_msg_ids)
+                response["facets"] = _compute_topic_facets(results, msg_topics)
+            return response
+
         # Look up topic IDs for all result messages (for client-side filtering)
         all_msg_ids = _collect_result_message_ids(results)
         msg_topics = _lookup_message_topics(all_msg_ids)
 
-        # Per-match content, fetched in bulk only at the requested detail level.
+        # Per-match content, fetched in bulk only at the requested detail
+        # level, and only for matches that survive the max_matches cap.
         # summary: pre-computed per-message summaries (freshest row regardless of
         # model/prompt version, with key + created_at for the UI debug panel).
         # full: whole email bodies so an agent can read matches in one round-trip.
         summary_meta: dict = {}
         bodies: dict = {}
         if match_detail in ("summary", "full"):
+            kept_msg_ids = all_msg_ids
+            if max_matches:
+                kept_msg_ids = {m.message_id for r in results for m in r.matches[:max_matches]}
             conn_s = get_connection(db_path)
             try:
                 if match_detail == "summary":
-                    summary_meta = get_summaries_bulk_meta(conn_s, all_msg_ids)
+                    summary_meta = get_summaries_bulk_meta(conn_s, kept_msg_ids)
                 else:
-                    bodies = get_message_bodies_bulk(conn_s, all_msg_ids, user_id=user_id)
+                    bodies = get_message_bodies_bulk(conn_s, kept_msg_ids, user_id=user_id)
             finally:
                 conn_s.close()
-
-        facets = _compute_topic_facets(results, msg_topics)
 
         # Tag each result with its topic IDs + attach per-match content.
         formatted = []
         for r in results:
             fr = _format_thread_result(r)
+            if max_matches and len(fr["matches"]) > max_matches:
+                # matches arrive score-desc from the engine, so a head slice
+                # keeps the strongest ones.
+                fr["matches_truncated"] = len(fr["matches"]) - max_matches
+                fr["matches"] = fr["matches"][:max_matches]
             topics = set()
             for m in r.matches:
                 topics.update(msg_topics.get(m.message_id, []))
@@ -1130,10 +1165,10 @@ def create_app(
                     match["body"] = bodies.get(match["message_id"], "")
             formatted.append(fr)
 
-        return {
-            "results": formatted,
-            "facets": facets,
-        }
+        response = {"results": formatted}
+        if include_facets:
+            response["facets"] = _compute_topic_facets(results, msg_topics)
+        return response
 
     @app.get("/api/find_facts")
     def api_find_facts(

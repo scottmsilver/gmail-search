@@ -246,6 +246,44 @@ async def test_search_emails_detail_param(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_emails_forwards_refs_detail(monkeypatch):
+    """detail='refs' passes straight through as match_detail — the
+    one-line-per-thread level for fan-out inventory questions."""
+    from gmail_search.agents.tools import search_emails
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("pledges", detail="refs")
+    assert captured["params"]["match_detail"] == "refs"
+
+
+@pytest.mark.asyncio
+async def test_search_emails_compact_defaults(monkeypatch):
+    """The agent path always opts out of facets (agents never read
+    them) and caps matches per thread at 3 by default — the uncapped
+    matches array is what bloats snippet-level payloads."""
+    from gmail_search.agents.tools import search_emails
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("pledges")
+    assert captured["params"]["include_facets"] == "false"
+    assert captured["params"]["max_matches"] == 3
+
+
+@pytest.mark.asyncio
+async def test_search_emails_max_matches_override(monkeypatch):
+    """Callers can raise the per-thread match cap (or lift it with 0)."""
+    from gmail_search.agents.tools import search_emails
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("pledges", max_matches=25)
+    assert captured["params"]["max_matches"] == 25
+
+    captured = _capture_get_request(monkeypatch, {"results": []})
+    await search_emails("pledges", max_matches=0)
+    assert captured["params"]["max_matches"] == 0
+
+
+@pytest.mark.asyncio
 async def test_find_facts_exhaustive_false_lowercased(monkeypatch):
     """exhaustive=False must serialize as the literal 'false' string."""
     from gmail_search.agents.tools import find_facts
