@@ -181,6 +181,9 @@ _INTERNAL_TABLES = {
     # status is an auth concern, not a corpus concern.
     "users",
     "invited_emails",
+    # MCP OAuth provider state (hashed token/code rows + client regs).
+    # Auth infrastructure — the LLM must never query it.
+    "mcp_oauth_state",
 }
 
 _SCHEMA_TABLE_RE = re.compile(

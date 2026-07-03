@@ -168,36 +168,49 @@ def _verify_broker_handoff_strict(handoff: str) -> Optional[dict[str, Any]]:
 
 
 class GatedBrokerOAuthProvider:
-    """In-memory OAuth 2.1 AS that gates `/authorize` behind the broker's
-    Google login and a single-owner email allowlist. Duck-types the SDK
-    `OAuthAuthorizationServerProvider` protocol."""
+    """OAuth 2.1 AS that gates `/authorize` behind the broker's Google
+    login and a single-owner email allowlist. Duck-types the SDK
+    `OAuthAuthorizationServerProvider` protocol.
 
-    def __init__(self, *, broker_start_url: str, callback_url: str, owner: str):
+    State lives in a pluggable store: `PgOAuthStore` in production so
+    clients/codes/tokens survive service restarts (no forced re-auth),
+    `MemoryOAuthStore` (the default) preserving the v1 in-process
+    behavior for tests and DB-less deployments."""
+
+    def __init__(self, *, broker_start_url: str, callback_url: str, owner: str, store=None):
+        from gmail_search.agents.mcp_oauth_store import MemoryOAuthStore
+
         self.broker_start_url = broker_start_url.rstrip("/")
         self.callback_url = callback_url
         self.owner = owner.strip().lower()
+        self._store = store if store is not None else MemoryOAuthStore()
 
-        self.clients: dict[str, OAuthClientInformationFull] = {}
-        self.auth_codes: dict[str, AuthorizationCode] = {}
-        self.access_tokens: dict[str, AccessToken] = {}
-        self.refresh_tokens: dict[str, RefreshToken] = {}
-        self._access_to_refresh: dict[str, str] = {}
-        self._refresh_to_access: dict[str, str] = {}
-        # Preserve the RFC 8707 resource audience across refresh rotation so a
-        # refreshed access token stays bound to the same resource. The SDK
-        # RefreshToken model has no resource field, so we keep a side map.
-        self._refresh_resource: dict[str, Optional[str]] = {}
-        # Single-use guard for consumed broker states (replay defense beyond
-        # the state's own exp).
-        self._consumed_states: set[str] = set()
+    # Back-compat views for the memory store's dicts (tests inspect
+    # these). PG-backed providers have no dict views — nothing should
+    # reach into provider state in production.
+    @property
+    def clients(self):
+        return self._store.clients
+
+    @property
+    def auth_codes(self):
+        return self._store.auth_codes
+
+    @property
+    def access_tokens(self):
+        return self._store.access_tokens
+
+    @property
+    def refresh_tokens(self):
+        return self._store.refresh_tokens
 
     # ── DCR (RFC 7591) ─────────────────────────────────────────────
 
     async def get_client(self, client_id: str) -> Optional[OAuthClientInformationFull]:
-        return self.clients.get(client_id)
+        return self._store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        self.clients[client_info.client_id] = client_info
+        self._store.put_client(client_info)
 
     # ── /authorize — the gate ──────────────────────────────────────
 
@@ -233,11 +246,11 @@ class GatedBrokerOAuthProvider:
         if not claims:
             return None
         # Single-use: a state (and the handoff bound to it) can mint exactly one
-        # code. nonce identifies the state instance.
+        # code. nonce identifies the state instance; consume_nonce is atomic so
+        # the guard holds across concurrent callbacks AND service restarts.
         nonce = str(claims.get("nonce") or "")
-        if not nonce or nonce in self._consumed_states:
+        if not nonce or not self._store.consume_nonce(nonce, _STATE_TTL_SECONDS):
             return None
-        self._consumed_states.add(nonce)
 
         # Defense-in-depth: the email is the verified handoff email, never a
         # request param. Re-check the gate here too.
@@ -245,15 +258,17 @@ class GatedBrokerOAuthProvider:
             return None
 
         code_value = f"ac_{secrets.token_hex(16)}"
-        self.auth_codes[code_value] = AuthorizationCode(
-            code=code_value,
-            client_id=str(claims["client_id"]),
-            redirect_uri=claims["redirect_uri"],
-            redirect_uri_provided_explicitly=bool(claims["redirect_uri_provided_explicitly"]),
-            scopes=list(claims.get("scopes") or []),
-            expires_at=time.time() + _AUTH_CODE_TTL_SECONDS,
-            code_challenge=str(claims["code_challenge"]),
-            resource=claims.get("resource"),
+        self._store.put_auth_code(
+            AuthorizationCode(
+                code=code_value,
+                client_id=str(claims["client_id"]),
+                redirect_uri=claims["redirect_uri"],
+                redirect_uri_provided_explicitly=bool(claims["redirect_uri_provided_explicitly"]),
+                scopes=list(claims.get("scopes") or []),
+                expires_at=time.time() + _AUTH_CODE_TTL_SECONDS,
+                code_challenge=str(claims["code_challenge"]),
+                resource=claims.get("resource"),
+            )
         )
         return construct_redirect_uri(
             str(claims["redirect_uri"]),
@@ -266,23 +281,23 @@ class GatedBrokerOAuthProvider:
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> Optional[AuthorizationCode]:
-        code = self.auth_codes.get(authorization_code)
+        code = self._store.get_auth_code(authorization_code)
         if not code:
             return None
         if code.client_id != client.client_id:
             return None
         if code.expires_at < time.time():
-            del self.auth_codes[authorization_code]
+            self._store.delete_auth_code(authorization_code)
             return None
         return code
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
-        # Single-use: consume the code so a replayed /token fails invalid_grant.
-        if authorization_code.code not in self.auth_codes:
+        # Single-use: consume_auth_code is an atomic delete, so a replayed
+        # /token (or a concurrent duplicate) fails invalid_grant.
+        if not self._store.consume_auth_code(authorization_code.code):
             raise TokenError("invalid_grant", "authorization code not found or already used")
-        del self.auth_codes[authorization_code.code]
         return self._issue_token_pair(client.client_id, authorization_code.scopes, authorization_code.resource)
 
     # ── /token — refresh_token grant (rotation, OAuth 2.1 MUST) ─────
@@ -290,13 +305,13 @@ class GatedBrokerOAuthProvider:
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> Optional[RefreshToken]:
-        tok = self.refresh_tokens.get(refresh_token)
+        tok = self._store.get_refresh_token(refresh_token)
         if not tok:
             return None
         if tok.client_id != client.client_id:
             return None
         if tok.expires_at is not None and tok.expires_at < time.time():
-            self._revoke(refresh_token_str=tok.token)
+            self._store.revoke_refresh(tok.token)
             return None
         return tok
 
@@ -308,20 +323,25 @@ class GatedBrokerOAuthProvider:
     ) -> OAuthToken:
         if not set(scopes).issubset(set(refresh_token.scopes)):
             raise TokenError("invalid_scope", "requested scopes exceed those granted")
-        # Preserve the original resource audience BEFORE revoking the old token
-        # (revocation drops the side-map entry).
-        resource = self._refresh_resource.get(refresh_token.token)
-        # Rotate: invalidate old pair before issuing the new one.
-        self._revoke(refresh_token_str=refresh_token.token)
+        # Rotate atomically: consume_refresh claims the row exactly once
+        # (returning the preserved RFC 8707 resource audience), so two
+        # concurrent refreshes of the same token can't both mint pairs.
+        consumed, resource = self._store.consume_refresh(refresh_token.token)
+        if not consumed:
+            raise TokenError("invalid_grant", "refresh token not found or already rotated")
         return self._issue_token_pair(client.client_id, scopes or refresh_token.scopes, resource)
 
     # ── token verification (TokenVerifier path for /mcp) ────────────
 
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
-        tok = self.access_tokens.get(token)
+        tok = self._store.get_access_token(token)
         if tok is not None:
             if tok.expires_at is not None and tok.expires_at < time.time():
-                self._revoke(access_token_str=tok.token)
+                # Expiry is routine — drop ONLY the access token. The
+                # paired refresh token must survive so the client rotates
+                # instead of re-authing. (v1 cascaded the whole pair here,
+                # which itself forced spurious re-auths.)
+                self._store.discard_access(tok.token)
                 return None
             return tok
         # Fallback: accept the existing transport/service JWTs as valid
@@ -357,31 +377,29 @@ class GatedBrokerOAuthProvider:
 
     async def revoke_token(self, token: Any) -> None:
         if isinstance(token, AccessToken):
-            self._revoke(access_token_str=token.token)
+            self._store.revoke_access(token.token)
         elif isinstance(token, RefreshToken):
-            self._revoke(refresh_token_str=token.token)
+            self._store.revoke_refresh(token.token)
 
     # ── internals ──────────────────────────────────────────────────
 
     def _issue_token_pair(self, client_id: str, scopes: list[str], resource: Optional[str]) -> OAuthToken:
         access_value = f"at_{secrets.token_hex(32)}"
         refresh_value = f"rt_{secrets.token_hex(32)}"
-        self.access_tokens[access_value] = AccessToken(
+        access = AccessToken(
             token=access_value,
             client_id=client_id,
             scopes=list(scopes),
             expires_at=int(time.time() + _ACCESS_TOKEN_TTL_SECONDS),
             resource=resource,
         )
-        self.refresh_tokens[refresh_value] = RefreshToken(
+        refresh = RefreshToken(
             token=refresh_value,
             client_id=client_id,
             scopes=list(scopes),
             expires_at=None,
         )
-        self._access_to_refresh[access_value] = refresh_value
-        self._refresh_to_access[refresh_value] = access_value
-        self._refresh_resource[refresh_value] = resource
+        self._store.put_token_pair(access, refresh, resource)
         return OAuthToken(
             access_token=access_value,
             token_type="Bearer",
@@ -389,22 +407,6 @@ class GatedBrokerOAuthProvider:
             refresh_token=refresh_value,
             scope=" ".join(scopes),
         )
-
-    def _revoke(self, *, access_token_str: Optional[str] = None, refresh_token_str: Optional[str] = None) -> None:
-        if access_token_str:
-            self.access_tokens.pop(access_token_str, None)
-            paired = self._access_to_refresh.pop(access_token_str, None)
-            if paired:
-                self.refresh_tokens.pop(paired, None)
-                self._refresh_to_access.pop(paired, None)
-                self._refresh_resource.pop(paired, None)
-        if refresh_token_str:
-            self.refresh_tokens.pop(refresh_token_str, None)
-            self._refresh_resource.pop(refresh_token_str, None)
-            paired = self._refresh_to_access.pop(refresh_token_str, None)
-            if paired:
-                self.access_tokens.pop(paired, None)
-                self._access_to_refresh.pop(paired, None)
 
 
 def is_oauth_enabled() -> bool:
@@ -417,12 +419,16 @@ def build_auth_settings():
     Returns (AuthSettings, GatedBrokerOAuthProvider)."""
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 
+    from gmail_search.agents.mcp_oauth_store import build_default_store
     from gmail_search.auth.session import broker_url
 
     provider = GatedBrokerOAuthProvider(
         broker_start_url=broker_url() + "/start",
         callback_url=callback_url(),
         owner=owner_email(),
+        # PG-backed when the DB is reachable, so clients/tokens survive
+        # service restarts; memory fallback logs a loud warning.
+        store=build_default_store(),
     )
     settings = AuthSettings(
         issuer_url=issuer_url(),

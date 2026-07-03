@@ -311,6 +311,27 @@ CREATE INDEX IF NOT EXISTS idx_agent_artifacts_session
     ON agent_artifacts (session_id, created_at DESC);
 
 -- ─────────────────────────────────────────────────────────────────────
+-- MCP OAuth provider state (clients, auth codes, token pairs, nonces).
+--
+-- Durable so an mcp-service restart doesn't invalidate claude.ai's
+-- tokens (which forced a re-auth every restart). Token/code rows are
+-- keyed by SHA-256 of the secret and the JSON value has the secret
+-- field blanked — a DB dump holds no replayable bearer material.
+-- `PgOAuthStore` also creates this table at construction (the MCP
+-- service can restart before serve applies schema updates); the DDL
+-- here keeps the schema file the single source of truth.
+CREATE TABLE IF NOT EXISTS mcp_oauth_state (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value JSONB NOT NULL,
+    expires_at DOUBLE PRECISION,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (kind, key)
+);
+CREATE INDEX IF NOT EXISTS mcp_oauth_state_expires_idx
+    ON mcp_oauth_state (expires_at) WHERE expires_at IS NOT NULL;
+
+-- ─────────────────────────────────────────────────────────────────────
 -- Per-conversation Claude session UUID mapping.
 --
 -- Each chat conversation pins exactly one Claude Code session UUID so
