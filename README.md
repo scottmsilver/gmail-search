@@ -122,7 +122,7 @@ Beyond the web app, Gmail Search exposes its retrieval engine as a [Model Contex
 
 | Tool | What it does |
 |------|--------------|
-| `search_emails_batch` | Relevance search (semantic + BM25 blend). `detail` = `snippet` (default, compact) / `summary` / `full` (whole email per match). Batches many searches in one call. |
+| `search_emails_batch` | Relevance search (semantic + BM25 blend). `detail` = `refs` (one line per thread — for fan-out inventory sweeps) / `snippet` (default, compact) / `summary` / `full` (whole email per match); `max_matches` caps matches returned per thread (default 3, truncation reported). Batches many searches in one call. |
 | `query_emails_batch` | Structured-metadata filters (`from`, `subject`, date range, label, `has_attachment`) — no ranking. |
 | `find_facts` | Enumerate **every** instance of an entity/attribute across the whole mailbox in one call (e.g. "all my account numbers", "every flight I've booked") from pre-mined atomic facts. |
 | `get_thread_batch` | Full message bodies + attachment manifest for many threads at once. |
@@ -143,10 +143,13 @@ python -m gmail_search.agents.mcp_tools_server
 
 It connects to the same Postgres corpus as the web app — run the ingest pipeline first (steps above) so there's something to query.
 
+The transport runs **stateless** (a fresh MCP transport per request). This is deliberate: claude.ai's connector client reuses JSON-RPC id `1` for every request and pools one session across a user's chats, which cross-wires responses on a stateful streamable-HTTP server ([python-sdk#3060](https://github.com/modelcontextprotocol/python-sdk/issues/3060)). Stateless mode is immune by construction; `GMAIL_MCP_STATELESS=0` restores stateful mode if a client ever needs session semantics (re-add a duplicate-id guard first).
+
 ### Auth & exposure
 
 - **Local / trusted client** — a bearer token (`GMAIL_MCP_ADMIN_TOKEN`) gates the endpoint. The server refuses to start on a public bind with an auto-generated token unless you set `GMAIL_MCP_ALLOW_INSECURE=1`.
 - **Remote (claude.ai / Claude Desktop)** — turn on OAuth 2.1 with `GMAIL_MCP_OAUTH_ENABLED=1` and `GMAIL_MCP_PUBLIC_URL=https://<your-host>`. `/authorize` is gated behind a broker-mediated Google login and an **owner-email allow-list** (`GMAIL_MCP_OAUTH_OWNER_EMAIL`), so only you can complete the flow. The MCP endpoint is the *only* surface meant to be public; the web app and FastAPI server stay localhost-only. The reference deployment fronts it with a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) tunnel.
+- **Token persistence** — set `GMAIL_MCP_OAUTH_PERSIST=1` to store OAuth clients/codes/tokens in Postgres (`mcp_oauth_state`) instead of process memory, so restarting the server doesn't invalidate claude.ai's tokens and force a re-auth. Token and code rows are keyed by SHA-256 with the secret blanked — the DB never holds replayable bearer material. Fail-closed: with the flag on, an unreachable DB stops startup rather than silently degrading to memory.
 
 ### Point a client at it
 
