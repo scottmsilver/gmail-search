@@ -7,7 +7,6 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-
 from gmail_search.auth import require_user_id
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
@@ -60,6 +59,28 @@ if SQL_MAX_PLAN_COST != SQL_MAX_PLAN_COST or SQL_MAX_PLAN_COST < 0:  # NaN / neg
 # (queries are sub-second), short enough that we don't keep a full ~3-4 GB
 # index copy resident between swaps (which land ~15 min apart). Tunable.
 RETIRED_SEARCHER_GRACE_SECONDS = 5.0
+
+
+def _malloc_trim() -> None:
+    """Return free heap memory to the OS after we drop a big allocation.
+
+    glibc keeps free()'d memory in per-thread arenas rather than handing it
+    back to the kernel, so RSS ratchets up every time we retire a ~3-4 GB
+    ScaNN searcher and never comes back down — the searcher-close leak that
+    drove serve into the OOM killer. malloc_trim(0) walks the arenas and
+    releases their free top back to the OS, collapsing that ratchet. Cheap C
+    call; safe no-op on non-glibc platforms (musl/macOS have no malloc_trim).
+    """
+    try:
+        import ctypes
+
+        # CDLL(None) resolves malloc_trim from the already-loaded libc via the
+        # process's global symbol table — no named dynamic load surface, and a
+        # clean AttributeError on non-glibc (musl/macOS have no malloc_trim).
+        ctypes.CDLL(None).malloc_trim(0)
+    except Exception:  # noqa: BLE001 — best-effort; must never fail the close path
+        pass
+
 
 # Conversation IDs are interpolated into filesystem paths
 # (`deep-conv-<id>`) and used as PKs in `conversation_claude_session`.
@@ -918,11 +939,16 @@ def create_app(
             try:
                 await _asyncio.sleep(RETIRED_SEARCHER_GRACE_SECONDS)
                 await _asyncio.to_thread(old_searcher.close)
+                # close() only hands the ~3-4 GB back to glibc's arenas; trim
+                # returns it to the OS so RSS actually drops (off-thread so the
+                # arena walk can't stall the event loop).
+                await _asyncio.to_thread(_malloc_trim)
             except _asyncio.CancelledError:
                 # Server shutting down — close inline so we don't leak the C++
                 # index, then re-raise to honor the cancellation.
                 try:
                     old_searcher.close()
+                    _malloc_trim()
                 except Exception:
                     pass
                 raise
@@ -2633,7 +2659,6 @@ def create_app(
         pid file already points at a live process.
         """
         from fastapi.responses import JSONResponse
-
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
         pid_path = data_dir / pid_filename
@@ -2680,7 +2705,6 @@ def create_app(
         409 if a daemon is already running for THIS user.
         """
         from fastapi.responses import JSONResponse
-
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
         email = _user_email(user_id)
