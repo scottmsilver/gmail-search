@@ -80,12 +80,16 @@ class ScannSearcher:
 
         # Manual-rerank state. When the manifest carries the
         # `manual_rerank` block (variant C — see docs/notes/SCANN_COMPACTION_2026-04-27.md),
-        # we mmap the index-level corpus_full.memmap and rerank ScaNN's
-        # truncated-AH candidates against full-precision vectors at
-        # query time. Cost: ~70 ms per query in numpy; payoff: matches
-        # baseline NDCG with a 50% smaller AH index.
+        # we mmap the full-precision corpus and rerank ScaNN's
+        # truncated-AH candidates against it at query time.
+        # Two corpus layouts (see _maybe_attach_manual_rerank): legacy
+        # single index-level `corpus_full.memmap`, or per-shard
+        # `shard_N/corpus_full.f32` files (delta-compatible). Row order
+        # in both is ids.json order; `_gather_full` hides the difference.
         self._manual_rerank: dict | None = None
         self._corpus_full: np.memmap | None = None
+        self._corpus_files: list[np.memmap] | None = None
+        self._corpus_offsets: np.ndarray | None = None  # per-file start rows
         self._id_to_pos: dict[int, int] = {}
         # `index_dim` (when present in the manifest) tells us the
         # actual dimensionality the underlying ScaNN index was built
@@ -116,46 +120,81 @@ class ScannSearcher:
         a retired index without stalling the event loop. Idempotent."""
         self._shards = []
         self._corpus_full = None
+        self._corpus_files = None
+        self._corpus_offsets = None
         self._manual_rerank = None
 
     def _maybe_attach_manual_rerank(self, manifest: dict) -> None:
         """If the manifest has a `manual_rerank` block, mmap the
-        corpus_full.memmap so .search() can rerank candidates at full
-        precision. Best-effort: a missing or unreadable file logs a
-        warning and we fall back to plain ScaNN search."""
+        full-precision corpus so .search() can rerank candidates.
+        Two layouts: `corpus_per_shard` (shard_N/corpus_full.f32,
+        written by delta-compatible builds) or the legacy single
+        `corpus_full.memmap`. Best-effort: a missing or unreadable
+        file logs a warning and we fall back to plain ScaNN search."""
         cfg = manifest.get("manual_rerank")
         if not cfg:
             return
-        full_path = self.index_dir / cfg.get("corpus_full_path", "corpus_full.memmap")
         full_dim = cfg.get("full_dim")
-        if not full_path.is_file() or not full_dim:
-            logger.warning(
-                "manual_rerank manifest present but corpus_full not usable at %s — "
-                "falling back to plain ScaNN search",
-                full_path,
-            )
+        if not full_dim:
+            logger.warning("manual_rerank manifest block lacks full_dim — falling back to plain ScaNN search")
             return
         try:
-            n_rows = len(self.embedding_ids)
-            self._corpus_full = np.memmap(full_path, dtype=np.float32, mode="r", shape=(n_rows, full_dim))
-            # Position-in-ids-list IS the row index in the memmap (the
-            # builder appends shards in id-order).
+            if cfg.get("corpus_per_shard"):
+                files: list[np.memmap] = []
+                offsets: list[int] = [0]
+                for s in manifest.get("shards", []):
+                    p = self.index_dir / s["dir"] / "corpus_full.f32"
+                    count = int(s["count"])
+                    if not p.is_file() or p.stat().st_size != count * full_dim * 4:
+                        raise FileNotFoundError(f"corpus shard file missing/mis-sized: {p}")
+                    files.append(np.memmap(p, dtype=np.float32, mode="r", shape=(count, full_dim)))
+                    offsets.append(offsets[-1] + count)
+                if offsets[-1] != len(self.embedding_ids):
+                    raise ValueError(f"corpus rows {offsets[-1]} != {len(self.embedding_ids)} indexed ids")
+                self._corpus_files = files
+                self._corpus_offsets = np.asarray(offsets[:-1], dtype=np.int64)
+            else:
+                full_path = self.index_dir / cfg.get("corpus_full_path", "corpus_full.memmap")
+                n_rows = len(self.embedding_ids)
+                if not full_path.is_file() or full_path.stat().st_size != n_rows * full_dim * 4:
+                    raise FileNotFoundError(f"corpus_full missing/mis-sized: {full_path}")
+                self._corpus_full = np.memmap(full_path, dtype=np.float32, mode="r", shape=(n_rows, full_dim))
+            # Position-in-ids-list IS the global row index (the builder
+            # writes shards — and their corpus files — in id-order).
             self._id_to_pos = {eid: i for i, eid in enumerate(self.embedding_ids)}
             self._manual_rerank = cfg
             logger.info(
-                "manual_rerank enabled: ah_dim=%s reorder_pool=%s full_dim=%s",
+                "manual_rerank enabled: ah_dim=%s reorder_pool=%s full_dim=%s layout=%s",
                 cfg.get("ah_dim"),
                 cfg.get("reorder_pool"),
                 full_dim,
+                "per-shard" if self._corpus_files is not None else "single-file",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "manual_rerank manifest present but corpus_full mmap failed (%s) — "
-                "falling back to plain ScaNN search",
+                "manual_rerank manifest present but corpus unusable (%s) — falling back to plain ScaNN search",
                 exc,
             )
             self._corpus_full = None
+            self._corpus_files = None
+            self._corpus_offsets = None
             self._manual_rerank = None
+
+    def _corpus_ready(self) -> bool:
+        return self._corpus_full is not None or self._corpus_files is not None
+
+    def _gather_full(self, positions: list[int]) -> np.ndarray:
+        """Rows of the full-precision corpus at the given global positions
+        (ids.json order), whichever layout is attached."""
+        if self._corpus_full is not None:
+            return self._corpus_full[positions]
+        pos = np.asarray(positions, dtype=np.int64)
+        out = np.empty((len(pos), self._corpus_files[0].shape[1]), dtype=np.float32)
+        file_idx = np.searchsorted(self._corpus_offsets, pos, side="right") - 1
+        for fi in np.unique(file_idx):
+            mask = file_idx == fi
+            out[mask] = self._corpus_files[fi][pos[mask] - self._corpus_offsets[fi]]
+        return out
 
     def _load_sharded(self, manifest: dict, prev: "ScannSearcher | None" = None) -> None:
         # Tolerate missing/partial shards: the sharded builder writes
@@ -256,7 +295,7 @@ class ScannSearcher:
         index_query = self._truncate_query_if_needed(query_vector)
         use_rerank = (
             self._manual_rerank is not None
-            and self._corpus_full is not None
+            and self._corpus_ready()
             and (manual_rerank is None or manual_rerank is True)
         )
         if use_rerank:
@@ -335,22 +374,40 @@ class ScannSearcher:
 
         q_t = query_vector_truncated
 
-        # AH-stage candidate gather. Same multi-shard merge as the
-        # plain path; we just ask each shard for `rerank_pool` so the
-        # merged set has enough headroom for the rerank.
+        # AH-stage candidate gather. Asking every shard for the FULL pool
+        # is wasteful at high pool sizes (31 shards × 4000 = 124k tuples
+        # to merge for a 4000-candidate rerank). The global top-pool is
+        # spread across shards, so each shard only needs its expected
+        # share (pool/num_shards) times a generous headroom factor —
+        # a shard would have to hold >4× its proportional share of the
+        # pool before this clips anything.
         cand_ids: list[int] = []
         if len(self._shards) == 1:
             searcher, ids = self._shards[0]
             neighbors, _ = searcher.search(q_t, final_num_neighbors=rerank_pool)
             cand_ids = [ids[i] for i in neighbors]
         else:
-            merged: list[tuple[float, int]] = []
-            for searcher, ids in self._shards:
-                neighbors, distances = searcher.search(q_t, final_num_neighbors=rerank_pool)
-                for idx, score in zip(neighbors, distances):
-                    merged.append((float(score), ids[idx]))
-            top_merged = heapq.nlargest(rerank_pool, merged, key=lambda x: x[0])
-            cand_ids = [eid for _, eid in top_merged]
+            per_shard = max(top_k, -(-rerank_pool // len(self._shards)) * 4)
+            per_shard = min(per_shard, rerank_pool)
+            # Per-shard id arrays, built once per loaded searcher (the
+            # lists in _shards are 40k+ entries; converting per query
+            # would dominate the merge).
+            if getattr(self, "_shard_ids_np", None) is None or len(self._shard_ids_np) != len(self._shards):
+                self._shard_ids_np = [np.asarray(ids, dtype=np.int64) for _, ids in self._shards]
+            id_chunks: list[np.ndarray] = []
+            score_chunks: list[np.ndarray] = []
+            for (searcher, _ids), ids_arr in zip(self._shards, self._shard_ids_np):
+                neighbors, distances = searcher.search(q_t, final_num_neighbors=per_shard)
+                if len(neighbors) == 0:
+                    continue
+                id_chunks.append(ids_arr[np.asarray(neighbors, dtype=np.int64)])
+                score_chunks.append(np.asarray(distances, dtype=np.float32))
+            if id_chunks:
+                all_ids = np.concatenate(id_chunks)
+                all_scores = np.concatenate(score_chunks)
+                kk = min(rerank_pool, all_scores.shape[0])
+                sel = np.argpartition(all_scores, -kk)[-kk:]
+                cand_ids = [int(i) for i in all_ids[sel]]
 
         if not cand_ids:
             return [], []
@@ -365,7 +422,7 @@ class ScannSearcher:
             return [], []
         kept_cand_ids = [c for c, _ in kept]
         positions = [p for _, p in kept]
-        cand_vecs = self._corpus_full[positions]  # (P, full_dim)
+        cand_vecs = self._gather_full(positions)  # (P, full_dim)
         cand_norms = np.linalg.norm(cand_vecs, axis=1, keepdims=True)
         cand_norms[cand_norms == 0] = 1.0
         cand_vecs_n = cand_vecs / cand_norms

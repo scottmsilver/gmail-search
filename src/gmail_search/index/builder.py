@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import scann
-
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,13 @@ _SCANN_PEAK_MULT = 4
 # harmless in search (filtered by the message JOIN); a full rebuild is costly
 # (reloads the whole index), so we only pay it once staleness is material.
 _DELTA_COMPACTION_STALE_FRACTION = 0.02  # 2% of the index
+
+# Manual-rerank corpus layout: each shard keeps its full-precision vectors in
+# `shard_N/corpus_full.f32` (rows in the shard's ids.json order). Per-shard
+# files — rather than one index-level corpus_full.memmap — let delta builds
+# hardlink a sealed shard's corpus along with its ScaNN artifacts, so the
+# funnel index stays compatible with the cheap 15-min delta reindex path.
+CORPUS_SHARD_FILENAME = "corpus_full.f32"
 
 
 def _load_embeddings_matrix(conn, model: str, dimensions: int) -> tuple[list[int], np.ndarray]:
@@ -236,7 +242,7 @@ def _build_one_shard(
     *,
     ah_dim: int | None = None,
     reorder_pool: int = 100,
-    full_corpus_appender: "_FullCorpusAppender | None" = None,
+    write_full_corpus: bool = False,
 ) -> list[int]:
     """Materialize one shard of at-most-shard_size rows into a memmap
     and build a ScaNN index at shard_dir. Returns the shard's id list.
@@ -244,12 +250,11 @@ def _build_one_shard(
     `ah_dim` / `reorder_pool` flow through to `_build_scann_from_vectors`
     for the manual-rerank build mode (truncate input + larger reorder pool).
 
-    `full_corpus_appender`, when supplied, also appends THIS shard's
-    full-precision vectors to the index-level `corpus_full.memmap`
-    that the manual-rerank searcher mmaps at query time. Append happens
-    BEFORE the truncation in `_build_scann_from_vectors`, so the file
-    always holds the original `dimensions`-dim vectors regardless of
-    what ScaNN's index was built with.
+    `write_full_corpus`: keep this shard's full-precision vectors as
+    `shard_dir/corpus_full.f32` for the manual-rerank searcher. The temp
+    memmap we build from already holds exactly those vectors (truncation
+    happens later, inside `_build_scann_from_vectors`), so this is a rename
+    instead of a rewrite.
     """
     shard_dir.mkdir(parents=True, exist_ok=True)
     memmap_path = shard_dir / "_vectors.f32.tmp"
@@ -262,46 +267,21 @@ def _build_one_shard(
         vectors[i] = np.frombuffer(blob, dtype=np.float32)
     vectors.flush()
 
-    if full_corpus_appender is not None:
-        full_corpus_appender.append(vectors)
-
     try:
         _build_scann_from_vectors(ids, vectors, shard_dir, ah_dim=ah_dim, reorder_pool=reorder_pool)
-    finally:
+    except BaseException:
+        # Failed shard: never leave a complete-looking corpus file next to
+        # missing/partial ScaNN artifacts (and never mask the build error
+        # with a rename failure). Just drop the temp memmap and re-raise.
         del vectors
         memmap_path.unlink(missing_ok=True)
+        raise
+    del vectors
+    if write_full_corpus:
+        memmap_path.rename(shard_dir / CORPUS_SHARD_FILENAME)
+    else:
+        memmap_path.unlink(missing_ok=True)
     return ids
-
-
-class _FullCorpusAppender:
-    """Streams shard vectors into a single index-level memmap so the
-    manual-rerank searcher can do per-query rerank against the full-
-    precision corpus without re-fetching from PG. The file lives at
-    `<index_dir>/corpus_full.memmap` and is laid out [shard0_rows,
-    shard1_rows, ...] in the same order shards were built — which is
-    the same order ids appear in `ids.json`. So the position of an
-    embedding id in `ids.json` is its row index in this memmap.
-    """
-
-    def __init__(self, index_dir: Path, total_count: int, dimensions: int):
-        self.path = index_dir / "corpus_full.memmap"
-        self.dimensions = dimensions
-        self.total_count = total_count
-        # Open in w+ mode so the file is created at the right size up
-        # front. Shard appends just write into the right slice.
-        self._mm = np.memmap(self.path, dtype=np.float32, mode="w+", shape=(total_count, dimensions))
-        self._cursor = 0
-
-    def append(self, shard_vectors: np.ndarray) -> None:
-        n = shard_vectors.shape[0]
-        if self._cursor + n > self.total_count:
-            raise RuntimeError(f"corpus_full overflow: cursor={self._cursor}, append={n}, " f"total={self.total_count}")
-        self._mm[self._cursor : self._cursor + n] = shard_vectors
-        self._cursor += n
-
-    def flush(self) -> None:
-        self._mm.flush()
-        del self._mm
 
 
 def build_index_sharded(
@@ -403,19 +383,13 @@ def build_index_sharded(
         all_ids: list[int] = []
         shards_meta: list[dict] = []  # v2 manifest: per-shard id-range keys for delta reuse
         shard_idx = 0
-        # When manual_rerank is on, stream the FULL-precision vectors
-        # of every shard into one index-level memmap. The searcher
-        # mmaps it at query time to rerank ScaNN's truncated-AH
-        # candidates. The position of each id in `all_ids` IS the row
-        # index in this memmap (shards are appended in build order).
-        appender = _FullCorpusAppender(target_dir, total, dimensions) if manual_rerank else None
         # Truncation flows through to ScaNN regardless of manual_rerank;
-        # only the corpus_full appender is gated on manual_rerank.
+        # only the per-shard full-precision corpus files (which the
+        # searcher reranks against at query time) are gated on it.
         shard_kwargs: dict[str, object] = {"reorder_pool": reorder_pool}
         if effective_ah_dim is not None:
             shard_kwargs["ah_dim"] = effective_ah_dim
-        if appender is not None:
-            shard_kwargs["full_corpus_appender"] = appender
+        shard_kwargs["write_full_corpus"] = manual_rerank
 
         # Stream the corpus ONE SHARD AT A TIME via keyset pagination on
         # (model, id) — backed by idx_embeddings_model_id. This is the
@@ -460,8 +434,6 @@ def build_index_sharded(
                 peak_mib,
             )
             shard_idx += 1
-        if appender is not None:
-            appender.flush()
 
         num_shards = shard_idx
         manifest_payload: dict[str, object] = {
@@ -485,11 +457,15 @@ def build_index_sharded(
         if manual_rerank:
             # Searcher reads this block to switch on the rerank step;
             # absence == "truncate query, search ScaNN, return as-is."
+            # `corpus_per_shard` marks the delta-compatible layout
+            # (shard_N/corpus_full.f32); the searcher also accepts the
+            # old single-file `corpus_full_path` layout for indexes
+            # built before this change.
             manifest_payload["manual_rerank"] = {
                 "ah_dim": effective_ah_dim,
                 "reorder_pool": reorder_pool,
                 "full_dim": dimensions,
-                "corpus_full_path": "corpus_full.memmap",
+                "corpus_per_shard": True,
             }
         (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
@@ -564,8 +540,12 @@ def build_index_delta(
     (sealed shards) is untouched, and the searcher reloads only changed shards.
 
     Falls back to a full `build_index_sharded` when there's no reusable v2
-    live index, the build config (subspace/shard_size) changed, or manual_rerank
-    is on (its corpus_full.memmap spans all shards — out of scope for v1 delta).
+    live index or the build config (subspace/shard_size/rerank mode) changed.
+    Manual-rerank indexes ARE delta-compatible as long as the live index uses
+    the per-shard corpus layout (shard_N/corpus_full.f32): sealed shards'
+    corpus files hardlink along with their ScaNN artifacts, and only the tail
+    shard's corpus is rewritten. Pre-per-shard rerank builds (one index-level
+    corpus_full.memmap) can't be reused and trigger one full rebuild.
     """
     full_kwargs = dict(
         truncate_dim=truncate_dim,
@@ -579,7 +559,7 @@ def build_index_delta(
         return build_index_sharded(db_path, index_dir, model, dimensions, shard_size, **full_kwargs)
 
     eff_ah, manual_rerank = _delta_effective_ah_dim(dimensions, truncate_dim, manual_rerank, ah_dim)
-    if manual_rerank or not _pointer_table_exists(db_path):
+    if not _pointer_table_exists(db_path):
         return _full()
 
     from gmail_search.index.searcher import resolve_active_index_dir
@@ -593,10 +573,13 @@ def build_index_delta(
     except Exception:
         return _full()
     # Reuse is only valid when the build subspace + sharding are identical.
+    live_mr = live.get("manual_rerank")
     if (
         live.get("format_version") != 2
         or not live.get("shards")
-        or "manual_rerank" in live
+        or bool(live_mr) != manual_rerank  # rerank mode flip → rebuild
+        # Old single-file corpus layout spans all shards — not hardlinkable.
+        or (manual_rerank and not (live_mr or {}).get("corpus_per_shard"))
         or live.get("dimensions") != dimensions
         or live.get("shard_size") != shard_size
         or live.get("index_dim") != eff_ah  # None==None when no truncation
@@ -672,6 +655,20 @@ def build_index_delta(
         for i, s in enumerate(sealed):
             src = live_dir / s["dir"]
             dst = target_dir / f"shard_{i}"
+            if manual_rerank:
+                cf = src / CORPUS_SHARD_FILENAME
+                expected = int(s["count"]) * dimensions * 4
+                if not cf.is_file() or cf.stat().st_size != expected:
+                    # Torn/partial live dir: a sealed shard with a missing OR
+                    # mis-sized corpus file can't serve the rerank step —
+                    # hardlinking it forward would make the searcher disable
+                    # rerank on the whole index (silent quality downgrade).
+                    logger.warning("delta reindex: %s corpus missing/mis-sized — full rebuild", src)
+                    conn.close()
+                    import shutil  # noqa: PLC0415
+
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                    return _full()
             try:
                 _hardlink_shard(src, dst)
             except OSError as e:
@@ -691,6 +688,7 @@ def build_index_delta(
         shard_kwargs: dict[str, object] = {"reorder_pool": reorder_pool}
         if eff_ah is not None:
             shard_kwargs["ah_dim"] = eff_ah
+        shard_kwargs["write_full_corpus"] = manual_rerank
         shard_idx = len(sealed)
         last_id = resume_from - 1
         while True:
@@ -726,6 +724,13 @@ def build_index_delta(
         }
         if eff_ah is not None:
             manifest_payload["index_dim"] = eff_ah
+        if manual_rerank:
+            manifest_payload["manual_rerank"] = {
+                "ah_dim": eff_ah,
+                "reorder_pool": reorder_pool,
+                "full_dim": dimensions,
+                "corpus_per_shard": True,
+            }
         (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
         _promote_and_gc(conn, index_dir, target_dir, user_id=user_id)
