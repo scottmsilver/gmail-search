@@ -10,6 +10,7 @@ indexing:
   manual_rerank: true
   manual_rerank_ah_dim: 384
   manual_rerank_reorder_pool: 4000
+  alias_backend: llm
   delta_index: true
 attachments:
   max_file_size_mb: 10

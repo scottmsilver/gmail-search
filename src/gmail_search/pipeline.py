@@ -158,8 +158,19 @@ def reindex(
     logger.info("reindex: after spell_dictionary — peak RSS %d MiB", _peak_mib())
     rebuild_topics(db_path, user_id=uid)
     logger.info("reindex: after topics — peak RSS %d MiB", _peak_mib())
-    rebuild_term_aliases(db_path, data_dir=data_dir, user_id=uid)
-    logger.info("reindex: after term_aliases — peak RSS %d MiB", _peak_mib())
+    # Alias backend (2026-07-07 eval): "llm" asks gemma per caps-token with
+    # real email contexts (~$0.11/run, no on-disk state) and blind-judged
+    # 25-11 ahead of the cooc pipeline end-to-end; "cooc" is the legacy
+    # co-occurrence counter kept as the revert path. The llm path returns
+    # -1 (table untouched) when OPENROUTER_KEY is absent.
+    alias_backend = cfg.get("indexing", {}).get("alias_backend", "llm")
+    if alias_backend == "llm":
+        from gmail_search.aliases_llm import rebuild_term_aliases_llm
+
+        rebuild_term_aliases_llm(db_path, data_dir=data_dir, user_id=uid)
+    else:
+        rebuild_term_aliases(db_path, data_dir=data_dir, user_id=uid)
+    logger.info("reindex: after term_aliases (%s) — peak RSS %d MiB", alias_backend, _peak_mib())
     # Cached query embeddings can now point at stale term-alias
     # expansions; wipe so the next query re-expands + re-embeds.
     # query_cache is intentionally shared across users (cache hit =
