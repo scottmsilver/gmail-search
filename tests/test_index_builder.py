@@ -718,3 +718,144 @@ def test_delta_full_rebuild_on_deletion(tmp_path):
     conn.close()
     assert idx_ids == db_ids, f"index != db: stale={idx_ids - db_ids} missing={db_ids - idx_ids}"
     assert not (set(victim_ids) & idx_ids), "deleted ids still present in index"
+
+
+# ── manual rerank (funnel retrieval) ─────────────────────────────────────────
+
+
+def _brute_force_full_precision(db_path, query: np.ndarray, top_k: int, dims: int) -> list[int]:
+    """Oracle: exact cosine top-k over ALL stored full-precision vectors."""
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model='test-model' ORDER BY id").fetchall()
+    conn.close()
+    ids = [r["id"] for r in rows]
+    mat = np.array([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
+    mat = mat / np.linalg.norm(mat, axis=1, keepdims=True)
+    q = query / np.linalg.norm(query)
+    order = np.argsort(-(mat @ q))[:top_k]
+    return [ids[i] for i in order]
+
+
+def test_manual_rerank_writes_per_shard_corpus(tmp_path):
+    """Funnel build: every shard carries its full-precision corpus file
+    (rows == shard rows), and the manifest advertises the per-shard layout."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    out = build_index_sharded(
+        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
+        manual_rerank=True, ah_dim=8, reorder_pool=64,
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    mr = manifest["manual_rerank"]
+    assert mr["corpus_per_shard"] is True
+    assert mr["ah_dim"] == 8 and mr["full_dim"] == dims and mr["reorder_pool"] == 64
+    for s in manifest["shards"]:
+        corpus = out / s["dir"] / "corpus_full.f32"
+        assert corpus.is_file(), f"missing {corpus}"
+        assert corpus.stat().st_size == s["count"] * dims * 4
+        assert not (out / s["dir"] / "_vectors.f32.tmp").exists()
+
+
+def test_manual_rerank_search_matches_full_precision_oracle(tmp_path):
+    """With a rerank pool spanning the whole corpus, funnel search must
+    return exactly the full-precision cosine ranking, even though the ScaNN
+    index only knows a truncated 8d subspace."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    out = build_index_sharded(
+        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
+        manual_rerank=True, ah_dim=8, reorder_pool=70,
+    )
+    s = ScannSearcher(out, dimensions=dims)
+    assert s._manual_rerank is not None and s._corpus_files is not None
+    rng = random.Random(11)
+    for _ in range(25):
+        q = np.array([rng.uniform(-1, 1) for _ in range(dims)], dtype=np.float32)
+        got_ids, got_scores = s.search(q, top_k=10)
+        want = _brute_force_full_precision(db, q, 10, dims)
+        assert got_ids == want
+        assert all(got_scores[i] >= got_scores[i + 1] for i in range(len(got_scores) - 1))
+
+
+def test_delta_build_manual_rerank_reuses_and_matches(tmp_path):
+    """Funnel indexes are delta-compatible: sealed shards (incl. their corpus
+    files) hardlink into the new build, and the result searches identically
+    to a from-scratch funnel build AND to the full-precision oracle."""
+    import os
+
+    dims = 16
+    shard_size = 30
+    kw = dict(manual_rerank=True, ah_dim=8, reorder_pool=200)
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    idx = tmp_path / "scann"
+    first = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size, **kw)
+    corpus_inode = os.stat(first / "shard_0" / "corpus_full.f32").st_ino
+
+    _add_embeddings(db, 70, 45, dims)
+    delta_dir = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=shard_size, **kw)
+    assert delta_dir != first, "delta must produce a new versioned dir"
+    # Sealed shard 0's corpus file is the SAME inode — hardlinked, not rebuilt.
+    assert os.stat(delta_dir / "shard_0" / "corpus_full.f32").st_ino == corpus_inode
+    manifest = json.loads((delta_dir / "manifest.json").read_text())
+    assert manifest["manual_rerank"]["corpus_per_shard"] is True
+
+    full_dir = build_index_sharded(
+        db, tmp_path / "scann_full", model="test-model", dimensions=dims, shard_size=shard_size, **kw
+    )
+    d = ScannSearcher(delta_dir, dimensions=dims)
+    f = ScannSearcher(full_dir, dimensions=dims)
+    rng = random.Random(5)
+    for _ in range(25):
+        q = np.array([rng.uniform(-1, 1) for _ in range(dims)], dtype=np.float32)
+        di, ds = d.search(q, top_k=10)
+        fi, fs = f.search(q, top_k=10)
+        assert di == fi
+        for a, b in zip(ds, fs):
+            assert abs(a - b) < 1e-5
+        assert di == _brute_force_full_precision(db, q, 10, dims)
+
+
+def test_delta_flip_to_manual_rerank_triggers_full_rebuild(tmp_path):
+    """A live non-rerank index can't be delta-reused when the funnel turns
+    on: the delta path must fall back to a full rebuild that writes the
+    per-shard corpus layout."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    idx = tmp_path / "scann"
+    build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=30, truncate_dim=8)
+    _add_embeddings(db, 70, 5, dims)
+    out = build_index_delta(
+        db, idx, model="test-model", dimensions=dims, shard_size=30,
+        manual_rerank=True, ah_dim=8, reorder_pool=200,
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest.get("manual_rerank", {}).get("corpus_per_shard") is True
+    for s in manifest["shards"]:
+        assert (out / s["dir"] / "corpus_full.f32").is_file()
+
+
+def test_manual_rerank_missing_corpus_falls_back_to_plain_search(tmp_path):
+    """Torn state defense: if a corpus file vanishes, the searcher logs and
+    serves plain (truncated) ScaNN results instead of failing the query."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    out = build_index_sharded(
+        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
+        manual_rerank=True, ah_dim=8, reorder_pool=70,
+    )
+    (out / "shard_0" / "corpus_full.f32").unlink()
+    s = ScannSearcher(out, dimensions=dims)
+    assert s._manual_rerank is None and s._corpus_files is None
+    q = np.array([0.1] * dims, dtype=np.float32)
+    ids, scores = s.search(q, top_k=5)
+    assert len(ids) == 5

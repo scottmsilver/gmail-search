@@ -26,6 +26,18 @@ DEFAULTS: dict[str, Any] = {
     "search": {
         "default_top_k": 20,
     },
+    "indexing": {
+        # Funnel retrieval (variant C), ON by default since the 2026-07-07
+        # dimension eval: ScaNN index on a truncated 384d subspace + exact
+        # full-precision rerank of the top candidates via per-shard corpus
+        # files. End-to-end blind-judged ≈ full-dim quality at ~1/2 the
+        # index RAM vs the previous 768d flat index (and 1/8 vs 3072d).
+        # Revert: set manual_rerank: false (and optionally truncate_dim:
+        # 768 for the old V3 behavior) in config.yaml, then reindex.
+        "manual_rerank": True,
+        "manual_rerank_ah_dim": 384,
+        "manual_rerank_reorder_pool": 4000,
+    },
     "server": {
         "host": "127.0.0.1",
         "port": 8080,
