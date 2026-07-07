@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Iterable
 
 import httpx
-
 from gmail_search.llm import get_backend
 from gmail_search.llm.backend import Backend
 from gmail_search.store.db import get_connection
@@ -591,12 +590,20 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     # `labels` is a JSON-encoded array; LIKE is faster than parsing per
     # row and the false-positive rate is effectively zero (no legitimate
     # label contains another as a substring).
-    sql = """
+    import os  # inline: env-gated inbox scoping (formatter strips top-level unused imports)
+
+    inbox_only = os.environ.get("GMS_SUMMARIZE_INBOX_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+    # Scope the backfill to INBOX mail only (the mail actually searched) so a
+    # backend swap doesn't re-summarize the whole ~415k archive. New INBOX mail
+    # is still covered; non-inbox keeps its existing summary.
+    inbox_clause = "AND m.labels LIKE '%%\"INBOX\"%%'" if inbox_only else ""
+    sql = f"""
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.body_html, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
         WHERE s.message_id IS NULL
+          {inbox_clause}
         ORDER BY
           -- Frontfill wins over backfill: anything received in the
           -- last 24h (i.e. what `watch` / `sync_new_messages` just
