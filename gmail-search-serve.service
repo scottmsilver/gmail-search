@@ -12,6 +12,11 @@ EnvironmentFile=%h/.config/gmail-search/multi-tenant.env
 # JSON logs on disk (not a secret, so inline + tracked). serve itself also sets
 # GMS_DEFAULT_STATEMENT_TIMEOUT_MS via setdefault.
 Environment=GMS_LOG_JSON=1
+# Cap glibc malloc arenas so the ~24-thread serve pool can't fragment freed
+# memory across dozens of arenas — the other half of the searcher-close RSS
+# ratchet (paired with malloc_trim() after each retired-searcher close in
+# server.py). Must be set at launch; it governs arena creation.
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=%h/anaconda3/bin/gmail-search serve --port 8090 --data-dir %h/development/gmail-search/data
 StandardOutput=append:%h/development/gmail-search/data/serve.log
 StandardError=append:%h/development/gmail-search/data/serve.log
