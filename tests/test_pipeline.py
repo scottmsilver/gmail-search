@@ -20,7 +20,10 @@ def test_reindex_full_runs_every_step(tmp_path):
 
     from gmail_search.pipeline import reindex
 
-    cfg = {"embedding": {"model": "test-model", "dimensions": 16}}
+    # alias_backend pinned to the legacy cooc path: this test asserts the
+    # full-reindex step CONTRACT via the mocked legacy function. The default
+    # ("llm") dispatch is covered by test_reindex_full_dispatches_llm_aliases.
+    cfg = {"embedding": {"model": "test-model", "dimensions": 16}, "indexing": {"alias_backend": "cooc"}}
     data_dir = tmp_path
     db_path = tmp_path / "db.sqlite"
     db_path.touch()
@@ -94,3 +97,33 @@ def test_reindex_light_skips_heavy_rebuilds(tmp_path):
         "clear_query_cache",
     ):
         assert not m[skipped].called, f"{skipped} should be skipped in light mode"
+
+
+def test_reindex_full_dispatches_llm_aliases_by_default(tmp_path):
+    """Default alias_backend ("llm") routes the alias step to
+    rebuild_term_aliases_llm and does NOT call the legacy cooc builder."""
+    from unittest.mock import DEFAULT  # inline — formatter strips unused top-level imports
+
+    from gmail_search.pipeline import reindex
+
+    cfg = {"embedding": {"model": "test-model", "dimensions": 16}}
+    db_path = tmp_path / "db.sqlite"
+    db_path.touch()
+
+    with (
+        patch.multiple(
+            "gmail_search.pipeline",
+            build_index_sharded=DEFAULT,
+            rebuild_fts=DEFAULT,
+            rebuild_thread_summary=DEFAULT,
+            rebuild_contact_frequency=DEFAULT,
+            rebuild_spell_dictionary=DEFAULT,
+            rebuild_topics=DEFAULT,
+            rebuild_term_aliases=DEFAULT,
+            clear_query_cache=DEFAULT,
+        ) as m,
+        patch("gmail_search.aliases_llm.rebuild_term_aliases_llm") as llm_mock,
+    ):
+        reindex(db_path, tmp_path, cfg, light=False)
+    assert llm_mock.called, "LLM alias rebuild not dispatched under default config"
+    assert not m["rebuild_term_aliases"].called, "legacy cooc builder must not run when backend is llm"

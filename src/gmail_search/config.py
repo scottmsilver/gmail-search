@@ -37,6 +37,11 @@ DEFAULTS: dict[str, Any] = {
         "manual_rerank": True,
         "manual_rerank_ah_dim": 384,
         "manual_rerank_reorder_pool": 4000,
+        # Term-alias discovery backend (2026-07-07 eval): "llm" = per-token
+        # gemma calls with email context + caps-dominance gate (blind-judged
+        # 25-11 over the cooc counter end-to-end, ~$0.11/rebuild, no state);
+        # "cooc" = legacy co-occurrence pipeline (revert path).
+        "alias_backend": "llm",
     },
     "server": {
         "host": "127.0.0.1",
