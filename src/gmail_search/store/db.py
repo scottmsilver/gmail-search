@@ -615,7 +615,6 @@ def rebuild_topics(
     import logging
 
     import numpy as np
-
     from gmail_search.auth.write_user import resolve_write_user_id
 
     logger = logging.getLogger(__name__)
@@ -1258,13 +1257,26 @@ def rebuild_spell_dictionary(
                 word_counts[w] += 50
     conn.close()
 
+    # Filter at WRITE time (run files keep full counts, so a word that
+    # crosses the floor later still accumulates correctly). Without a floor
+    # the dictionary was ~5.4M terms, 70% count==1 — base64/message-id
+    # shrapnel that cost SymSpell ~6.6 GB heap and 112 s of load, and worse,
+    # stored the corpus's own typos ("reciept", "mortage") as count-1
+    # "correct" words, which blocked their correction. Floor 20 + length cap:
+    # ~180k terms, ~0.4 GB, 3 s load, and those corrections actually fire.
+    # Sender names are boosted +50 above, so real contacts always survive.
+    min_count, max_len = 20, 24
     user_dir = data_dir / "users" / uid
     user_dir.mkdir(parents=True, exist_ok=True)
     dict_path = user_dir / "spell_dictionary.txt"
+    written = 0
     with open(dict_path, "w") as f:
         for word, count in word_counts.most_common():
+            if count < min_count or len(word) > max_len:
+                continue
             f.write(f"{word} {count}\n")
-    return len(word_counts)
+            written += 1
+    return written
 
 
 def rebuild_contact_frequency(db_path: Path, *, user_id: Optional[str] = None) -> int:
