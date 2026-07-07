@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 import click
-
 from gmail_search.config import load_config
 from gmail_search.store.cost import check_budget, get_spend_breakdown, get_total_spend
 from gmail_search.store.db import get_connection, init_db
@@ -166,8 +165,6 @@ def extract(ctx):
     separate enrichment job, no drift between "knows about" and
     "has fetched".
     """
-    from tqdm import tqdm
-
     from gmail_search.extract import dispatch
     from gmail_search.gmail.drive import (
         build_drive_service,
@@ -177,6 +174,7 @@ def extract(ctx):
         fetch_doc_text,
     )
     from gmail_search.store.queries import get_attachments_for_message, upsert_drive_stub
+    from tqdm import tqdm
 
     cfg = ctx.obj["config"]
     att_config = cfg.get("attachments", {})
@@ -1321,7 +1319,6 @@ def propositionize(ctx, batch, loop, loop_sleep, email):
     import time as _time
 
     import httpx as _httpx
-
     from gmail_search import propositions as _P
     from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
     from gmail_search.embed.client import GeminiEmbedder
@@ -1474,9 +1471,22 @@ def supervise(ctx, interval, restart_delay):
 
     # Proposition extraction needs an OpenRouter key; without it the daemon would
     # crash-loop, so drop it from the supervised set rather than respawn forever.
-    if not (os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")):
+    # Also honor an explicit kill-switch: the summarize backend now shares
+    # OPENROUTER_KEY, so setting the key must NOT silently enable whole-mailbox
+    # fact extraction — GMS_PROPOSITIONIZE_DISABLED=1 keeps it off.
+    _prop_off = os.environ.get("GMS_PROPOSITIONIZE_DISABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    if _prop_off or not (os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")):
         PER_USER_DAEMONS = [d for d in PER_USER_DAEMONS if d["key"] != "propositionize"]
-        _log.info("OPENROUTER_KEY unset — propositionize daemon disabled")
+        _log.info("propositionize daemon disabled (GMS_PROPOSITIONIZE_DISABLED or no OPENROUTER_KEY)")
+
+    # Kill-switch for the summarize daemon. Set GMS_SUMMARIZE_DISABLED=1 to stop
+    # supervising it — used while the LLM backend is being migrated off vLLM (the
+    # dead-GPU vLLM crash-loop was OOM-thrashing the box). Re-summarize is driven
+    # by the DEFAULT_MODEL tag, so nothing is lost by pausing it; drop the flag to
+    # resume once a backend is chosen.
+    if os.environ.get("GMS_SUMMARIZE_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        PER_USER_DAEMONS = [d for d in PER_USER_DAEMONS if d["key"] != "summarize"]
+        _log.info("GMS_SUMMARIZE_DISABLED set — summarize daemon disabled")
 
     # Global daemons — no user_id needed (they scan across all users).
     GLOBAL_DAEMONS = [
@@ -2010,7 +2020,6 @@ def serve(ctx, host, port):
     import os
 
     import uvicorn
-
     from gmail_search.server import create_app
 
     # User-facing safety net: bound every DB query this (serve) process runs so
