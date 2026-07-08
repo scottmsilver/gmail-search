@@ -2170,3 +2170,12 @@ def delete_user(ctx, email, also_uninvite):
             click.echo(f"uninvited: {normalized}")
         else:
             click.echo(f"no invite found for: {normalized}")
+
+
+if __name__ == "__main__":
+    # `python -m gmail_search.cli …` must behave like the console script —
+    # it's the documented fallback in jobs.gmail_search_command() when
+    # `gmail-search` isn't on PATH (e.g. a systemd unit with a bare PATH).
+    # Without this guard that fallback silently did nothing and exited 0,
+    # which made every supervisor-spawned daemon a 0.2-second no-op.
+    main()
