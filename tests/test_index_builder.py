@@ -4,7 +4,6 @@ import struct
 from datetime import datetime
 
 import numpy as np
-
 from gmail_search.index.builder import (
     _load_embeddings_matrix,
     build_index,
@@ -672,10 +671,24 @@ def test_delta_rebuilds_all_trailing_unsealed_shards(tmp_path):
     (live / "shard_2" / "ids.json").write_text(json.dumps(open_ids[:5]))
     (live / "shard_3" / "ids.json").write_text(json.dumps(open_ids[5:]))
     s = m["shards"]
-    s[-1] = {"dir": "shard_2", "key": f"{open_ids[0]}_{open_ids[4]}_5",
-             "first_id": open_ids[0], "last_id": open_ids[4], "count": 5, "sealed": False}
-    s.append({"dir": "shard_3", "key": f"{open_ids[5]}_{open_ids[9]}_5",
-              "first_id": open_ids[5], "last_id": open_ids[9], "count": 5, "sealed": False})
+    s[-1] = {
+        "dir": "shard_2",
+        "key": f"{open_ids[0]}_{open_ids[4]}_5",
+        "first_id": open_ids[0],
+        "last_id": open_ids[4],
+        "count": 5,
+        "sealed": False,
+    }
+    s.append(
+        {
+            "dir": "shard_3",
+            "key": f"{open_ids[5]}_{open_ids[9]}_5",
+            "first_id": open_ids[5],
+            "last_id": open_ids[9],
+            "count": 5,
+            "sealed": False,
+        }
+    )
     m["num_shards"] = 4
     (live / "manifest.json").write_text(json.dumps(m))
 
@@ -703,8 +716,10 @@ def test_delta_full_rebuild_on_deletion(tmp_path):
     build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=shard_size)
 
     conn = get_connection(db)
-    victim_ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM embeddings WHERE model='test-model' ORDER BY id LIMIT 10").fetchall()]
+    victim_ids = [
+        r["id"]
+        for r in conn.execute("SELECT id FROM embeddings WHERE model='test-model' ORDER BY id LIMIT 10").fetchall()
+    ]
     for vid in victim_ids:
         conn.execute("DELETE FROM embeddings WHERE id=%s", (vid,))
     conn.commit()
@@ -744,8 +759,14 @@ def test_manual_rerank_writes_per_shard_corpus(tmp_path):
     init_db(db)
     _add_embeddings(db, 0, 70, dims)
     out = build_index_sharded(
-        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
-        manual_rerank=True, ah_dim=8, reorder_pool=64,
+        db,
+        tmp_path / "scann",
+        model="test-model",
+        dimensions=dims,
+        shard_size=30,
+        manual_rerank=True,
+        ah_dim=8,
+        reorder_pool=64,
     )
     manifest = json.loads((out / "manifest.json").read_text())
     mr = manifest["manual_rerank"]
@@ -767,8 +788,14 @@ def test_manual_rerank_search_matches_full_precision_oracle(tmp_path):
     init_db(db)
     _add_embeddings(db, 0, 70, dims)
     out = build_index_sharded(
-        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
-        manual_rerank=True, ah_dim=8, reorder_pool=70,
+        db,
+        tmp_path / "scann",
+        model="test-model",
+        dimensions=dims,
+        shard_size=30,
+        manual_rerank=True,
+        ah_dim=8,
+        reorder_pool=70,
     )
     s = ScannSearcher(out, dimensions=dims)
     assert s._manual_rerank is not None and s._corpus_files is not None
@@ -833,8 +860,14 @@ def test_delta_flip_to_manual_rerank_triggers_full_rebuild(tmp_path):
     build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=30, truncate_dim=8)
     _add_embeddings(db, 70, 5, dims)
     out = build_index_delta(
-        db, idx, model="test-model", dimensions=dims, shard_size=30,
-        manual_rerank=True, ah_dim=8, reorder_pool=200,
+        db,
+        idx,
+        model="test-model",
+        dimensions=dims,
+        shard_size=30,
+        manual_rerank=True,
+        ah_dim=8,
+        reorder_pool=200,
     )
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest.get("manual_rerank", {}).get("corpus_per_shard") is True
@@ -850,8 +883,14 @@ def test_manual_rerank_missing_corpus_falls_back_to_plain_search(tmp_path):
     init_db(db)
     _add_embeddings(db, 0, 70, dims)
     out = build_index_sharded(
-        db, tmp_path / "scann", model="test-model", dimensions=dims, shard_size=30,
-        manual_rerank=True, ah_dim=8, reorder_pool=70,
+        db,
+        tmp_path / "scann",
+        model="test-model",
+        dimensions=dims,
+        shard_size=30,
+        manual_rerank=True,
+        ah_dim=8,
+        reorder_pool=70,
     )
     (out / "shard_0" / "corpus_full.f32").unlink()
     s = ScannSearcher(out, dimensions=dims)
@@ -859,3 +898,64 @@ def test_manual_rerank_missing_corpus_falls_back_to_plain_search(tmp_path):
     q = np.array([0.1] * dims, dtype=np.float32)
     ids, scores = s.search(q, top_k=5)
     assert len(ids) == 5
+
+
+def test_manual_rerank_shards_are_ah_only(tmp_path):
+    """Funnel shards must not carry ScaNN's reorder dataset (dataset.npy) —
+    the exact external rerank makes it redundant (2026-07-07 ablation:
+    identical pool coverage, ~2 GB RAM at production scale). Needs >= 100
+    vectors so the tree+AH path (not brute force) is exercised."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 120, dims)
+    out = build_index_sharded(
+        db,
+        tmp_path / "scann",
+        model="test-model",
+        dimensions=dims,
+        shard_size=120,
+        manual_rerank=True,
+        ah_dim=8,
+        reorder_pool=120,
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["manual_rerank"]["ah_only"] is True
+    for s in manifest["shards"]:
+        assert not (out / s["dir"] / "dataset.npy").exists(), "reorder dataset must not be written"
+        assert (out / s["dir"] / "hashed_dataset.npy").exists(), "AH codes must exist"
+        assert (out / s["dir"] / "corpus_full.f32").exists()
+    # non-rerank builds keep the legacy reorder stage
+    out2 = build_index_sharded(
+        db, tmp_path / "scann2", model="test-model", dimensions=dims, shard_size=120, truncate_dim=8
+    )
+    m2 = json.loads((out2 / "manifest.json").read_text())
+    assert (out2 / m2["shards"][0]["dir"] / "dataset.npy").exists(), "legacy/V3 builds keep reorder"
+
+
+def test_delta_rebuilds_pre_ah_only_funnel_index(tmp_path):
+    """A live funnel index whose manifest lacks ah_only (built before the
+    reorder-tier removal) must trigger a one-time full rebuild instead of
+    hardlinking mixed-format shards forward."""
+    dims = 16
+    db = tmp_path / "t.db"
+    init_db(db)
+    _add_embeddings(db, 0, 70, dims)
+    idx = tmp_path / "scann"
+    kw = dict(manual_rerank=True, ah_dim=8, reorder_pool=70)
+    first = build_index_sharded(db, idx, model="test-model", dimensions=dims, shard_size=30, **kw)
+    # simulate a pre-ah_only manifest
+    m = json.loads((first / "manifest.json").read_text())
+    del m["manual_rerank"]["ah_only"]
+    (first / "manifest.json").write_text(json.dumps(m))
+    import os
+
+    # capture BEFORE the delta call: a full rebuild GCs the old dir
+    first_inode = os.stat(first / "shard_0" / "ids.json").st_ino
+
+    _add_embeddings(db, 70, 5, dims)
+    out = build_index_delta(db, idx, model="test-model", dimensions=dims, shard_size=30, **kw)
+    m2 = json.loads((out / "manifest.json").read_text())
+    assert m2["manual_rerank"]["ah_only"] is True
+    # full rebuild: shard_0 must be a NEW inode, not a hardlink of the old
+    assert os.stat(out / "shard_0" / "ids.json").st_ino != first_inode

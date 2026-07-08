@@ -67,6 +67,7 @@ def _build_scann_from_vectors(
     *,
     ah_dim: int | None = None,
     reorder_pool: int = 100,
+    skip_reorder: bool = False,
 ) -> None:
     """The ScaNN-specific part of index building. Takes vectors as any
     numpy-array-like (regular array or memmap) and produces a serialized
@@ -77,13 +78,20 @@ def _build_scann_from_vectors(
     manual-rerank index format (see build_index_sharded). The ScaNN
     index ends up at `ah_dim` (smaller, faster), and the caller is
     responsible for keeping the FULL-precision vectors elsewhere
-    (corpus_full.memmap) for the per-query rerank step.
+    (per-shard corpus files) for the per-query rerank step.
 
     `reorder_pool`: passed to ScaNN's `.reorder(N)` — number of AH
     candidates to rerank with full-precision (within the SAME dim
     that the index was built on). Default 100 matches legacy.
-    Manual-rerank builds typically pass a larger pool (e.g. 500) so
-    the Python-side rerank has more candidates to choose from.
+
+    `skip_reorder`: omit ScaNN's reorder stage entirely. Used by
+    manual-rerank builds: the reorder stage only improves candidate
+    ORDER, and the funnel's exact full-dim rerank re-orders the pool
+    anyway — only pool MEMBERSHIP matters, and that's decided by the
+    AH scan. The 2026-07-07 ablation over all 1,058 cached queries
+    measured identical oracle-top-10 pool coverage with and without
+    (98.82% vs 98.86%), while dropping the stage removes dataset.npy
+    (~2 GB RAM at 1.35M x 384d) and cuts AH-stage latency ~35%.
     """
     if ah_dim is not None and ah_dim < vectors.shape[1]:
         # MRL truncation: slice to ah_dim then re-normalize so cosine
@@ -109,7 +117,8 @@ def _build_scann_from_vectors(
             training_sample_size=min(len(ids), 250000),
         )
         builder = builder.score_ah(2, anisotropic_quantization_threshold=0.2)
-        builder = builder.reorder(reorder_pool)
+        if not skip_reorder:
+            builder = builder.reorder(reorder_pool)
     else:
         builder = builder.score_brute_force()
 
@@ -268,7 +277,11 @@ def _build_one_shard(
     vectors.flush()
 
     try:
-        _build_scann_from_vectors(ids, vectors, shard_dir, ah_dim=ah_dim, reorder_pool=reorder_pool)
+        # write_full_corpus == manual-rerank mode: the exact external rerank
+        # makes ScaNN's internal reorder stage redundant (see skip_reorder).
+        _build_scann_from_vectors(
+            ids, vectors, shard_dir, ah_dim=ah_dim, reorder_pool=reorder_pool, skip_reorder=write_full_corpus
+        )
     except BaseException:
         # Failed shard: never leave a complete-looking corpus file next to
         # missing/partial ScaNN artifacts (and never mask the build error
@@ -466,6 +479,10 @@ def build_index_sharded(
                 "reorder_pool": reorder_pool,
                 "full_dim": dimensions,
                 "corpus_per_shard": True,
+                # AH-only shards (no ScaNN reorder stage / dataset.npy) — the
+                # exact external rerank makes it redundant. Delta reuse-gate
+                # keys on this so pre-ah_only funnel indexes rebuild once.
+                "ah_only": True,
             }
         (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
@@ -580,6 +597,9 @@ def build_index_delta(
         or bool(live_mr) != manual_rerank  # rerank mode flip → rebuild
         # Old single-file corpus layout spans all shards — not hardlinkable.
         or (manual_rerank and not (live_mr or {}).get("corpus_per_shard"))
+        # Pre-ah_only funnel shards still carry dataset.npy (~2 GB RAM at
+        # scale); rebuild once so the whole index drops the reorder tier.
+        or (manual_rerank and not (live_mr or {}).get("ah_only"))
         or live.get("dimensions") != dimensions
         or live.get("shard_size") != shard_size
         or live.get("index_dim") != eff_ah  # None==None when no truncation
@@ -730,6 +750,10 @@ def build_index_delta(
                 "reorder_pool": reorder_pool,
                 "full_dim": dimensions,
                 "corpus_per_shard": True,
+                # AH-only shards (no ScaNN reorder stage / dataset.npy) — the
+                # exact external rerank makes it redundant. Delta reuse-gate
+                # keys on this so pre-ah_only funnel indexes rebuild once.
+                "ah_only": True,
             }
         (target_dir / "manifest.json").write_text(json.dumps(manifest_payload))
         (target_dir / "ids.json").write_text(json.dumps(all_ids))
