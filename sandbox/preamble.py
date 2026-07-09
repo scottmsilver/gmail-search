@@ -82,15 +82,69 @@ def _load_evidence() -> pd.DataFrame:
 
 
 def _open_db():
-    """Open a read-only PG connection using the DSN the caller passed
-    via env. Returns None if the DSN is absent so the snippet at least
-    gets `evidence` without crashing at import time."""
+    """Open a read-only, TENANT-SCOPED PG connection using the DSN the
+    caller passed via env. Returns None if the DSN is absent so the
+    snippet at least gets `evidence` without crashing at import time.
+
+    Tenant scoping is the whole point: model-authored Python runs SQL
+    like `db.execute("SELECT * FROM messages")` with no WHERE user_id,
+    and the DSN is the superuser (BYPASSRLS). Before 2026-07-08 this
+    opened that superuser handle with only read-only set — so a snippet
+    during user A's turn could read EVERY tenant's mail. We now do what
+    /api/sql does: drop to the non-superuser `gmail_search_reader` role
+    and bind `app.user_id`, so the same Row-Level-Security policy that
+    protects /api/sql applies here too.
+
+    `SET ROLE` is not parameterizable, but the role name is a fixed
+    literal (never user input). `app.user_id` IS bound as a parameter
+    via set_config. A missing/empty ANALYST_USER_ID leaves app.user_id
+    NULL → the RLS policy matches zero rows (fail-closed), so a
+    misconfigured run sees nothing rather than everything.
+
+    RESIDUAL LIMITATION (why this is defense-in-depth, not a full
+    sandbox for hostile SQL): RLS keys on the `app.user_id` GUC, which
+    is SESSION-SETTABLE. Model code holding this connection can run
+    `set_config('app.user_id', '<victim>', false)` and read that
+    victim's rows — the reader role has SELECT on every tenant's rows,
+    gated only by the GUC. So this scoping stops ACCIDENTAL unscoped
+    reads and blocks a superuser DSN, but does NOT contain deliberately
+    hostile SQL. That is acceptable only because the handle is disabled
+    in production: the sole caller passes db_dsn=None, so `db` is None.
+    Do NOT wire a live DSN here without a non-GUC isolation mechanism
+    (e.g. per-tenant DB roles keyed on current_user, or a
+    security-definer view), or the tenant switch above becomes live."""
     dsn = os.environ.get("ANALYST_DB_DSN")
     if not dsn:
         return None
+    user_id = os.environ.get("ANALYST_USER_ID") or ""
     conn = psycopg.connect(dsn, autocommit=True)
     with conn.cursor() as cur:
+        # `SET ROLE` is REVERSIBLE: hostile code can `RESET ROLE` back to the
+        # LOGIN role (session_user), or `SET ROLE` to any role the login is a
+        # MEMBER of. So scoping only holds if the login role — and every role
+        # it can reach by membership — is non-superuser and non-BYPASSRLS.
+        # pg_has_role(session_user, oid, 'MEMBER') covers direct + inherited
+        # membership. If ANY reachable role is privileged, REFUSE the handle
+        # (fail closed: `db` is None) rather than expose an escapable one.
+        # Enabling the sandbox `db` requires a dedicated
+        # NOSUPERUSER/NOBYPASSRLS login role with no privileged memberships.
+        row = cur.execute(
+            "SELECT bool_or(r.rolsuper OR r.rolbypassrls) "
+            "FROM pg_roles r WHERE pg_has_role(session_user, r.oid, 'MEMBER')"
+        ).fetchone()
+        # Fail CLOSED on a NULL/absent result too (should be impossible, but a
+        # missing verdict must never be read as "safe").
+        if row is None or row[0] is None or row[0]:
+            conn.close()
+            return None
         cur.execute("SET default_transaction_read_only = on")
+        # Bind the tenant BEFORE dropping privilege (either role can set a
+        # namespaced GUC; doing it first keeps intent obvious).
+        cur.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
+        # Narrow to the reader role's grants (SELECT on LLM-facing tables
+        # only). RLS's tenant_isolation policy applies because the login
+        # role — verified above — has no BYPASSRLS to reset back to.
+        cur.execute("SET ROLE gmail_search_reader")
     return conn
 
 

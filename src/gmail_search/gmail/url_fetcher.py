@@ -765,14 +765,26 @@ def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
     return title, _truncate_markdown(result.text)
 
 
+# The id-ordered FOR UPDATE in the three writers below is load-bearing: a
+# plain multi-row UPDATE locks rows in arbitrary physical order, and
+# concurrent workers touching the same filename (one URL fans out to
+# thousands of copies) deadlocked ~5.5k times/day (2026-07-08 storm).
+# Deterministic lock order makes the writers serialize instead.
+_LOCKED_UNFILLED_COPIES = (
+    "SELECT id FROM attachments WHERE filename = %s AND extracted_text IS NULL ORDER BY id FOR UPDATE"
+)
+
+
 def _mark_attempt_sync(db_path, filename: str) -> None:
     """Stamp +1 attempt on ALL unfilled copies of this URL (dedup fan-out) so
-    duplicate stubs back off / abandon together instead of each being retried."""
+    duplicate stubs back off / abandon together instead of each being retried.
+    Deliberately cross-user: URL reachability is a property of the URL, not
+    of the mailbox that linked it — a dead domain is dead for everyone."""
     conn = get_connection(db_path)
     try:
         conn.execute(
             "UPDATE attachments SET crawl_attempts = crawl_attempts + 1, "
-            "crawl_last_attempt = now() WHERE filename = %s AND extracted_text IS NULL",
+            f"crawl_last_attempt = now() WHERE id IN ({_LOCKED_UNFILLED_COPIES})",
             (filename,),
         )
         conn.commit()
@@ -790,7 +802,7 @@ def _abandon_sync(db_path, filename: str) -> None:
     try:
         conn.execute(
             "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
-            "WHERE filename = %s AND extracted_text IS NULL",
+            f"WHERE id IN ({_LOCKED_UNFILLED_COPIES})",
             (_MAX_CRAWL_ATTEMPTS, filename),
         )
         conn.commit()
@@ -799,20 +811,39 @@ def _abandon_sync(db_path, filename: str) -> None:
 
 
 def _write_result_sync(db_path, stub: dict, title: str, markdown: str) -> None:
-    """Persist the fetched content to THIS stub, and resolve the duplicate
-    stubs of the same URL out of the queue WITHOUT content (so the identical
-    page isn't embedded once per linking message — avoids duplicate vectors +
-    reindex churn). The just-filled copy is excluded by its now-non-NULL text."""
+    """Persist the fetched content once PER USER that has unfilled copies of
+    this URL, then resolve each user's remaining duplicates out of the queue
+    without content (the identical page shouldn't be embedded once per
+    linking message — duplicate vectors + reindex churn).
+
+    Per-user because search indexes are per-user: until 2026-07-08 this
+    filled ONE global representative and capped every other user's copies,
+    so only one user's index ever saw the page."""
     from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
 
     conn = get_connection(db_path)
     try:
-        fill_url_attachment(conn, attachment_id=stub["id"], title=title, text=markdown, url=stub["url"])
-        conn.execute(
-            "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() "
-            "WHERE filename = %s AND extracted_text IS NULL",
-            (_MAX_CRAWL_ATTEMPTS, stub["filename"]),
-        )
+        rows = conn.execute(
+            "SELECT id, user_id FROM attachments"
+            " WHERE filename = %s AND extracted_text IS NULL"
+            " ORDER BY id FOR UPDATE",
+            (stub["filename"],),
+        ).fetchall()
+        reps: dict = {}
+        for r in rows:
+            reps.setdefault(r["user_id"], r["id"])
+        # The stub we actually fetched stays its owner's representative.
+        stub_owner = next((r["user_id"] for r in rows if r["id"] == stub["id"]), None)
+        if stub_owner is not None:
+            reps[stub_owner] = stub["id"]
+        for rep_id in reps.values():
+            fill_url_attachment(conn, attachment_id=rep_id, title=title, text=markdown, url=stub["url"])
+        dup_ids = [r["id"] for r in rows if r["id"] not in set(reps.values())]
+        if dup_ids:
+            conn.execute(
+                "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now() " "WHERE id = ANY(%s)",
+                (_MAX_CRAWL_ATTEMPTS, dup_ids),
+            )
         conn.commit()
     finally:
         conn.close()

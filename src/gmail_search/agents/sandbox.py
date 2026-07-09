@@ -86,6 +86,11 @@ class SandboxRequest:
     pids_limit: int = DEFAULT_PIDS_LIMIT
     cpus: str = DEFAULT_CPUS
     conversation_id: str | None = None
+    # Tenant that owns this turn. Passed to the container as
+    # ANALYST_USER_ID so preamble._open_db can bind RLS (app.user_id).
+    # When db_dsn is set, this MUST be too, or the sandbox `db` handle
+    # sees zero rows (fail-closed).
+    user_id: str | None = None
 
 
 @dataclass
@@ -409,6 +414,8 @@ def execute_in_sandbox(req: SandboxRequest) -> SandboxResult:
         "2",
         "-e",
         f"ANALYST_DB_DSN={req.db_dsn or ''}",
+        "-e",
+        f"ANALYST_USER_ID={req.user_id or ''}",
         IMAGE_NAME,
         "python",
         "-c",

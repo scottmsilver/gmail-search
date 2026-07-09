@@ -2,8 +2,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from tqdm import tqdm
-
 from gmail_search.embed.client import (
     GeminiEmbedder,
     embedding_to_blob,
@@ -20,6 +18,7 @@ from gmail_search.store.queries import (
     get_messages_without_embeddings,
     insert_embedding,
 )
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +77,7 @@ def run_embedding_pipeline(
     total_embedded = 0
 
     for i in range(0, len(messages), batch_size):
-        ok, spent, remaining = check_budget(conn, max_budget)
+        ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
         if not ok:
             logger.warning(f"Budget limit ${max_budget:.2f} reached (${spent:.2f} spent). Stopping.")
             break
@@ -126,6 +125,7 @@ def run_embedding_pipeline(
             image_count=0,
             estimated_cost_usd=cost,
             message_id=f"batch_{i}",
+            user_id=user_id,
         )
 
         for (msg, ci, chunk_text), vector in zip(chunk_owners, vectors):
@@ -141,6 +141,7 @@ def run_embedding_pipeline(
                     embedding=embedding_to_blob(vector),
                     model=model,
                 ),
+                user_id=user_id,
             )
             total_embedded += 1
 
@@ -195,7 +196,7 @@ def run_embedding_pipeline(
 
         for att in attachments:
             if att.extracted_text and not embedding_exists(conn, msg_id, att.id, "attachment_text", model):
-                ok, spent, remaining = check_budget(conn, max_budget)
+                ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
                 if not ok:
                     logger.warning("Budget limit reached. Stopping.")
                     conn.close()
@@ -215,6 +216,7 @@ def run_embedding_pipeline(
                     image_count=0,
                     estimated_cost_usd=cost,
                     message_id=msg_id,
+                    user_id=user_id,
                 )
 
                 insert_embedding(
@@ -228,6 +230,7 @@ def run_embedding_pipeline(
                         embedding=embedding_to_blob(vector),
                         model=model,
                     ),
+                    user_id=user_id,
                 )
                 total_embedded += 1
 
@@ -247,7 +250,7 @@ def run_embedding_pipeline(
                         continue
                     if img_idx == 0 and embedding_exists(conn, msg_id, att.id, "attachment_image", model):
                         continue
-                    ok, spent, remaining = check_budget(conn, max_budget)
+                    ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
                     if not ok:
                         logger.warning("Budget limit reached. Stopping.")
                         conn.close()
@@ -268,6 +271,7 @@ def run_embedding_pipeline(
                         image_count=1,
                         estimated_cost_usd=cost,
                         message_id=msg_id,
+                        user_id=user_id,
                     )
 
                     insert_embedding(
@@ -281,6 +285,7 @@ def run_embedding_pipeline(
                             embedding=embedding_to_blob(vector),
                             model=model,
                         ),
+                        user_id=user_id,
                     )
                     total_embedded += 1
 

@@ -587,6 +587,16 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     the crawler never wastes a Chromium render on them. This is a
     self-healing purge: any time the crawler runs, the next batch
     sweeps newly-denied pending rows off the table.
+
+    Intentionally NOT scoped by user_id. The crawler is a SINGLE global
+    daemon (`gmail-search crawl --loop`, not one per tenant): URL
+    reachability is a property of the URL, not the mailbox, so one daemon
+    fetches every tenant's stubs. Cross-tenant safety lives downstream —
+    `url_fetcher._write_result_sync` fills one representative PER USER, so
+    each tenant's index gets the page independently. The denylist is a
+    global policy, so purging a denied URL for all users is the intended
+    behavior, not a cross-user write. (Verified 2026-07-08; don't add
+    `WHERE user_id` here — it would starve every non-bootstrap tenant.)
     """
     # Scope to our stub shape so real HTML email attachments
     # (`message.html`, `ATT00001.htm` etc — also mime='text/html')

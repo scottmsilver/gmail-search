@@ -569,7 +569,7 @@ def _fetch_attachments_for(conn, message_ids: list[str]) -> dict[str, list[dict]
     return out
 
 
-def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]:
+def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str) -> list[dict]:
     """Return messages that don't yet have a summary under `model`, each
     with its attachments pre-joined. Attachments join happens in Python
     because SQL `GROUP_CONCAT` would force a column cap we'd have to
@@ -597,12 +597,19 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
     # backend swap doesn't re-summarize the whole ~415k archive. New INBOX mail
     # is still covered; non-inbox keeps its existing summary.
     inbox_clause = "AND m.labels LIKE '%%\"INBOX\"%%'" if inbox_only else ""
+    # user_id scoping is REQUIRED for tenant isolation: the summarize daemon
+    # runs one process per user, and this superuser conn bypasses RLS. Without
+    # `AND m.user_id = %s` every per-user daemon grinds the GLOBAL queue, and
+    # in batch mode (batch_size > 1) a single LLM call would concatenate
+    # different tenants' email bodies — a cross-tenant content leak. Scoping
+    # here guarantees a batch can only ever contain one user's mail.
     sql = f"""
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.body_html, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
         WHERE s.message_id IS NULL
+          AND m.user_id = %s
           {inbox_clause}
         ORDER BY
           -- Frontfill wins over backfill: anything received in the
@@ -614,7 +621,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None) -> list[dict]
           (m.labels LIKE '%%"STARRED"%%' OR m.labels LIKE '%%"IMPORTANT"%%') DESC,
           m.date DESC
     """
-    params: list = [model]
+    params: list = [model, user_id]
     if limit:
         sql += " LIMIT %s"
         params.append(limit)
@@ -682,6 +689,10 @@ def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
            ON CONFLICT(message_id) DO UPDATE SET
              summary = excluded.summary,
              model = excluded.model,
+             -- Refresh the owner from the parent message too: a pre-fix or
+             -- corrupted row may carry a stale/wrong user_id, which would
+             -- otherwise leave the summary visible under the wrong tenant.
+             user_id = excluded.user_id,
              created_at = CURRENT_TIMESTAMP""",
         (message_id, summary, model, message_id),
     )
@@ -706,6 +717,7 @@ def _record_summary_failure(conn, message_id: str, model: str, error: str) -> No
            ON CONFLICT (message_id) DO UPDATE SET
              model = EXCLUDED.model,
              error = EXCLUDED.error,
+             user_id = EXCLUDED.user_id,
              attempts = summary_failures.attempts + 1,
              last_seen = NOW()""",
         (message_id, model, (error or "unknown")[:400], message_id),
@@ -723,6 +735,7 @@ def backfill(
     batch_size: int = 1,
     limit: int | None = None,
     progress: bool = True,
+    user_id: str | None = None,
 ) -> dict:
     """Summarize every message that doesn't yet have a summary under the
     active backend's model.
@@ -749,7 +762,14 @@ def backfill(
     model = f"{backend.model_id}+{PROMPT_VERSION}"
 
     conn = get_connection(db_path)
-    pending = _messages_needing_summary(conn, model, limit)
+    # Always scope to a single user. None (standalone `gmail-search
+    # summarize` with no daemon context) resolves to the bootstrap user
+    # via GMS_BOOTSTRAP_EMAIL, so the work-selector is never unscoped.
+    if user_id is None:
+        from gmail_search.auth.write_user import resolve_write_user_id
+
+        user_id = resolve_write_user_id(conn)
+    pending = _messages_needing_summary(conn, model, limit, user_id)
     total = len(pending)
     if total == 0:
         conn.close()

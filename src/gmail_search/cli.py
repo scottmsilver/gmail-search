@@ -145,9 +145,16 @@ def sync(ctx):
 
 
 @main.command(help="Extract text and images from downloaded attachments (and Drive docs linked from bodies)")
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account whose messages to scan. Defaults to GMS_BOOTSTRAP_EMAIL. "
+    "Scopes both the body scans and the attachment dispatch to this user.",
+)
 @common_options
 @click.pass_context
-def extract(ctx):
+def extract(ctx, email):
     """Unified extract step:
 
     1. Scans every message body for Drive URLs and upserts stub
@@ -165,6 +172,8 @@ def extract(ctx):
     separate enrichment job, no drift between "knows about" and
     "has fetched".
     """
+    import os as _os
+
     from gmail_search.extract import dispatch
     from gmail_search.gmail.drive import (
         build_drive_service,
@@ -176,16 +185,32 @@ def extract(ctx):
     from gmail_search.store.queries import get_attachments_for_message, upsert_drive_stub
     from tqdm import tqdm
 
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+
     cfg = ctx.obj["config"]
     att_config = cfg.get("attachments", {})
     conn = get_connection(ctx.obj["db_path"])
+
+    # Single-user scope for every phase. Both body scans and the
+    # attachment dispatch below run on a superuser conn (BYPASSRLS), so
+    # without an explicit user_id they'd seed stubs for EVERY tenant's
+    # messages — and stamp them all under the bootstrap user (the stub
+    # upserts default their owner to resolve_write_user_id(None)). Always
+    # concrete so no phase is cross-tenant (fixed 2026-07-08).
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+    active_user_id = _resolve_uid(conn)
 
     # ── 1. Catch-up: seed Drive stubs for any message whose body
     # we have but hasn't been scanned yet. Cheap regex per body.
     # Layering: regex + mime mapping live in gmail/drive (pure API
     # vocabulary), the INSERT lives in store/queries (schema owner).
     try:
-        msg_rows = conn.execute("SELECT id, body_text FROM messages WHERE length(body_text) >= 50").fetchall()
+        msg_rows = conn.execute(
+            "SELECT id, body_text FROM messages WHERE user_id = %s AND length(body_text) >= 50",
+            (active_user_id,),
+        ).fetchall()
         new_stubs = 0
         for r in tqdm(msg_rows, desc="Scanning bodies for Drive links"):
             for drive_id, kind in extract_drive_ids(r["body_text"] or ""):
@@ -194,6 +219,7 @@ def extract(ctx):
                     message_id=r["id"],
                     drive_id=drive_id,
                     mime_type=drive_mime_for_kind(kind),
+                    user_id=active_user_id,
                 )
         conn.commit()
         if new_stubs:
@@ -211,7 +237,9 @@ def extract(ctx):
         from gmail_search.store.queries import upsert_url_stub
 
         msg_rows = conn.execute(
-            "SELECT id, from_addr, subject, body_text, labels FROM messages WHERE length(body_text) >= 50"
+            "SELECT id, from_addr, subject, body_text, labels FROM messages "
+            "WHERE user_id = %s AND length(body_text) >= 50",
+            (active_user_id,),
         ).fetchall()
         new_url_stubs = 0
         for r in tqdm(msg_rows, desc="Scanning bodies for URLs"):
@@ -224,7 +252,7 @@ def extract(ctx):
             if skip_link_crawl_cached(conn, msg, att_metas):
                 continue
             for url in extract_crawlable_urls(r["body_text"] or "", labels=r["labels"]):
-                new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url)
+                new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url, user_id=active_user_id)
         conn.commit()
         if new_url_stubs:
             click.echo(f"  inserted {new_url_stubs} new URL stubs")
@@ -244,7 +272,7 @@ def extract(ctx):
 
     # ── 3. Dispatch loop.
     try:
-        rows = conn.execute("SELECT id FROM messages").fetchall()
+        rows = conn.execute("SELECT id FROM messages WHERE user_id = %s", (active_user_id,)).fetchall()
         updated = 0
         drive_fetched = 0
         drive_failed = 0
@@ -316,9 +344,18 @@ def extract(ctx):
 @click.option("--budget", type=float, default=None, help="Override budget limit")
 @click.option("--force", is_flag=True, help="Re-embed all messages (clears existing message embeddings)")
 @click.option("--batch-api", is_flag=True, help="Use Gemini Batch API (50% cheaper, async with polling)")
+@click.option(
+    "--email",
+    type=str,
+    default=None,
+    help="Gmail account whose messages to embed. Defaults to GMS_BOOTSTRAP_EMAIL. "
+    "Scopes the read, the write owner, AND --force to this user only.",
+)
 @common_options
 @click.pass_context
-def embed(ctx, model, budget, force, batch_api):
+def embed(ctx, model, budget, force, batch_api, email):
+    import os as _os
+
     from gmail_search.embed.pipeline import run_embedding_pipeline
 
     cfg = ctx.obj["config"]
@@ -327,13 +364,31 @@ def embed(ctx, model, budget, force, batch_api):
     if budget:
         cfg["budget"]["max_usd"] = budget
 
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+
+    # Resolve the single user this run operates on. Always concrete (falls
+    # back to the bootstrap user) so no phase — read, --force DELETE, or
+    # write — is ever unscoped across tenants. Before 2026-07-08 this
+    # command ran fully unscoped: it embedded every user's messages under
+    # the bootstrap user's partition, and --force wiped all users' message
+    # embeddings at once.
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+
+    _conn = get_connection(ctx.obj["db_path"])
+    try:
+        active_user_id = _resolve_uid(_conn)
+    finally:
+        _conn.close()
+
     if force:
         from gmail_search.store.db import clear_query_cache
 
         emb_model = cfg["embedding"]["model"]
         conn = get_connection(ctx.obj["db_path"])
         deleted = conn.execute(
-            "DELETE FROM embeddings WHERE chunk_type = 'message' AND model = %s", (emb_model,)
+            "DELETE FROM embeddings WHERE chunk_type = 'message' AND model = %s AND user_id = %s",
+            (emb_model, active_user_id),
         ).rowcount
         conn.commit()
         conn.close()
@@ -348,11 +403,11 @@ def embed(ctx, model, budget, force, batch_api):
         click.echo("Using Batch API (50% cheaper, polling for results)")
 
     conn = get_connection(ctx.obj["db_path"])
-    ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"])
+    ok, spent, remaining = check_budget(conn, cfg["budget"]["max_usd"], user_id=active_user_id)
     conn.close()
     click.echo(f"Budget: ${cfg['budget']['max_usd']:.2f} | Spent: ${spent:.2f} | Remaining: ${remaining:.2f}")
 
-    count = run_embedding_pipeline(ctx.obj["db_path"], cfg, embedder=embedder)
+    count = run_embedding_pipeline(ctx.obj["db_path"], cfg, embedder=embedder, user_id=active_user_id)
     click.echo(f"Embedded {count} new chunks.")
 
 
@@ -1933,6 +1988,7 @@ def summarize(ctx, concurrency, batch_size, limit, loop, loop_batch, loop_sleep,
             concurrency=concurrency,
             batch_size=batch_size,
             limit=pass_limit,
+            user_id=active_user_id,
         )
         click.echo(
             f"Pass: {result['done']}/{result['total']} summarized "
