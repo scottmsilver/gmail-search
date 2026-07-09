@@ -18,7 +18,6 @@ import asyncio
 
 import httpx
 import pytest
-
 from gmail_search.gmail import url_fetcher as uf
 
 RICH_HTML = (
@@ -605,9 +604,13 @@ def test_process_one_browser_uses_browser_sem_not_http_sem(monkeypatch):
     # released — so a slow render can't hold an HTTP slot.
     import gmail_search.store.queries as q  # noqa: F401
 
+    class _FakeResult:
+        def fetchall(self):
+            return []
+
     class _FakeConn:
         def execute(self, *a, **k):
-            pass
+            return _FakeResult()
 
         def commit(self):
             pass
@@ -635,9 +638,7 @@ def test_process_one_browser_uses_browser_sem_not_http_sem(monkeypatch):
 
     monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
     stub = {"id": 1, "url": "https://x.example.com/a", "filename": "URL: https://x.example.com/a"}
-    ok = asyncio.run(
-        uf._process_one(None, stub, http_sem, None, 5.0, browser_sem=browser_sem)
-    )
+    ok = asyncio.run(uf._process_one(None, stub, http_sem, None, 5.0, browser_sem=browser_sem))
     assert ok is True
     assert state["http_held_during_browser"] is False  # HTTP slot released before render
 
@@ -649,7 +650,10 @@ def test_run_continuous_processes_all_outcomes(monkeypatch):
     # End-to-end of run_continuous with everything below the orchestration
     # mocked: a producer batch of stubs with ok / fail / browser outcomes;
     # assert counters are right and the browser stub was rendered + persisted.
-    stubs = [{"id": i, "url": f"https://s{i}.example.com/p", "filename": f"URL: https://s{i}.example.com/p"} for i in range(6)]
+    stubs = [
+        {"id": i, "url": f"https://s{i}.example.com/p", "filename": f"URL: https://s{i}.example.com/p"}
+        for i in range(6)
+    ]
     served = {"done": False}
 
     def fake_pending(conn, n):
