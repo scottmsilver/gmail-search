@@ -74,8 +74,10 @@ def test_run_code_tool_persists_artifacts_to_db(db_backend):
     db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
+    conn.execute("INSERT INTO users (id, email) VALUES ('uA','a@t.local') ON CONFLICT DO NOTHING")
+    conn.commit()
     sid = new_session_id()
-    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q", user_id="uA")
 
     tool = build_run_code_tool(
         evidence_records=None,
@@ -100,7 +102,7 @@ def test_run_code_tool_persists_artifacts_to_db(db_backend):
 
     # Round-trip the bytes through the DB to prove they were persisted
     # faithfully — not just that we got an id back.
-    row = get_artifact(conn, art["id"])
+    row = get_artifact(conn, art["id"], "uA")
     assert row is not None
     name, mime, data = row
     assert name == "trend.png"

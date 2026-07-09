@@ -107,13 +107,19 @@ def test_finalize_session_flips_status_and_stamps_finish_time(db_backend):
 def test_save_and_get_artifact_roundtrip(db_backend):
     """Analyst saves a PNG (say); Writer cites it as [art:<id>] and the
     UI fetches via /api/artifact/<id>. This test covers just the DB
-    layer."""
+    layer, INCLUDING the owner scoping that closes the IDOR: a caller
+    only sees artifacts owned (via the session) by their own user_id."""
     db_path = db_backend["db_path"]
     init_db(db_path)
     conn = get_connection(db_path)
 
+    # Two tenants, each with a deep-mode session.
+    conn.execute("INSERT INTO users (id, email) VALUES ('uA', 'a@t.local') ON CONFLICT DO NOTHING")
+    conn.execute("INSERT INTO users (id, email) VALUES ('uB', 'b@t.local') ON CONFLICT DO NOTHING")
+    conn.commit()
+
     sid = new_session_id()
-    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q", user_id="uA")
     payload = b"\x89PNG\r\n\x1a\nfake-png-bytes"
     art_id = save_artifact(
         conn,
@@ -125,9 +131,14 @@ def test_save_and_get_artifact_roundtrip(db_backend):
     )
     assert isinstance(art_id, int)
 
-    name, mime, blob = get_artifact(conn, art_id)
+    # Owner sees it.
+    name, mime, blob = get_artifact(conn, art_id, "uA")
     assert name == "spending_by_month.png"
     assert mime == "image/png"
     assert bytes(blob) == payload
-    assert get_artifact(conn, 999999) is None
+    # Another tenant does NOT — the IDOR fix. Returns None (→ 404), so the
+    # endpoint can't be enumerated across users.
+    assert get_artifact(conn, art_id, "uB") is None
+    # Unknown id → None regardless of user.
+    assert get_artifact(conn, 999999, "uA") is None
     conn.close()

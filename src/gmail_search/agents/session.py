@@ -219,19 +219,53 @@ def save_artifact(
     return int(row["id"])
 
 
-def get_artifact(conn, artifact_id: int) -> tuple[str, str, bytes] | None:
-    """Fetch (name, mime_type, data) for the artifact id, or None. The
-    /api/artifact/<id> endpoint returns the bytes directly; this helper
-    is the only read path (intentional — we don't list all artifacts
-    for a session, it's always by id)."""
+def get_artifact(conn, artifact_id: int, user_id: str) -> tuple[str, str, bytes] | None:
+    """Fetch (name, mime_type, data) for the artifact id, or None if it
+    doesn't exist OR isn't owned by `user_id`. The /api/artifact/<id>
+    endpoint returns the bytes directly; this helper is the only read
+    path (intentional — we don't list all artifacts for a session, it's
+    always by id).
+
+    `agent_artifacts` has no user_id column, so ownership is enforced by
+    joining through the owning session. `user_id` is REQUIRED: the
+    artifact ids are sequential BIGSERIAL, so without this scope the
+    endpoint was an unauthenticated IDOR over every tenant's plots/CSVs
+    (fixed 2026-07-08). A cross-user id returns None → 404, so existence
+    isn't leaked either."""
     row = conn.execute(
-        """SELECT name, mime_type, data FROM agent_artifacts WHERE id = %s""",
-        (artifact_id,),
+        """SELECT a.name, a.mime_type, a.data
+             FROM agent_artifacts a
+             JOIN agent_sessions s ON s.id = a.session_id
+            WHERE a.id = %s AND s.user_id = %s""",
+        (artifact_id, user_id),
     ).fetchone()
     if row is None:
         return None
     data = row["data"]
     return row["name"], row["mime_type"], bytes(data) if isinstance(data, memoryview) else data
+
+
+def session_owner(conn, session_id: str) -> str | None:
+    """Return the user_id that owns `session_id`, or None if the session
+    doesn't exist. Used by the SSE /events endpoint to reject replaying
+    another tenant's turn transcript."""
+    row = conn.execute(
+        "SELECT user_id FROM agent_sessions WHERE id = %s",
+        (session_id,),
+    ).fetchone()
+    return row["user_id"] if row else None
+
+
+def conversation_owner(conn, conversation_id: str) -> str | None:
+    """Return the user_id that owns `conversation_id`, or None if it
+    doesn't exist. Used to reject a deep-mode turn that names another
+    tenant's conversation (which would otherwise read that thread's
+    history into the prompt and write assistant bubbles into it)."""
+    row = conn.execute(
+        "SELECT user_id FROM conversations WHERE id = %s",
+        (conversation_id,),
+    ).fetchone()
+    return row["user_id"] if row else None
 
 
 def session_log_path(data_dir: Path, session_id: str) -> Path:

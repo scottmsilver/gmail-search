@@ -24,23 +24,38 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import AsyncIterator
 
+# conversation_id is interpolated into a claudebox workspace DIRECTORY name
+# (_claudebox_workspace_for), so it must be a strict slug — no '/', no '..',
+# nothing that can traverse the path. An earlier docstring claimed this was
+# enforced by `server.py:_validate_conversation_id`; that function never
+# existed, so an owned id like `x/../deep-conv-victim` could alias another
+# conversation's workspace. Enforced at the /api/agent/analyze boundary.
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _is_valid_conversation_id(conversation_id: str) -> bool:
+    return bool(_CONVERSATION_ID_RE.match(conversation_id))
+
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
-
 from gmail_search.agents.session import (
     append_event,
+    conversation_owner,
     create_session,
     fetch_events_after,
     finalize_session,
     get_artifact,
     new_session_id,
+    session_owner,
 )
 from gmail_search.auth import require_user_id
 from gmail_search.store.db import get_connection
+from pydantic import BaseModel
 
 
 def _use_real_pipeline() -> bool:
@@ -257,11 +272,13 @@ def _claudebox_workspace_for(conversation_id: str | None, session_id: str) -> st
     turns. Falls back to per-session naming when there's no
     conversation_id (one-off probes / tests / non-chat flows).
 
-    The conversation_id is already validated against
-    `^[A-Za-z0-9_-]{1,64}$` at the API boundary
-    (server.py:_validate_conversation_id), so we can interpolate
-    directly into the dir name without sanitization here."""
-    if conversation_id:
+    Defensive: conversation_id is validated at the /api/agent/analyze
+    boundary (`_is_valid_conversation_id`), but this helper interpolates
+    it into a directory name, so we re-check here rather than trust an
+    upstream guarantee (an earlier docstring pointed at a validator that
+    never existed). A bad slug falls back to per-session naming instead
+    of traversing the path."""
+    if conversation_id and _is_valid_conversation_id(conversation_id):
         return f"deep-conv-{conversation_id}"
     return f"deep-{session_id}"
 
@@ -1094,6 +1111,7 @@ async def _real_run(
             instruction=instr,
             model=default_model,
             conversation_id=conversation_id,
+            user_id=user_id,
         )
 
     orch = Orchestrator(
@@ -1333,6 +1351,41 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
         session_id = new_session_id()
         conn = get_connection(db_path)
         try:
+            # Ownership gate: a caller-supplied conversation_id must belong
+            # to the authenticated user. Without this, passing another
+            # tenant's conversation_id would read their thread history into
+            # the prompt (_build_conversation_history_preamble) and write
+            # assistant bubbles into their conversation (_persist_*). An
+            # earlier comment claimed a `_validate_conversation_id`
+            # safeguard existed upstream — it never did (fixed 2026-07-08).
+            #
+            # Claim-then-verify (atomic): INSERT the conversation owned by
+            # this user if it doesn't already exist, then read back the
+            # owner. This handles all three cases in one shot and closes
+            # two holes codex flagged:
+            #   - existing + owned by caller → ON CONFLICT DO NOTHING, owner
+            #     matches → allowed.
+            #   - existing + owned by someone else, OR a legacy row with a
+            #     NULL owner → row unchanged, owner != user_id → refused
+            #     (NULL != user_id, so NULL-owner rows are NOT treated as
+            #     "brand new" — that was the conflation bug).
+            #   - absent → we create+claim it NOW, so a later create by a
+            #     different tenant hits the PK and can't take it from under
+            #     this run (closes the TOCTOU where create_session alone
+            #     never actually created the conversations row).
+            if req.conversation_id is not None:
+                # Reject anything that isn't a strict slug BEFORE it can reach
+                # the workspace-path interpolation (or the DB). Blocks the
+                # `x/../deep-conv-victim` path-traversal that would otherwise
+                # alias another conversation's claudebox workspace.
+                if not _is_valid_conversation_id(req.conversation_id):
+                    return JSONResponse({"error": "Invalid conversation_id"}, status_code=400)
+                conn.execute(
+                    "INSERT INTO conversations (id, user_id) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
+                    (req.conversation_id, user_id),
+                )
+                if conversation_owner(conn, req.conversation_id) != user_id:
+                    return JSONResponse({"error": "Conversation not found"}, status_code=404)
             create_session(
                 conn,
                 session_id=session_id,
@@ -1369,12 +1422,31 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.get("/api/agent/analyze/{session_id}/events")
-    async def events(session_id: str, after: int = 0, request: Request = None) -> Response:
+    async def events(
+        session_id: str,
+        after: int = 0,
+        request: Request = None,
+        user_id: str = Depends(require_user_id),
+    ) -> Response:
         """Replay events after `seq=<after>`. Used by the UI when
         reconnecting to an in-flight session (back-button, tab swap,
         network blip). Keeps streaming as new events arrive by polling
         the DB at a 250 ms tick — not elegant but fine for human-rate
-        turns. If the client disconnects we stop polling."""
+        turns. If the client disconnects we stop polling.
+
+        Requires auth and session ownership: the event stream carries the
+        full turn transcript (email content, tool outputs), so a caller
+        may only replay their own sessions. Before 2026-07-08 this was
+        unauthenticated, gated only by the random session_id."""
+        conn = get_connection(db_path)
+        try:
+            owner = session_owner(conn, session_id)
+        finally:
+            conn.close()
+        if owner is None or owner != user_id:
+            # 404 (not 403) so a probe can't distinguish "not yours" from
+            # "doesn't exist" and enumerate valid session ids.
+            return JSONResponse({"error": "Session not found"}, status_code=404)
 
         async def replay() -> AsyncIterator[str]:
             last_seen = after
@@ -1410,14 +1482,23 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
         return StreamingResponse(replay(), media_type="text/event-stream")
 
     @app.get("/api/artifact/{artifact_id}")
-    async def artifact(artifact_id: int) -> Response:
-        """Serve a single artifact (plot PNG, CSV, etc.) by id.
-        Mime type comes from the stored row. No listing endpoint —
-        artifacts are always fetched by a specific id cited in an
-        agent response."""
+    async def artifact(
+        artifact_id: int,
+        user_id: str = Depends(require_user_id),
+    ) -> Response:
+        """Serve a single artifact (plot PNG, CSV, etc.) by id, scoped to
+        the requesting user. Mime type comes from the stored row. No
+        listing endpoint — artifacts are always fetched by a specific id
+        cited in an agent response.
+
+        `require_user_id` + owner-scoped `get_artifact` are load-bearing:
+        artifact ids are sequential BIGSERIAL, so before 2026-07-08 this
+        was an unauthenticated IDOR over every tenant's plots/CSVs. A
+        cross-user (or unknown) id returns 404, not 403, so existence
+        isn't leaked."""
         conn = get_connection(db_path)
         try:
-            row = get_artifact(conn, artifact_id)
+            row = get_artifact(conn, artifact_id, user_id)
         finally:
             conn.close()
         if row is None:

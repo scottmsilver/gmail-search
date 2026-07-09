@@ -145,6 +145,7 @@ def build_run_code_tool(
     db_conn,
     timeout_seconds: int = 60,
     conversation_id: str | None = None,
+    user_id: str | None = None,
 ):
     """Return an ADK FunctionTool bound to THIS session's sandbox
     inputs + artifact sink.
@@ -182,6 +183,7 @@ def build_run_code_tool(
             db_dsn=db_dsn,
             timeout_seconds=timeout_seconds,
             conversation_id=conversation_id,
+            user_id=user_id,
         )
         result = execute_in_sandbox(req)
 
@@ -221,6 +223,7 @@ def build_analyst_agent(
     model: str | None = None,
     instruction: str | None = None,
     conversation_id: str | None = None,
+    user_id: str | None = None,
 ):
     """Assemble the Analyst LlmAgent ready to run.
 
@@ -238,6 +241,7 @@ def build_analyst_agent(
         session_id=session_id,
         db_conn=db_conn,
         conversation_id=conversation_id,
+        user_id=user_id,
     )
     # Default model bumped from gemini-2.5-flash to 3.1-pro after a
     # live test: flash agents reliably failed to invoke `run_code`
