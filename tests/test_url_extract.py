@@ -195,3 +195,38 @@ def test_extract_decodes_wrappers_and_dedups():
     )
     out = extract_crawlable_urls(body)
     assert out == ["https://dest.example.com/a"]
+
+
+# --- per-recipient tracking-param stripping -------------------------------
+from gmail_search.gmail.url_extract import strip_tracking_params
+
+
+def test_strip_tracking_params_drops_known_trackers():
+    u = "https://nytimes.com/article?utm_source=email&utm_campaign=x&id=99&mc_eid=RECIP123"
+    # utm_* and mc_eid go; the real content param survives.
+    assert strip_tracking_params(u) == "https://nytimes.com/article?id=99"
+
+
+def test_strip_tracking_params_drops_ad_click_ids():
+    u = "https://shop.com/item?gclid=abc&color=red&mkt_tok=TOK&fbclid=z"
+    assert strip_tracking_params(u) == "https://shop.com/item?color=red"
+
+
+def test_strip_tracking_params_noop_when_clean():
+    for u in ("https://example.com/clean", "https://example.com/p?a=1&b=2"):
+        assert strip_tracking_params(u) == u
+
+
+def test_strip_tracking_params_case_insensitive_and_prefixes():
+    u = "https://x.com/p?UTM_Source=e&PK_campaign=c&keep=1"
+    assert strip_tracking_params(u) == "https://x.com/p?keep=1"
+
+
+def test_extract_strips_tokens_and_dedups_across_recipients():
+    # Same article linked to two recipients under different tracking tokens
+    # collapses to one clean URL once the tokens are stripped.
+    body = (
+        "A https://news.example.com/story?utm_medium=email&mc_eid=AAA\n"
+        "B https://news.example.com/story?utm_medium=email&mc_eid=BBB\n"
+    )
+    assert extract_crawlable_urls(body) == ["https://news.example.com/story"]

@@ -243,7 +243,14 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
     return title, _truncate_markdown(markdown)
 
 
-_HTTP_UA = "Mozilla/5.0 (compatible; gmail-search/1.0; +https://oursilverfamily.com)"
+# Neutral browser UA. Deliberately NOT self-identifying: the old value
+# ("gmail-search/1.0; +https://oursilverfamily.com") told every crawled
+# server that this specific tool — and its owner's personal domain — had
+# processed the mail, a direct privacy leak to senders/trackers. A generic
+# Chrome UA leaks nothing about the mailbox or its owner and also trips
+# fewer bot-walls. Matches the Chrome family the curl_cffi engine
+# impersonates so the two engines present consistently.
+_HTTP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 _MIN_USABLE_CHARS = 250  # below this we assume a JS shell / empty page → browser
 _MAX_HTML_CHARS = 3_000_000  # cap parsed HTML so a giant page can't blow RAM
 _MAX_HTML_BYTES = 20_000_000  # reject responses larger than this (Content-Length)
@@ -371,6 +378,20 @@ def _readable_text(html: str) -> tuple[str, str]:
     return text, title
 
 
+def _crawl_proxy() -> str | None:
+    """Optional egress proxy for ALL crawl traffic, read from the
+    `GMAIL_CRAWL_PROXY` env var (e.g. `http://user:pass@1.2.3.4:3128` or
+    `socks5://127.0.0.1:9050`). Unset/blank → direct connection (no
+    behavior change), so this is a safe no-op until an egress is stood up.
+
+    Purpose: route fetches through a cloud/datacenter egress so crawled
+    sites see that IP, not the home/residential IP — the home identity is
+    never exposed to senders/trackers. Never hard-code a proxy URL here;
+    it's deployment config, so it lives in the environment."""
+    p = os.environ.get("GMAIL_CRAWL_PROXY", "").strip()
+    return p or None
+
+
 def build_http_client(timeout_s: float = _DEFAULT_TIMEOUT_S):
     """Pooled httpx client for the HTTP-first path. Built ONCE per crawl
     pass and shared across every URL: keep-alive + HTTP/2 mean repeated
@@ -383,6 +404,7 @@ def build_http_client(timeout_s: float = _DEFAULT_TIMEOUT_S):
     return httpx.AsyncClient(
         follow_redirects=False,  # hops are followed manually, SSRF-guarded each
         http2=True,
+        proxy=_crawl_proxy(),  # None → direct; set GMAIL_CRAWL_PROXY to route egress
         headers={"User-Agent": _HTTP_UA},
         timeout=httpx.Timeout(connect=per_op, read=per_op, write=per_op, pool=timeout_s),
         limits=httpx.Limits(max_connections=64, max_keepalive_connections=32, keepalive_expiry=30.0),
@@ -512,7 +534,9 @@ def build_cffi_session():
     except Exception as e:  # noqa: BLE001
         logger.warning(f"curl_cffi unavailable, falling back to httpx engine: {e}")
         return None
-    return AsyncSession()
+    proxy = _crawl_proxy()  # None → direct; keeps the home IP off the wire when set
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    return AsyncSession(proxies=proxies)
 
 
 async def _cffi_read_capped(resp, cap: int = _MAX_FETCH_BYTES) -> str:
@@ -795,7 +819,8 @@ def _mark_attempt_sync(db_path, filename: str) -> None:
 def _abandon_sync(db_path, filename: str) -> None:
     """PERMANENT-failure fast path: jump all copies of this URL straight to the
     retry cap (NEVER-succeeds: private/reserved IP, NXDOMAIN dead domain) so we
-    don't burn repeated browser fetches over ~6h of backoff."""
+    don't burn repeated browser fetches over the ~3 weeks of exponential
+    backoff a normal-failing URL would take to reach the cap."""
     from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
 
     conn = get_connection(db_path)
@@ -949,6 +974,7 @@ async def run(
         verbose=False,
         light_mode=True,
         text_mode=True,
+        proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
         extra_args=[
             # Chromium refuses to run as root inside containers / some
             # CI — these flags match what crawl4ai's own docs recommend.
@@ -1123,6 +1149,7 @@ async def run_continuous(
         verbose=False,
         light_mode=True,
         text_mode=True,
+        proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
         extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
     )
     try:
@@ -1173,6 +1200,7 @@ def _self_test() -> None:
             verbose=False,
             light_mode=True,
             text_mode=True,
+            proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
             extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         async with AsyncWebCrawler(config=browser_config) as crawler:

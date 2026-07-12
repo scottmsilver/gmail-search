@@ -22,6 +22,13 @@ HTTP_TIMEOUT = 120.0
 _RETRYABLE = {429, 500, 502, 503, 504}
 
 
+def _scrub_surrogates(s: str) -> str:
+    """Replace lone UTF-8 surrogate code points so the string can be
+    JSON/UTF-8 encoded. `errors="replace"` on a UTF-8 round-trip swaps any
+    unpaired surrogate for U+FFFD; a clean string round-trips unchanged."""
+    return s.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
 class OpenRouterBackend:
     """Backend protocol impl for OpenRouter. Stateless; no spawn lifecycle."""
 
@@ -59,6 +66,18 @@ class OpenRouterBackend:
         max_tokens: int,
         json_format: bool = False,
     ) -> str:
+        # Scrub lone UTF-8 surrogates from message content. Gmail bodies
+        # occasionally carry unpaired surrogate code points (broken emoji /
+        # mis-decoded bytes); httpx's JSON encoder then raises
+        # UnicodeEncodeError ("surrogates not allowed") while serialising the
+        # request. That error is NOT retryable — before this scrub a single
+        # such message crash-looped the summarize daemon (one real message hit
+        # 71,111 attempts, 31s each, making zero progress). Replacing the bad
+        # code points lets the request encode and the message summarise.
+        messages = [
+            {**m, "content": _scrub_surrogates(m["content"])} if isinstance(m.get("content"), str) else m
+            for m in messages
+        ]
         body: dict = {
             "model": self.model_id,
             "messages": messages,
@@ -78,6 +97,11 @@ class OpenRouterBackend:
                 resp.raise_for_status()
                 choices = resp.json().get("choices") or []
                 return choices[0]["message"]["content"] if choices else ""
+            except (UnicodeEncodeError, TypeError, ValueError, KeyError) as e:
+                # Malformed request / un-encodable content: retrying can't fix
+                # it and just burns exponential-backoff sleeps. Fail fast so the
+                # caller records the failure and moves on (no 31s-per-pass loop).
+                raise e
             except Exception as e:  # noqa: BLE001 - retry network/5xx, re-raise on exhaustion
                 last_exc = e
                 if attempt == 5:

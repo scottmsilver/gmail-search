@@ -719,3 +719,28 @@ def test_run_continuous_processes_all_outcomes(monkeypatch):
 
 async def _noop_async(*a, **k):
     return None
+
+
+# --- egress proxy hook (GMAIL_CRAWL_PROXY) --------------------------------
+def test_crawl_proxy_unset_is_none(monkeypatch):
+    from gmail_search.gmail import url_fetcher as uf
+
+    monkeypatch.delenv("GMAIL_CRAWL_PROXY", raising=False)
+    assert uf._crawl_proxy() is None
+    monkeypatch.setenv("GMAIL_CRAWL_PROXY", "   ")  # blank → treated as unset
+    assert uf._crawl_proxy() is None
+
+
+def test_crawl_proxy_set_is_returned(monkeypatch):
+    from gmail_search.gmail import url_fetcher as uf
+
+    monkeypatch.setenv("GMAIL_CRAWL_PROXY", "http://u:p@1.2.3.4:3128")
+    assert uf._crawl_proxy() == "http://u:p@1.2.3.4:3128"
+
+
+def test_ua_is_not_self_identifying():
+    from gmail_search.gmail import url_fetcher as uf
+
+    # The UA must not name the tool or the owner's domain (privacy leak).
+    assert "gmail-search" not in uf._HTTP_UA
+    assert "oursilverfamily" not in uf._HTTP_UA

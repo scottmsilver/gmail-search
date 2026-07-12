@@ -571,11 +571,19 @@ def url_from_stub_filename(filename: str) -> str | None:
     return None
 
 
-# After this many failed crawl attempts a URL stub is abandoned (dead /
-# anti-bot link). Each attempt also backs off `crawl_attempts` hours, so a
-# stub is retried at ~1h, 2h, 3h then dropped — it can no longer head-of-line
-# block live URLs in `pending_url_stubs`.
-_MAX_CRAWL_ATTEMPTS = 4
+# After this many failed crawl attempts a URL stub is DEAD — never retried
+# again. Retries are spaced by EXPONENTIAL backoff (2^(attempts-1) hours:
+# 1h, 2h, 4h, 8h … 256h before the 10th and final try), so the total window
+# before a URL is declared dead is sum(2^0..2^8) ≈ 511h ≈ 21 days. A URL
+# that's merely down for a few days still gets a few more spread-out chances,
+# but a permanently-dead / anti-bot link stops on its own and can no longer
+# head-of-line block live URLs in `pending_url_stubs`.
+#
+# NOTE ON RAISING THIS: a one-time migration (pg_migration_crawl_backoff.sql)
+# bumps every pre-existing row already at/above the OLD cap (4) straight to
+# this value, so widening the cap does NOT resurrect the ~336K URLs that were
+# already abandoned under the old linear-backoff regime.
+_MAX_CRAWL_ATTEMPTS = 10
 
 
 def pending_url_stubs(conn, limit: int) -> list[dict]:
@@ -616,10 +624,13 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # anti-bot links were re-selected EVERY cycle forever — the newest 200 dead
     # stubs permanently filled the batch and live URLs behind them never ran.
     # Now: never-tried stubs (crawl_attempts=0) are crawled FIRST (fast lane);
-    # previously-failed ones back off (retry only after `attempts` hours) and
-    # are abandoned after _MAX_CRAWL_ATTEMPTS (slow lane). `_process_one` stamps
-    # each attempt. The partial index idx_attachments_crawl_lane serves the
-    # (crawl_attempts ASC, id DESC) order directly.
+    # previously-failed ones back off EXPONENTIALLY (retry only after
+    # 2^(attempts-1) hours: 1h, 2h, 4h, 8h …) and are declared dead after
+    # _MAX_CRAWL_ATTEMPTS (slow lane). This spreads a temporarily-down URL's
+    # retries across ~3 weeks before giving up, instead of the old linear
+    # 1h/2h/3h-then-dead-in-6h cliff. `_process_one` stamps each attempt. The
+    # partial index idx_attachments_crawl_lane serves the (crawl_attempts ASC,
+    # id DESC) order directly.
     overfetch = max(limit * 5, 500)
     rows = conn.execute(
         """SELECT id, message_id, filename
@@ -629,7 +640,8 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
               AND filename LIKE %s
               AND crawl_attempts < %s
               AND (crawl_last_attempt IS NULL
-                   OR crawl_last_attempt < now() - (interval '1 hour' * crawl_attempts))
+                   OR crawl_last_attempt
+                        < now() - (interval '1 hour' * power(2, crawl_attempts - 1)))
             ORDER BY crawl_attempts ASC, id DESC
             LIMIT %s""",
         ("URL: %", _MAX_CRAWL_ATTEMPTS, overfetch),

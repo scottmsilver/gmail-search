@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, parse_qsl, unquote, urlencode, urlparse, urlunparse
 
 # Curated email-tracker host list sourced from disconnectme/disconnect-
 # tracking-protection `services.json` (Email category only — the
@@ -368,6 +368,78 @@ def unwrap_tracker_url(url: str, _depth: int = 0) -> str:
     return url
 
 
+# Query params that carry a PER-RECIPIENT / per-campaign tracking token.
+# Fetching a legit content URL that still has these attached leaks a
+# recipient-identifying id to the origin (and its analytics) — it says "this
+# specific mailbox processed this link." We want the CONTENT (for indexing),
+# so we don't denylist these URLs; we strip the tokens and fetch the clean
+# URL. Exact-name matches (case-insensitive):
+_TRACKING_PARAMS_EXACT = frozenset(
+    {
+        # Ad-click / redirect click-ids — pure tracking, never load-bearing for content.
+        "gclid",
+        "dclid",
+        "gbraid",
+        "wbraid",
+        "fbclid",
+        "msclkid",
+        "twclid",
+        "yclid",
+        "igshid",
+        "mc_cid",
+        "mc_eid",
+        "mkt_tok",
+        "vero_id",
+        "vero_conv",
+        "oly_enc_id",
+        "oly_anon_id",
+        "ck_subscriber_id",
+        "ml_subscriber",
+        "ml_subscriber_hash",
+        "_hsenc",
+        "_hsmi",
+        "hsctatracking",
+        "s_cid",
+        "ecid",
+        "trk",
+        "trkcampaign",
+        "spmailingid",
+        "spuserid",
+        "spreportid",
+        "cmpid",
+        "recipient_id",
+        "rb_clickid",
+        "sc_customer",
+        "ao_noindex",
+    }
+)
+# Prefix matches (case-insensitive) — cover whole tracker families.
+_TRACKING_PARAM_PREFIXES = ("utm_", "oly_", "pk_", "piwik_", "matomo_", "ga_", "vero_")
+
+
+def strip_tracking_params(url: str) -> str:
+    """Drop per-recipient / campaign tracking query params from `url`,
+    preserving the rest of the query (order kept). Returns the input
+    unchanged when there's nothing to strip. Never raises."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    if not parsed.query:
+        return url
+    kept = []
+    dropped = False
+    for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+        kl = k.lower()
+        if kl in _TRACKING_PARAMS_EXACT or kl.startswith(_TRACKING_PARAM_PREFIXES):
+            dropped = True
+            continue
+        kept.append((k, v))
+    if not dropped:
+        return url
+    return urlunparse(parsed._replace(query=urlencode(kept)))
+
+
 def _is_denied(url: str) -> bool:
     """True if the URL should be skipped entirely.
 
@@ -465,6 +537,12 @@ def extract_crawlable_urls(body_text: str, labels: object = None) -> list[str]:
         # dedups two emails that wrap the same target under different tokens,
         # and lets the denylist judge the actual destination.
         candidate = unwrap_tracker_url(candidate)
+        # Strip per-recipient / campaign tracking tokens (utm_*, mc_eid,
+        # mkt_tok, gclid, …) BEFORE dedup + storing: the crawler later fetches
+        # exactly this stored URL, so a token left on here would leak the
+        # recipient to the origin at crawl time. Stripping also dedups the
+        # same article linked to different recipients under different tokens.
+        candidate = strip_tracking_params(candidate)
         if candidate in seen:
             continue
         if _is_denied(candidate):
