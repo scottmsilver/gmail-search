@@ -392,6 +392,28 @@ def _crawl_proxy() -> str | None:
     return p or None
 
 
+def _crawl_proxy_config() -> dict | None:
+    """The same egress proxy as `_crawl_proxy()`, in the dict shape crawl4ai's
+    `BrowserConfig(proxy_config=...)` wants — the bare `proxy=` kwarg is
+    deprecated and slated for removal (after which the browser tier would
+    silently stop using the proxy). None when GMAIL_CRAWL_PROXY is unset."""
+    url = _crawl_proxy()
+    if not url:
+        return None
+    from urllib.parse import urlsplit  # noqa: PLC0415
+
+    parts = urlsplit(url)
+    server = f"{parts.scheme}://{parts.hostname}"
+    if parts.port:
+        server += f":{parts.port}"
+    cfg: dict = {"server": server}
+    if parts.username:
+        cfg["username"] = parts.username
+    if parts.password:
+        cfg["password"] = parts.password
+    return cfg
+
+
 def build_http_client(timeout_s: float = _DEFAULT_TIMEOUT_S):
     """Pooled httpx client for the HTTP-first path. Built ONCE per crawl
     pass and shared across every URL: keep-alive + HTTP/2 mean repeated
@@ -974,7 +996,7 @@ async def run(
         verbose=False,
         light_mode=True,
         text_mode=True,
-        proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
+        proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
         extra_args=[
             # Chromium refuses to run as root inside containers / some
             # CI — these flags match what crawl4ai's own docs recommend.
@@ -1149,7 +1171,7 @@ async def run_continuous(
         verbose=False,
         light_mode=True,
         text_mode=True,
-        proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
+        proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
         extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
     )
     try:
@@ -1200,7 +1222,7 @@ def _self_test() -> None:
             verbose=False,
             light_mode=True,
             text_mode=True,
-            proxy=_crawl_proxy(),  # None → direct; route the browser tier through egress too
+            proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
             extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         async with AsyncWebCrawler(config=browser_config) as crawler:
