@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "v6"
 DEFAULT_MODEL = f"{get_backend().model_id}+{PROMPT_VERSION}"
 
+# A message that keeps failing to summarize is excluded from the work queue
+# after this many recorded failures, and between failures it backs off
+# exponentially (2^attempts hours). Without this, the selector re-picked a
+# permanently-failing message every pass forever — one un-encodable message
+# reached 71,111 attempts, 31s each, blocking all real progress. Mirrors the
+# crawl lane's attempt-cap + backoff. Cleared failures re-enter the queue.
+_MAX_SUMMARY_ATTEMPTS = 6
+
 # Budget math against vLLM's 8192-token context window (see
 # gmail_search/llm/vllm.py). Measured ratio varies by content:
 #   - "clean" prose: 0.30-0.35 tokens/char
@@ -608,9 +616,17 @@ def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str)
         FROM messages m
         LEFT JOIN message_summaries s
           ON s.message_id = m.id AND s.model = %s
+        LEFT JOIN summary_failures f
+          ON f.message_id = m.id AND f.user_id = m.user_id
         WHERE s.message_id IS NULL
           AND m.user_id = %s
           {inbox_clause}
+          -- Skip messages that keep failing: none yet (f IS NULL), or under the
+          -- attempt cap AND past their exponential backoff window. Stops a
+          -- single un-summarizable message from being re-selected every pass.
+          AND (f.message_id IS NULL
+               OR (f.attempts < %s
+                   AND f.last_seen < now() - (interval '1 hour' * power(2, f.attempts))))
         ORDER BY
           -- Frontfill wins over backfill: anything received in the
           -- last 24h (i.e. what `watch` / `sync_new_messages` just
@@ -621,7 +637,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str)
           (m.labels LIKE '%%"STARRED"%%' OR m.labels LIKE '%%"IMPORTANT"%%') DESC,
           m.date DESC
     """
-    params: list = [model, user_id]
+    params: list = [model, user_id, _MAX_SUMMARY_ATTEMPTS]
     if limit:
         sql += " LIMIT %s"
         params.append(limit)
@@ -770,6 +786,16 @@ def backfill(
 
         user_id = resolve_write_user_id(conn)
     pending = _messages_needing_summary(conn, model, limit, user_id)
+    # Release the read snapshot NOW. `pending` (and its attachment text) is
+    # fully materialised into Python above, so nothing below reads from this
+    # transaction. Without this commit the work-selector SELECT's snapshot
+    # stays open — idle-in-transaction — across the FIRST LLM round-trip in
+    # the fan-out below (~10-20s per call), pinning the vacuum horizon on
+    # every pass and (with two supervised daemons looping) keeping an ~20s
+    # transaction open almost continuously. Each `_persist` opens its own
+    # short write transaction and commits it, so per-message durability is
+    # unchanged.
+    conn.commit()
     total = len(pending)
     if total == 0:
         conn.close()
