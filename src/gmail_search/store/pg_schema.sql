@@ -548,6 +548,10 @@ END $$;
 -- declare here because they're index-creation-on-empty-or-new tables
 -- that complete in microseconds.
 CREATE INDEX IF NOT EXISTS idx_messages_user_date          ON messages          (user_id, date DESC);
+-- Serves the summarize work-selector's `ORDER BY m.date DESC` over INBOX mail
+-- directly (partial + matching sort key), so it walks newest-first and stops
+-- at LIMIT instead of seq-scanning + sorting the whole mailbox each pass.
+CREATE INDEX IF NOT EXISTS idx_messages_summarize_inbox     ON messages          (user_id, date DESC) WHERE labels LIKE '%"INBOX"%';
 CREATE INDEX IF NOT EXISTS idx_embeddings_user             ON embeddings        (user_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_user            ON attachments       (user_id);
 CREATE INDEX IF NOT EXISTS idx_costs_user_ts               ON costs             (user_id, timestamp DESC);
