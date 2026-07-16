@@ -1511,7 +1511,14 @@ def supervise(ctx, interval, restart_delay):
         # freshness on new mail) instead of every embed batch.
         {
             "key": "reindex",
-            "argv": ["reindex", "--loop", "--quantum", "60", "--min-new", "10000", "--max-age", "900"],
+            # --max-age 3600 (was 900): the freshness timer forces a full ScaNN
+            # k-means rebuild of the tail shard even for a handful of new
+            # embeddings. At 900s that fired every 15 min per user (~42K-vector
+            # kmeans each time); 3600s cuts that 4x. New mail stays keyword-
+            # searchable via bm25 immediately; only vector search waits up to 1h.
+            # (The real fix — a brute-force hot tail so new mail is instantly
+            # vector-searchable without a retrain — is tracked separately.)
+            "argv": ["reindex", "--loop", "--quantum", "60", "--min-new", "10000", "--max-age", "3600"],
             "log_suffix": "reindex.log",
         },
         # Proposition (atomic-fact) extraction for new mail — decoupled like

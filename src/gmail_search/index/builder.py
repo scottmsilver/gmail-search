@@ -60,6 +60,27 @@ def _write_empty_index(index_dir: Path) -> None:
     (index_dir / "ids.json").write_text("[]")
 
 
+def _scann_training_threads() -> int:
+    """Cap ScaNN's k-means training parallelism so a rebuild can't pin every
+    core. ScaNN defaults to one training thread per core (20 on this box);
+    with two per-user reindex daemons rebuilding, that's up to 40 threads
+    fighting 20 cores — load spiked to ~6x and starved Postgres's
+    connection-accept path, so `psycopg.connect()` hit `connection timeout
+    expired` and the reindex daemon crash-looped. Default to ~1/3 of the cores
+    (min 1) so a rebuild always leaves headroom; override with
+    GMS_SCANN_TRAINING_THREADS.
+    """
+    import os
+
+    override = os.environ.get("GMS_SCANN_TRAINING_THREADS", "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    return max(1, (os.cpu_count() or 4) // 3)
+
+
 def _build_scann_from_vectors(
     ids: list[int],
     vectors: np.ndarray,
@@ -109,6 +130,7 @@ def _build_scann_from_vectors(
     num_leaves = min(num_leaves, len(ids))
 
     builder = scann.scann_ops_pybind.builder(vectors, 10, "dot_product")
+    builder = builder.set_n_training_threads(_scann_training_threads())
 
     if len(ids) >= 100:
         builder = builder.tree(
