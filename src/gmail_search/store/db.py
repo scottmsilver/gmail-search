@@ -184,6 +184,11 @@ _INTERNAL_TABLES = {
     # MCP OAuth provider state (hashed token/code rows + client regs).
     # Auth infrastructure — the LLM must never query it.
     "mcp_oauth_state",
+    # Propositions (find_facts): LLM-extracted fact rows + idempotency
+    # marker. Served through the dedicated find_facts tool; the analyst
+    # reader role has no grant on them.
+    "propositions",
+    "prop_processed",
 }
 
 _SCHEMA_TABLE_RE = re.compile(

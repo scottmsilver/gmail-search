@@ -91,7 +91,11 @@ def owner_string() -> str:
 
 
 def ensure_table(conn) -> None:
-    """Create the prototype `propositions` table + indexes if absent."""
+    """Create the `propositions` table + indexes if absent.
+
+    Canonical DDL now lives in pg_schema.sql (applied by init_db, where the
+    RLS loop covers it); this self-provisioning copy must stay in sync and
+    exists so standalone runs work before init_db has been applied."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS propositions (

@@ -181,6 +181,41 @@ CREATE INDEX IF NOT EXISTS idx_summary_failures_last_seen
     ON summary_failures (last_seen DESC);
 
 -- ─────────────────────────────────────────────────────────────────────
+-- Propositions (find_facts hybrid retrieval)
+-- ─────────────────────────────────────────────────────────────────────
+-- LLM-extracted atomic facts: one message → N short fact rows, each with
+-- its own embedding. Served only through the dedicated find_facts path —
+-- NOT granted to gmail_search_reader, and listed in _INTERNAL_TABLES so
+-- the LLM SQL endpoint never sees it. DDL lived in propositions.py (lazy
+-- ensure_table) until 2026-07-17; moved here so the RLS loop below
+-- covers it. propositions.py keeps identical IF NOT EXISTS
+-- self-provisioning for standalone runs — keep the two in sync.
+
+CREATE TABLE IF NOT EXISTS propositions (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    thread_id   TEXT,
+    text        TEXT NOT NULL,
+    embedding   BYTEA,
+    model       TEXT NOT NULL,
+    date        TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_props_user ON propositions(user_id);
+CREATE INDEX IF NOT EXISTS idx_props_msg ON propositions(message_id);
+CREATE INDEX IF NOT EXISTS props_bm25_idx
+    ON propositions USING bm25 (id, text) WITH (key_field='id');
+
+-- Idempotency marker: a message is propositionized only until it has
+-- been successfully processed once.
+CREATE TABLE IF NOT EXISTS prop_processed (
+    user_id text,
+    message_id text,
+    PRIMARY KEY(user_id, message_id)
+);
+
+-- ─────────────────────────────────────────────────────────────────────
 -- Conversations + chat history
 -- ─────────────────────────────────────────────────────────────────────
 
@@ -409,10 +444,6 @@ CREATE INDEX IF NOT EXISTS attachments_bm25_idx
 -- ─────────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_message_topics_topic ON message_topics (topic_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations (updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_conv_messages_conv ON conversation_messages (conversation_id, seq);
-CREATE INDEX IF NOT EXISTS idx_model_battles_created ON model_battles (created_at);
-CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments (message_id);
 
 -- Reconciler watermark (`WHERE history_id > $N`) — without this the
 -- drift-detector daemon seq-scans all messages every pass.
@@ -420,6 +451,21 @@ CREATE INDEX IF NOT EXISTS idx_messages_history_id ON messages (history_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_message_id ON embeddings (message_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_lookup
     ON embeddings (message_id, attachment_id, chunk_type, model);
+
+-- Supports the FK from embeddings.attachment_id → attachments.id so that
+-- DELETE FROM attachments is O(log N) instead of a 546k-row seq scan per
+-- deleted row (measured: a 10k-row batched DELETE went ~30min → ~30s).
+-- Partial (attachment_id IS NOT NULL) keeps it small since most
+-- embeddings are on messages. Lived in pg_index_followups.sql, which
+-- nothing ever applied — folded in 2026-07-17 so fresh installs get it.
+CREATE INDEX IF NOT EXISTS idx_embeddings_attachment_id
+    ON embeddings (attachment_id) WHERE attachment_id IS NOT NULL;
+
+-- Supports `... FROM embeddings WHERE model = $1 ORDER BY id` used by the
+-- restricted-vector-search path; idx_embeddings_lookup has model as its
+-- 4th column so it can't serve that lookup. Same fold-in as above.
+CREATE INDEX IF NOT EXISTS idx_embeddings_model_id
+    ON embeddings (model, id);
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Multi-tenant identity (Phase 1 of docs/notes/PER_USER_LOGIN_2026-04-27.md)
@@ -446,7 +492,6 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
 -- Idempotent migration for installs that already created `users` with
 -- the original NOT NULL google_sub. Skipped silently on fresh installs
 -- (column is already nullable) and on re-runs (same).
@@ -559,7 +604,24 @@ CREATE INDEX IF NOT EXISTS idx_thread_summary_user         ON thread_summary    
 CREATE INDEX IF NOT EXISTS idx_message_summaries_user      ON message_summaries (user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_user_updated  ON conversations    (user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_sessions_user         ON agent_sessions   (user_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_model_battles_user          ON model_battles    (user_id, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────────────
+-- Index cleanup (2026-07-17 audit)
+-- ─────────────────────────────────────────────────────────────────────
+-- Exact/prefix duplicates of constraint-implied unique indexes
+-- (idx_conv_messages_conv ↔ UNIQUE(conversation_id, seq); idx_users_email
+-- ↔ email UNIQUE; idx_attachments_message_id ↔ prefix of
+-- UNIQUE(message_id, filename)) plus indexes dead since multitenancy
+-- (idx_conversations_updated superseded by idx_conversations_user_updated;
+-- the two model_battles indexes serve no read path — live pg_stat showed
+-- 0–1 scans). DROPs live here, not in a migration file, because init_db
+-- applies this file on every start so existing installs converge.
+DROP INDEX IF EXISTS idx_conversations_updated;
+DROP INDEX IF EXISTS idx_conv_messages_conv;
+DROP INDEX IF EXISTS idx_model_battles_created;
+DROP INDEX IF EXISTS idx_model_battles_user;
+DROP INDEX IF EXISTS idx_attachments_message_id;
+DROP INDEX IF EXISTS idx_users_email;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- Phase 3g — Row-Level Security for the /api/sql analyst sandbox
@@ -642,6 +704,8 @@ BEGIN
         'message_summaries',
         'message_topics',
         'model_battles',
+        'prop_processed',
+        'propositions',
         'summary_failures',
         'term_aliases',
         'thread_summary',
