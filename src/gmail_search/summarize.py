@@ -627,15 +627,18 @@ def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str)
           AND (f.message_id IS NULL
                OR (f.attempts < %s
                    AND f.last_seen < now() - (interval '1 hour' * power(2, f.attempts))))
-        ORDER BY
-          -- Frontfill wins over backfill: anything received in the
-          -- last 24h (i.e. what `watch` / `sync_new_messages` just
-          -- pulled) goes to the top of the queue, ahead of the
-          -- 173k-message v6 re-backfill that's still grinding.
-          (m.date::timestamptz > NOW() - INTERVAL '1 day') DESC,
-          (m.labels LIKE '%%"INBOX"%%') DESC,
-          (m.labels LIKE '%%"STARRED"%%' OR m.labels LIKE '%%"IMPORTANT"%%') DESC,
-          m.date DESC
+        -- Newest mail first. Plain `date DESC` is served DIRECTLY by
+        -- idx_messages_summarize_inbox (user_id, date DESC) WHERE INBOX
+        -- (date is text but ISO-8601 UTC, so lexical order == chronological),
+        -- so the planner walks the index newest-first and stops at LIMIT
+        -- instead of seq-scanning + sorting the whole mailbox every pass.
+        -- Measured: ~554ms (Seq Scan + 22MB Sort) -> ~0.2ms when work is
+        -- pending / ~273ms when caught up. The previous computed ORDER BY
+        -- (last-24h + starred/important sub-priorities) forced a full sort and
+        -- could not be indexed — it casts `date` and calls now(). Recent-first
+        -- is the dominant intent and is preserved; the marginal sub-priorities
+        -- are dropped deliberately for the index win.
+        ORDER BY m.date DESC
     """
     params: list = [model, user_id, _MAX_SUMMARY_ATTEMPTS]
     if limit:

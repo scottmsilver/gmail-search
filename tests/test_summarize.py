@@ -390,3 +390,52 @@ def test_batch_with_empty_input():
     with _unused_client() as client:
         out = summarize_batch(client, [], backend)
     assert out == {}
+
+
+def test_selector_orders_newest_first_and_excludes(db_backend, monkeypatch):
+    """`_messages_needing_summary` returns pending INBOX mail newest-first and
+    excludes messages that are already summarized, failed past the cap, or not
+    in INBOX. Newest-first + INBOX scope is what idx_messages_summarize_inbox
+    serves; this locks the behaviour the index optimization relies on."""
+    from gmail_search.store.db import get_connection, init_db
+    from gmail_search.summarize import _MAX_SUMMARY_ATTEMPTS, _messages_needing_summary
+
+    monkeypatch.setenv("GMS_SUMMARIZE_INBOX_ONLY", "1")
+    init_db(db_backend["db_path"])
+    conn = get_connection(db_backend["db_path"])
+    model = "fake-model+v9"
+
+    conn.execute("INSERT INTO users (id, email) VALUES ('uSel', 'sel@t.local') ON CONFLICT DO NOTHING")
+
+    def msg(mid, date, labels='["INBOX"]'):
+        conn.execute(
+            """INSERT INTO messages (id, thread_id, from_addr, to_addr, subject,
+                                     body_text, date, labels, user_id)
+               VALUES (%s, 't', 'a@x.com', 'b@x.com', 's', 'body', %s, %s, 'uSel')""",
+            (mid, date, labels),
+        )
+
+    # Newest → oldest. Expected pending order: m_new, m_mid.
+    msg("m_fail", "2026-01-05T00:00:00+00:00")  # newest but failed past cap → excluded
+    msg("m_new", "2026-01-04T00:00:00+00:00")  # pending, should be 1st
+    msg("m_mid", "2026-01-03T00:00:00+00:00")  # pending, should be 2nd
+    msg("m_done", "2026-01-02T00:00:00+00:00")  # already summarized → excluded
+    msg("m_arch", "2026-01-06T00:00:00+00:00", labels='["CATEGORY_UPDATES"]')  # not INBOX → excluded
+    # m_done already has a summary under `model`.
+    conn.execute(
+        "INSERT INTO message_summaries (message_id, summary, model, user_id) VALUES ('m_done', 'x', %s, 'uSel')",
+        (model,),
+    )
+    # m_fail is over the attempt cap.
+    conn.execute(
+        """INSERT INTO summary_failures (message_id, model, error, attempts, user_id)
+           VALUES ('m_fail', %s, 'boom', %s, 'uSel')""",
+        (model, _MAX_SUMMARY_ATTEMPTS),
+    )
+    conn.commit()
+
+    rows = _messages_needing_summary(conn, model, limit=None, user_id="uSel")
+    ids = [r["id"] for r in rows]
+    conn.close()
+
+    assert ids == ["m_new", "m_mid"], f"expected newest-first pending INBOX only, got {ids}"
