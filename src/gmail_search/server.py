@@ -1452,8 +1452,17 @@ def create_app(
     # Gmail's own profile (messagesTotal), cached 10 min per user; the
     # ingest rate is derived from successive polls (samples ≥30 s apart)
     # so the ETA needs no persistent state.
+    # Two entries per active user; the cap guards a long-lived multi-tenant
+    # process against unbounded growth from churned users (codex audit).
+    _SYNC_CACHE_CAP = 4096
     _sync_gmail_total: dict[str, tuple[float, int]] = {}
     _sync_rate_sample: dict[str, tuple[float, int]] = {}
+
+    def _sync_cache_put(cache: dict[str, tuple[float, int]], key: str, value: tuple[float, int]) -> None:
+        cache[key] = value
+        if len(cache) > _SYNC_CACHE_CAP:
+            for stale in sorted(cache, key=lambda k: cache[k][0])[: len(cache) - _SYNC_CACHE_CAP]:
+                cache.pop(stale, None)
 
     @app.get("/api/users/me/sync-status")
     def api_sync_status(user_id: str = Depends(require_user_id)):
@@ -1478,8 +1487,10 @@ def create_app(
             jobs = [
                 {"job": r["job_id"].split(":", 1)[0], "status": r["status"], "detail": r["detail"]}
                 for r in conn.execute(
-                    "SELECT job_id, status, detail FROM job_progress WHERE job_id LIKE %s ORDER BY job_id",
-                    (f"%:{user_id}",),
+                    # Escape LIKE wildcards so a user_id can never widen the
+                    # tenant filter (defense in depth; ids are server-generated).
+                    "SELECT job_id, status, detail FROM job_progress WHERE job_id LIKE %s ESCAPE '\\' ORDER BY job_id",
+                    ("%:" + user_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"),),
                 ).fetchall()
             ]
         finally:
@@ -1500,7 +1511,7 @@ def create_app(
                 svc = build_gmail_service(data_dir, email=urow["email"])
                 prof = svc.users().getProfile(userId="me").execute()
                 total = int(prof.get("messagesTotal") or 0)
-                _sync_gmail_total[user_id] = (now, total)
+                _sync_cache_put(_sync_gmail_total, user_id, (now, total))
             except Exception as exc:  # noqa: BLE001 — progress page must not 500 on broker blips
                 logger.warning("sync-status: Gmail profile fetch failed for %s: %s", user_id, exc)
                 total = cached[1] if cached else None
@@ -1512,9 +1523,9 @@ def create_app(
         if prev and now - prev[0] >= 30:
             if synced > prev[1]:
                 rate_per_min = (synced - prev[1]) / (now - prev[0]) * 60
-            _sync_rate_sample[user_id] = (now, synced)
+            _sync_cache_put(_sync_rate_sample, user_id, (now, synced))
         elif prev is None:
-            _sync_rate_sample[user_id] = (now, synced)
+            _sync_cache_put(_sync_rate_sample, user_id, (now, synced))
 
         remaining = max(total - synced, 0) if total is not None else None
         eta_minutes = round(remaining / rate_per_min) if remaining and rate_per_min and rate_per_min > 0 else None
