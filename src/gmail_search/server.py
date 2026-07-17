@@ -1447,6 +1447,98 @@ def create_app(
             for r in rows
         ]
 
+    # ── initial-sync progress (onboarding UX) ─────────────────────────
+    # Polled by the web app's SyncProgressCard. The denominator comes from
+    # Gmail's own profile (messagesTotal), cached 10 min per user; the
+    # ingest rate is derived from successive polls (samples ≥30 s apart)
+    # so the ETA needs no persistent state.
+    _sync_gmail_total: dict[str, tuple[float, int]] = {}
+    _sync_rate_sample: dict[str, tuple[float, int]] = {}
+
+    @app.get("/api/users/me/sync-status")
+    def api_sync_status(user_id: str = Depends(require_user_id)):
+        import time as _t
+
+        conn = get_connection(db_path)
+        try:
+            urow = conn.execute("SELECT email, sync_enabled FROM users WHERE id = %s", (user_id,)).fetchone()
+            if urow is None:
+                return JSONResponse({"error": "no such user"}, status_code=404)
+            synced = conn.execute("SELECT count(*) FROM messages WHERE user_id = %s", (user_id,)).fetchone()[0]
+            embedded = conn.execute(
+                "SELECT count(DISTINCT message_id) FROM embeddings WHERE user_id = %s AND chunk_type = 'message'",
+                (user_id,),
+            ).fetchone()[0]
+            summarized = conn.execute(
+                "SELECT count(*) FROM message_summaries WHERE user_id = %s", (user_id,)
+            ).fetchone()[0]
+            cost = conn.execute(
+                "SELECT coalesce(sum(estimated_cost_usd), 0) FROM costs WHERE user_id = %s", (user_id,)
+            ).fetchone()[0]
+            jobs = [
+                {"job": r["job_id"].split(":", 1)[0], "status": r["status"], "detail": r["detail"]}
+                for r in conn.execute(
+                    "SELECT job_id, status, detail FROM job_progress WHERE job_id LIKE %s ORDER BY job_id",
+                    (f"%:{user_id}",),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+        # Denominator: Gmail's own message count. Best-effort — a broker
+        # hiccup must not break the progress page, so fall back to the
+        # last cached value (or None, which the UI renders as "counting…").
+        now = _t.time()
+        total = None
+        cached = _sync_gmail_total.get(user_id)
+        if cached and now - cached[0] < 600:
+            total = cached[1]
+        else:
+            try:
+                from gmail_search.gmail.auth import build_gmail_service
+
+                svc = build_gmail_service(data_dir, email=urow["email"])
+                prof = svc.users().getProfile(userId="me").execute()
+                total = int(prof.get("messagesTotal") or 0)
+                _sync_gmail_total[user_id] = (now, total)
+            except Exception as exc:  # noqa: BLE001 — progress page must not 500 on broker blips
+                logger.warning("sync-status: Gmail profile fetch failed for %s: %s", user_id, exc)
+                total = cached[1] if cached else None
+
+        # Ingest rate from successive polls (the UI polls every few seconds;
+        # the sample only advances every 30 s so the rate window is stable).
+        rate_per_min = None
+        prev = _sync_rate_sample.get(user_id)
+        if prev and now - prev[0] >= 30:
+            if synced > prev[1]:
+                rate_per_min = (synced - prev[1]) / (now - prev[0]) * 60
+            _sync_rate_sample[user_id] = (now, synced)
+        elif prev is None:
+            _sync_rate_sample[user_id] = (now, synced)
+
+        remaining = max(total - synced, 0) if total is not None else None
+        eta_minutes = round(remaining / rate_per_min) if remaining and rate_per_min and rate_per_min > 0 else None
+        downloading = any(j["job"] in ("update", "watch") and j["status"] == "running" for j in jobs)
+        if remaining is not None and remaining <= 0 and embedded >= synced * 0.99:
+            state = "ready"
+        elif downloading or (remaining or 0) > 0 or embedded < synced:
+            state = "syncing"
+        else:
+            state = "ready"
+
+        return {
+            "state": state,
+            "sync_enabled": bool(urow["sync_enabled"]),
+            "messages_synced": synced,
+            "messages_total": total,
+            "messages_embedded": embedded,
+            "messages_summarized": summarized,
+            "rate_per_min": round(rate_per_min, 1) if rate_per_min else None,
+            "eta_minutes": eta_minutes,
+            "cost_usd": round(float(cost), 2),
+            "jobs": jobs,
+        }
+
     @app.get("/api/message/{message_id}")
     def api_message(message_id: str, user_id: str = Depends(require_user_id)):
         conn = get_connection(db_path)

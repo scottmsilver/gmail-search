@@ -7,6 +7,7 @@ import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { AssistantChatTransport, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 
 import { ConversationSidebar } from "@/components/ConversationSidebar";
+import { SyncProgressCard } from "@/components/SyncProgressCard";
 import { ThemeEffect } from "@/components/ThemeEffect";
 import { Thread } from "@/components/Thread";
 import { ThreadDrawer } from "@/components/ThreadDrawer";
@@ -144,13 +145,16 @@ export default function Page() {
       <ThemeEffect />
       <SidebarToggle />
       <ConversationSidebarHost activeId={conversationId} onNew={startNew} />
-      <div className="flex-1 min-w-0">
-        <AssistantRuntimeProvider runtime={runtime}>
-          <ThreadDrawerProvider>
-            <Thread />
-            <DrawerHost />
-          </ThreadDrawerProvider>
-        </AssistantRuntimeProvider>
+      <div className="flex-1 min-w-0 flex flex-col">
+        <SyncProgressCard banner />
+        <div className="flex-1 min-h-0">
+          <AssistantRuntimeProvider runtime={runtime}>
+            <ThreadDrawerProvider>
+              <Thread />
+              <DrawerHost />
+            </ThreadDrawerProvider>
+          </AssistantRuntimeProvider>
+        </div>
       </div>
     </div>
   );

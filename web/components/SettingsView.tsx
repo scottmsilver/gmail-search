@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SyncProgressCard } from "@/components/SyncProgressCard";
 import type { CorpusStatus, JobsRunningResponse, RunningJob } from "@/lib/backend";
 import { formatSmartDate } from "@/lib/datetime";
 import { useShowSearchDebug } from "@/lib/prefs";
@@ -368,6 +369,8 @@ export const SettingsView = () => {
           {error}
         </div>
       )}
+
+      <SyncProgressCard />
 
       <BrokerGmailCard />
 
