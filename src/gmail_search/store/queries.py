@@ -92,32 +92,72 @@ def recompute_thread_summary(
         except Exception:
             continue
     from_addrs = list(row["from_addrs"] or [])
+    upsert_thread_summary(
+        conn,
+        thread_id=thread_id,
+        subject=row["subject"] or fallback_subject,
+        participants_json=json.dumps(from_addrs),
+        all_from_addrs_json=json.dumps(from_addrs),
+        all_labels_json=json.dumps(sorted(labels)),
+        message_count=row["message_count"],
+        date_first=row["date_first"],
+        date_last=row["date_last"],
+        user_id=uid,
+    )
+    return True
+
+
+def upsert_thread_summary(
+    conn,
+    *,
+    thread_id: str,
+    subject: str,
+    participants_json: str,
+    all_from_addrs_json: str,
+    all_labels_json: str,
+    message_count: int,
+    date_first: str,
+    date_last: str,
+    user_id: str,
+) -> None:
+    """Single source of truth for the thread_summary UPSERT — used by both
+    the incremental hot path above and the full rebuild in db.py.
+
+    The DO UPDATE only fires (and only then writes a new row version) when
+    at least one column actually changed, so unchanged threads — the vast
+    majority each reconcile cycle — produce no write and no dead tuple."""
     conn.execute(
         """INSERT INTO thread_summary
              (thread_id, subject, participants, all_from_addrs, all_labels,
               message_count, date_first, date_last, user_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT(thread_id, user_id) DO UPDATE SET
+           ON CONFLICT (thread_id, user_id) DO UPDATE SET
              subject = excluded.subject,
              participants = excluded.participants,
              all_from_addrs = excluded.all_from_addrs,
              all_labels = excluded.all_labels,
              message_count = excluded.message_count,
              date_first = excluded.date_first,
-             date_last = excluded.date_last""",
+             date_last = excluded.date_last
+           WHERE thread_summary.subject          IS DISTINCT FROM excluded.subject
+              OR thread_summary.participants     IS DISTINCT FROM excluded.participants
+              OR thread_summary.all_from_addrs   IS DISTINCT FROM excluded.all_from_addrs
+              OR thread_summary.all_labels       IS DISTINCT FROM excluded.all_labels
+              OR thread_summary.message_count    IS DISTINCT FROM excluded.message_count
+              OR thread_summary.date_first       IS DISTINCT FROM excluded.date_first
+              OR thread_summary.date_last        IS DISTINCT FROM excluded.date_last""",
         (
             thread_id,
-            row["subject"] or fallback_subject,
-            json.dumps(from_addrs),
-            json.dumps(from_addrs),
-            json.dumps(sorted(labels)),
-            row["message_count"],
-            row["date_first"],
-            row["date_last"],
-            uid,
+            subject,
+            participants_json,
+            all_from_addrs_json,
+            all_labels_json,
+            message_count,
+            date_first,
+            date_last,
+            user_id,
         ),
     )
-    return True
 
 
 def get_message(conn, message_id: str, *, user_id: Optional[str] = None) -> Message | None:

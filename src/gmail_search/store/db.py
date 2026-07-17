@@ -332,44 +332,23 @@ def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> i
         for label in json.loads(r["labels"]):
             t["all_labels"].add(label)
 
+    from gmail_search.store.queries import upsert_thread_summary
+
     for tid, t in threads.items():
         participants = list(dict.fromkeys(t["from_addrs"]))  # ordered unique
-        # UPSERT with a no-op guard: the DO UPDATE only fires (and only then
-        # writes a new row version) when at least one column actually changed.
-        # Unchanged threads — the vast majority each cycle — produce no write
-        # and therefore no dead tuple. Computed values are identical to the
-        # previous wipe-and-reinsert, so search ranking is unaffected.
-        conn.execute(
-            """INSERT INTO thread_summary
-               (thread_id, subject, participants, all_from_addrs, all_labels,
-                message_count, date_first, date_last, user_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (thread_id, user_id) DO UPDATE SET
-                 subject = excluded.subject,
-                 participants = excluded.participants,
-                 all_from_addrs = excluded.all_from_addrs,
-                 all_labels = excluded.all_labels,
-                 message_count = excluded.message_count,
-                 date_first = excluded.date_first,
-                 date_last = excluded.date_last
-               WHERE thread_summary.subject        IS DISTINCT FROM excluded.subject
-                  OR thread_summary.participants    IS DISTINCT FROM excluded.participants
-                  OR thread_summary.all_from_addrs  IS DISTINCT FROM excluded.all_from_addrs
-                  OR thread_summary.all_labels      IS DISTINCT FROM excluded.all_labels
-                  OR thread_summary.message_count   IS DISTINCT FROM excluded.message_count
-                  OR thread_summary.date_first      IS DISTINCT FROM excluded.date_first
-                  OR thread_summary.date_last       IS DISTINCT FROM excluded.date_last""",
-            (
-                tid,
-                t["subject"],
-                json.dumps(participants),
-                json.dumps(t["from_addrs"]),
-                json.dumps(sorted(t["all_labels"])),
-                len(t["dates"]),
-                t["dates"][0],
-                t["dates"][-1],
-                t["user_id"],
-            ),
+        # Computed values are identical to the previous wipe-and-reinsert,
+        # so search ranking is unaffected.
+        upsert_thread_summary(
+            conn,
+            thread_id=tid,
+            subject=t["subject"],
+            participants_json=json.dumps(participants),
+            all_from_addrs_json=json.dumps(t["from_addrs"]),
+            all_labels_json=json.dumps(sorted(t["all_labels"])),
+            message_count=len(t["dates"]),
+            date_first=t["dates"][0],
+            date_last=t["dates"][-1],
+            user_id=t["user_id"],
         )
 
     # Drop summaries for threads that no longer have any messages (deleted /

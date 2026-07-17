@@ -73,3 +73,25 @@ def test_stale_table_doc_is_caught(monkeypatch):
     monkeypatch.setattr("gmail_search.store.db.TABLE_DOCS", bogus)
     with pytest.raises(RuntimeError, match="nonexistent_table"):
         assert_table_docs_cover_schema()
+
+
+def test_mcp_oauth_state_ddl_matches_schema():
+    """mcp_oauth_state DDL deliberately exists in two places: pg_schema.sql
+    (applied by init_db) and mcp_oauth_store._DDL (self-provisioned, since the
+    MCP service can start before init_db has run). Both are CREATE ... IF NOT
+    EXISTS, so if one copy changes and the other doesn't, whichever ran first
+    silently keeps the stale shape. Fail loudly on any divergence instead."""
+    from gmail_search.agents.mcp_oauth_store import _DDL
+    from gmail_search.store.db import _read_pg_schema
+
+    def norm(sql: str) -> str:
+        return " ".join(sql.split())
+
+    schema = norm(_read_pg_schema())
+    statements = [norm(s) for s in _DDL.split(";") if norm(s)]
+    assert statements, "mcp_oauth_store._DDL is unexpectedly empty"
+    for stmt in statements:
+        assert stmt in schema, (
+            "mcp_oauth_store._DDL statement not found verbatim in pg_schema.sql "
+            f"(the two copies have drifted): {stmt[:100]}…"
+        )

@@ -38,15 +38,3 @@ class EmbeddingRecord:
     chunk_text: str | None
     embedding: bytes  # raw float32 blob
     model: str
-
-
-@dataclass
-class CostRecord:
-    id: int | None
-    timestamp: datetime
-    operation: str  # "embed_text", "embed_image"
-    model: str
-    input_tokens: int
-    image_count: int
-    estimated_cost_usd: float
-    message_id: str
