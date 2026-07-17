@@ -81,6 +81,17 @@ def _scann_training_threads() -> int:
     return max(1, (os.cpu_count() or 4) // 3)
 
 
+def _truncate_normalize(vectors: np.ndarray, ah_dim: int) -> np.ndarray:
+    """MRL truncation: slice to ah_dim then re-normalize so cosine
+    similarity (computed via dot_product on unit-normalized vectors)
+    stays well-defined for the truncated subspace. Shared by the full
+    build and the tail-upsert delta path so both feed ScaNN identically."""
+    vectors = vectors[:, :ah_dim].astype(np.float32, copy=True)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return vectors / norms
+
+
 def _build_scann_from_vectors(
     ids: list[int],
     vectors: np.ndarray,
@@ -89,6 +100,7 @@ def _build_scann_from_vectors(
     ah_dim: int | None = None,
     reorder_pool: int = 100,
     skip_reorder: bool = False,
+    with_docids: bool = False,
 ) -> None:
     """The ScaNN-specific part of index building. Takes vectors as any
     numpy-array-like (regular array or memmap) and produces a serialized
@@ -115,13 +127,7 @@ def _build_scann_from_vectors(
     (~2 GB RAM at 1.35M x 384d) and cuts AH-stage latency ~35%.
     """
     if ah_dim is not None and ah_dim < vectors.shape[1]:
-        # MRL truncation: slice to ah_dim then re-normalize so cosine
-        # similarity (computed via dot_product on unit-normalized
-        # vectors) stays well-defined for the truncated subspace.
-        vectors = vectors[:, :ah_dim].astype(np.float32, copy=True)
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        vectors = vectors / norms
+        vectors = _truncate_normalize(vectors, ah_dim)
 
     dimensions = vectors.shape[1]
     logger.info(f"Building ScaNN index with {len(ids)} vectors, {dimensions} dims, " f"reorder_pool={reorder_pool}")
@@ -144,7 +150,12 @@ def _build_scann_from_vectors(
     else:
         builder = builder.score_brute_force()
 
-    searcher = builder.build()
+    # `with_docids`: register each vector under docid str(embedding_id).
+    # Docids are what make a shard MUTABLE — ScaNN's `upsert` (the delta
+    # path's cheap insert, no k-means retrain) requires them. The searcher
+    # detects docid-mode shards at query time (string neighbors) and maps
+    # int(docid) directly instead of positional ids.json lookup.
+    searcher = builder.build(docids=[str(i) for i in ids]) if with_docids else builder.build()
 
     index_dir.mkdir(parents=True, exist_ok=True)
     searcher.serialize(str(index_dir))
@@ -274,6 +285,7 @@ def _build_one_shard(
     ah_dim: int | None = None,
     reorder_pool: int = 100,
     write_full_corpus: bool = False,
+    with_docids: bool = False,
 ) -> list[int]:
     """Materialize one shard of at-most-shard_size rows into a memmap
     and build a ScaNN index at shard_dir. Returns the shard's id list.
@@ -302,7 +314,13 @@ def _build_one_shard(
         # write_full_corpus == manual-rerank mode: the exact external rerank
         # makes ScaNN's internal reorder stage redundant (see skip_reorder).
         _build_scann_from_vectors(
-            ids, vectors, shard_dir, ah_dim=ah_dim, reorder_pool=reorder_pool, skip_reorder=write_full_corpus
+            ids,
+            vectors,
+            shard_dir,
+            ah_dim=ah_dim,
+            reorder_pool=reorder_pool,
+            skip_reorder=write_full_corpus,
+            with_docids=with_docids,
         )
     except BaseException:
         # Failed shard: never leave a complete-looking corpus file next to
@@ -425,6 +443,11 @@ def build_index_sharded(
         if effective_ah_dim is not None:
             shard_kwargs["ah_dim"] = effective_ah_dim
         shard_kwargs["write_full_corpus"] = manual_rerank
+        # docid-mode shards are MUTABLE: the delta path upserts new vectors
+        # into the tail shard (frozen-partitioner tokenize + AH-quantize, no
+        # k-means retrain). Built into every new shard so the next delta
+        # cycle can take the upsert fast path.
+        shard_kwargs["with_docids"] = True
 
         # Stream the corpus ONE SHARD AT A TIME via keyset pagination on
         # (model, id) — backed by idx_embeddings_model_id. This is the
@@ -531,6 +554,10 @@ def _shard_meta(shard_ids: list[int], shard_idx: int, shard_size: int) -> dict:
         "last_id": shard_ids[-1],
         "count": len(shard_ids),
         "sealed": len(shard_ids) == shard_size,
+        # Built with ScaNN docids → mutable via upsert (delta fast path).
+        # Legacy manifests lack this key; the delta path treats absent as
+        # False and rebuilds the tail once, after which it's docid-mode.
+        "docids": True,
     }
 
 
@@ -558,6 +585,189 @@ def _delta_effective_ah_dim(dimensions, truncate_dim, manual_rerank, ah_dim):
         manual_rerank = False
     eff = ah_dim if manual_rerank else (truncate_dim if truncate_dim and truncate_dim < dimensions else None)
     return eff, manual_rerank
+
+
+# Below this many vectors a shard is built with score_brute_force() (no k-means
+# tree) — see _build_scann_from_vectors. Rebuilding such a tiny shard is cheap,
+# and upsert's whole payoff is skipping the tree retrain, so we only take the
+# upsert fast path once the tail actually carries a trained partitioner.
+_UPSERT_MIN_TAIL = 100
+
+
+def _upsert_tail_shard(
+    conn,
+    model: str,
+    dimensions: int,
+    shard_size: int,
+    *,
+    live_dir: Path,
+    target_dir: Path,
+    tail_meta: dict,
+    sealed_count: int,
+    watermark: int,
+    eff_ah: int | None,
+    manual_rerank: bool,
+    user_id: str | None,
+) -> tuple[list[int], dict] | None:
+    """Extend the live tail shard with new embeddings (id > watermark) via
+    ScaNN's native `upsert` — tokenize the new vectors against the tail's
+    FROZEN k-means partitioner + AH codebook, with NO retrain. This is the
+    whole point of the delta path: the old code rebuilt the open tail (up to
+    shard_size vectors) from PG every cycle, retraining k-means each time; here
+    the per-cycle cost drops to O(new vectors).
+
+    Writes a new tail shard into `target_dir/shard_{sealed_count}`:
+      - load the live tail's ScaNN searcher, upsert the new (docid, vector)s,
+        serialize to the new dir;
+      - ids.json = old tail ids + new ids. Safe because insert-only upsert
+        APPENDS internally (never reorders existing docids), and the searcher
+        resolves docid-mode shards by `int(docid)`, not ids.json position;
+      - corpus_full.f32 (manual-rerank layout) is COPIED forward — not
+        hardlinked; we append the new full-precision rows and must not mutate
+        the live file — keeping row order == ids.json order so the searcher's
+        id→corpus map stays valid.
+
+    Returns (tail_ids, shard_meta) on success. Returns None to tell the caller
+    to fall back to the full tail rebuild (which is always correct) when the
+    fast path doesn't apply or anything looks off: tail already full, new rows
+    would overflow the shard (rebuild seals + spills into fresh shards), a
+    missing/mis-sized corpus, or any ScaNN error.
+    """
+    import shutil  # noqa: PLC0415
+
+    tail_count = int(tail_meta["count"])
+    room = shard_size - tail_count
+    if room <= 0:
+        return None  # tail already full → let the rebuild loop seal it + start fresh
+
+    # Fetch truly-new rows (id > watermark). LIMIT room+1 so we can detect
+    # overflow (more new rows than fit) and defer to the rebuild loop, which
+    # already knows how to seal the tail and spill the rest into new shards.
+    if user_id is None:
+        page = conn.execute(
+            "SELECT id, embedding FROM embeddings WHERE model=%s AND id > %s ORDER BY id LIMIT %s",
+            (model, watermark, room + 1),
+        ).fetchall()
+    else:
+        page = conn.execute(
+            "SELECT id, embedding FROM embeddings WHERE model=%s AND user_id=%s AND id > %s ORDER BY id LIMIT %s",
+            (model, user_id, watermark, room + 1),
+        ).fetchall()
+    if not page:
+        return None  # no new rows (caller already checked new_max>watermark, but be safe)
+    if len(page) > room:
+        return None  # would overflow the shard → rebuild seals + spills
+
+    new_ids = [r["id"] for r in page]
+    new_full = np.empty((len(page), dimensions), dtype=np.float32)
+    for i, r in enumerate(page):
+        new_full[i] = np.frombuffer(r["embedding"], dtype=np.float32)
+
+    live_tail_dir = live_dir / tail_meta["dir"]
+    target_tail_dir = target_dir / f"shard_{sealed_count}"
+
+    try:
+        searcher = scann.scann_ops_pybind.load_searcher(str(live_tail_dir))
+        # Integrity gate: the live tail's actual vector count must match what the
+        # manifest claims. A mismatch means a torn/corrupt live shard — upserting
+        # into it would carry the corruption forward, so bail to a clean rebuild
+        # (nothing written yet; no cleanup needed).
+        live_size = int(searcher.size())
+        if live_size != tail_count:
+            logger.warning(
+                "delta reindex: live tail size %d != manifest count %d — falling back to rebuild",
+                live_size,
+                tail_count,
+            )
+            return None
+        # Match exactly what the full build fed ScaNN: truncate+normalize to the
+        # AH subspace when the index is truncated, else the raw blob vectors.
+        up_vecs = _truncate_normalize(new_full, eff_ah) if eff_ah is not None else new_full
+        searcher.upsert([str(i) for i in new_ids], up_vecs)
+        target_tail_dir.mkdir(parents=True, exist_ok=True)
+        searcher.serialize(str(target_tail_dir))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("delta reindex: tail upsert failed (%s) — falling back to tail rebuild", e)
+        shutil.rmtree(target_tail_dir, ignore_errors=True)
+        return None
+
+    old_tail_ids = json.loads((live_tail_dir / "ids.json").read_text())
+    tail_ids = old_tail_ids + new_ids
+    (target_tail_dir / "ids.json").write_text(json.dumps(tail_ids))
+
+    if manual_rerank:
+        src_corpus = live_tail_dir / CORPUS_SHARD_FILENAME
+        expected = tail_count * dimensions * 4
+        if not src_corpus.is_file() or src_corpus.stat().st_size != expected:
+            logger.warning("delta reindex: tail corpus missing/mis-sized — falling back to tail rebuild")
+            shutil.rmtree(target_tail_dir, ignore_errors=True)
+            return None
+        dst_corpus = target_tail_dir / CORPUS_SHARD_FILENAME
+        with open(src_corpus, "rb") as fsrc, open(dst_corpus, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst)
+            fdst.write(np.ascontiguousarray(new_full).tobytes())
+
+    count = len(tail_ids)
+    meta = {
+        "key": f"{tail_ids[0]}_{tail_ids[-1]}_{count}",
+        "dir": f"shard_{sealed_count}",
+        "first_id": tail_ids[0],
+        "last_id": tail_ids[-1],
+        "count": count,
+        "sealed": count == shard_size,
+        "docids": True,
+    }
+    logger.info(
+        "delta reindex: tail upsert +%d vecs (%d→%d), no retrain",
+        len(new_ids),
+        tail_count,
+        count,
+    )
+    return tail_ids, meta
+
+
+def _rebuild_open_shards(
+    conn,
+    model: str,
+    dimensions: int,
+    shard_size: int,
+    *,
+    target_dir: Path,
+    resume_from: int,
+    start_shard_idx: int,
+    shard_kwargs: dict,
+    all_ids: list[int],
+    shards_meta: list[dict],
+    user_id: str | None,
+) -> int:
+    """Rebuild the open tail (+ any spillover shards) from PG rows id >=
+    resume_from, appending to `all_ids`/`shards_meta` in place. Returns the next
+    (== total) shard index. The always-correct fallback when the upsert fast
+    path doesn't apply (legacy/non-docid tail, fragmented tail, or overflow)."""
+    shard_idx = start_shard_idx
+    last_id = resume_from - 1
+    while True:
+        if user_id is None:
+            page = conn.execute(
+                "SELECT id, embedding FROM embeddings WHERE model=%s AND id > %s ORDER BY id LIMIT %s",
+                (model, last_id, shard_size),
+            ).fetchall()
+        else:
+            page = conn.execute(
+                "SELECT id, embedding FROM embeddings WHERE model=%s AND user_id=%s AND id > %s ORDER BY id LIMIT %s",
+                (model, user_id, last_id, shard_size),
+            ).fetchall()
+        if not page:
+            break
+        last_id = page[-1]["id"]
+        rows_buf = [(r["id"], r["embedding"]) for r in page]
+        del page
+        shard_ids = _build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs)
+        all_ids.extend(shard_ids)
+        shards_meta.append(_shard_meta(shard_ids, shard_idx, shard_size))
+        del rows_buf
+        shard_idx += 1
+    return shard_idx
 
 
 def build_index_delta(
@@ -726,34 +936,56 @@ def build_index_delta(
             meta["dir"] = f"shard_{i}"
             shards_meta.append(meta)
 
-        # 2) Rebuild the open shard + any new shards from delta rows (id >= resume_from).
+        # 2) Extend the open tail. Fast path: if the single unsealed tail shard
+        # is a docid-mode (mutable) shard with a trained tree, UPSERT the new
+        # embeddings into it (no k-means retrain). Otherwise fall through to the
+        # rebuild loop, which reads every row from resume_from and rebuilds —
+        # correct for legacy tails, multi-fragment tails, and overflow.
         shard_kwargs: dict[str, object] = {"reorder_pool": reorder_pool}
         if eff_ah is not None:
             shard_kwargs["ah_dim"] = eff_ah
         shard_kwargs["write_full_corpus"] = manual_rerank
-        shard_idx = len(sealed)
-        last_id = resume_from - 1
-        while True:
-            if user_id is None:
-                page = conn.execute(
-                    "SELECT id, embedding FROM embeddings WHERE model=%s AND id > %s ORDER BY id LIMIT %s",
-                    (model, last_id, shard_size),
-                ).fetchall()
-            else:
-                page = conn.execute(
-                    "SELECT id, embedding FROM embeddings WHERE model=%s AND user_id=%s AND id > %s ORDER BY id LIMIT %s",
-                    (model, user_id, last_id, shard_size),
-                ).fetchall()
-            if not page:
-                break
-            last_id = page[-1]["id"]
-            rows_buf = [(r["id"], r["embedding"]) for r in page]
-            del page
-            shard_ids = _build_one_shard(rows_buf, dimensions, target_dir / f"shard_{shard_idx}", **shard_kwargs)
-            all_ids.extend(shard_ids)
-            shards_meta.append(_shard_meta(shard_ids, shard_idx, shard_size))
-            del rows_buf
-            shard_idx += 1
+        shard_kwargs["with_docids"] = True  # rebuilt tail is mutable next cycle
+
+        tail_metas = live_shards[len(sealed) :]
+        upsert_result = None
+        if len(tail_metas) == 1 and tail_metas[0].get("docids") and int(tail_metas[0]["count"]) >= _UPSERT_MIN_TAIL:
+            upsert_result = _upsert_tail_shard(
+                conn,
+                model,
+                dimensions,
+                shard_size,
+                live_dir=live_dir,
+                target_dir=target_dir,
+                tail_meta=tail_metas[0],
+                sealed_count=len(sealed),
+                watermark=watermark,
+                eff_ah=eff_ah,
+                manual_rerank=manual_rerank,
+                user_id=user_id,
+            )
+
+        if upsert_result is not None:
+            tail_ids, tail_meta_new = upsert_result
+            all_ids.extend(tail_ids)
+            shards_meta.append(tail_meta_new)
+            shard_idx = len(sealed) + 1
+            _log_tail_upsert = True
+        else:
+            _log_tail_upsert = False
+            shard_idx = _rebuild_open_shards(
+                conn,
+                model,
+                dimensions,
+                shard_size,
+                target_dir=target_dir,
+                resume_from=resume_from,
+                start_shard_idx=len(sealed),
+                shard_kwargs=shard_kwargs,
+                all_ids=all_ids,
+                shards_meta=shards_meta,
+                user_id=user_id,
+            )
 
         manifest_payload: dict[str, object] = {
             "num_shards": shard_idx,
@@ -784,8 +1016,9 @@ def build_index_delta(
         conn.close()
 
     logger.info(
-        "delta reindex: %d sealed shards reused, %d shards rebuilt (watermark %d→%d) at %s",
+        "delta reindex: %d sealed shards reused, tail extended via %s, %d shards touched " "(watermark %d→%d) at %s",
         len(sealed),
+        "upsert (no retrain)" if _log_tail_upsert else "rebuild",
         shard_idx - len(sealed),
         watermark,
         all_ids[-1] if all_ids else watermark,

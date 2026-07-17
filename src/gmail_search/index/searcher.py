@@ -77,6 +77,11 @@ class ScannSearcher:
         # Stable per-shard keys (parallel to _shards), used by reload to reuse
         # an already-loaded shard's C++ searcher instead of re-loading it.
         self._shard_keys: list[str] = []
+        # Per-shard docid flag (parallel to _shards). A docid-mode shard (built
+        # by the delta path so it can be upserted) makes ScaNN's .search()
+        # return docid STRINGS == str(embedding_id), so we map int(neighbor)
+        # directly instead of positional ids[i]. Legacy/positional shards → False.
+        self._shard_docids: list[bool] = []
 
         # Manual-rerank state. When the manifest carries the
         # `manual_rerank` block (variant C — see docs/notes/SCANN_COMPACTION_2026-04-27.md),
@@ -213,12 +218,12 @@ class ScannSearcher:
 
         shards_meta = manifest.get("shards")
         if shards_meta:
-            entries = [(s["dir"], s.get("key")) for s in shards_meta]
+            entries = [(s["dir"], s.get("key"), bool(s.get("docids"))) for s in shards_meta]
         else:  # v1 manifest — synthesize dir + (later) key from loaded ids
-            entries = [(f"shard_{i}", None) for i in range(manifest["num_shards"])]
+            entries = [(f"shard_{i}", None, False) for i in range(manifest["num_shards"])]
 
         reused = 0
-        for shard_name, key in entries:
+        for shard_name, key, is_docid in entries:
             shard_dir = self.index_dir / shard_name
             ids_file = shard_dir / "ids.json"
             if not ids_file.exists():
@@ -245,6 +250,7 @@ class ScannSearcher:
                     continue
             self._shards.append((searcher, shard_ids))
             self._shard_keys.append(key)
+            self._shard_docids.append(is_docid)
         logger.info(
             "Loaded sharded ScaNN index: %d shards (%d reused), %d total vectors",
             len(self._shards),
@@ -259,6 +265,7 @@ class ScannSearcher:
         searcher = scann.scann_ops_pybind.load_searcher(str(self.index_dir))
         self._shards.append((searcher, self.embedding_ids))
         self._shard_keys.append(f"{self.embedding_ids[0]}_{self.embedding_ids[-1]}_{len(self.embedding_ids)}")
+        self._shard_docids.append(False)  # legacy single index is positional
         logger.info(f"Loaded ScaNN index with {len(self.embedding_ids)} vectors")
 
     def search(
@@ -303,6 +310,17 @@ class ScannSearcher:
         return self._search_scann_only(index_query, top_k)
 
     @staticmethod
+    def _neighbors_to_ids(neighbors, ids: list[int], is_docid: bool) -> list[int]:
+        """Map ScaNN neighbor results to embedding ids. A docid-mode shard
+        returns docid STRINGS (== str(embedding_id)), so int(n) IS the id — the
+        shard's internal order has diverged from ids.json order under upsert, so
+        positional ids[i] would be WRONG. A positional shard returns integer
+        offsets into the shard's ids list."""
+        if is_docid:
+            return [int(n) for n in neighbors]
+        return [ids[i] for i in neighbors]
+
+    @staticmethod
     def _l2_normalize(vec: np.ndarray) -> np.ndarray:
         """Return a float32 unit-norm copy of `vec`. Idempotent on
         already-normalized inputs (norm stays 1.0)."""
@@ -336,15 +354,15 @@ class ScannSearcher:
             # Fast path — avoid the merge step for unsharded indexes.
             searcher, ids = self._shards[0]
             neighbors, distances = searcher.search(query_vector, final_num_neighbors=top_k)
-            return [ids[i] for i in neighbors], distances.tolist()
+            return self._neighbors_to_ids(neighbors, ids, self._shard_docids[0]), distances.tolist()
 
         # Sharded: get each shard's top_k, merge by score. For dot_product
         # similarity, higher is better → heapq.nlargest.
         candidates: list[tuple[float, int]] = []
-        for searcher, ids in self._shards:
+        for (searcher, ids), is_docid in zip(self._shards, self._shard_docids):
             neighbors, distances = searcher.search(query_vector, final_num_neighbors=top_k)
-            for idx, score in zip(neighbors, distances):
-                candidates.append((float(score), ids[idx]))
+            for eid, score in zip(self._neighbors_to_ids(neighbors, ids, is_docid), distances):
+                candidates.append((float(score), eid))
         top = heapq.nlargest(top_k, candidates, key=lambda x: x[0])
         return [eid for _, eid in top], [score for score, _ in top]
 
@@ -385,7 +403,7 @@ class ScannSearcher:
         if len(self._shards) == 1:
             searcher, ids = self._shards[0]
             neighbors, _ = searcher.search(q_t, final_num_neighbors=rerank_pool)
-            cand_ids = [ids[i] for i in neighbors]
+            cand_ids = self._neighbors_to_ids(neighbors, ids, self._shard_docids[0])
         else:
             per_shard = max(top_k, -(-rerank_pool // len(self._shards)) * 4)
             per_shard = min(per_shard, rerank_pool)
@@ -396,11 +414,19 @@ class ScannSearcher:
                 self._shard_ids_np = [np.asarray(ids, dtype=np.int64) for _, ids in self._shards]
             id_chunks: list[np.ndarray] = []
             score_chunks: list[np.ndarray] = []
-            for (searcher, _ids), ids_arr in zip(self._shards, self._shard_ids_np):
+            for (searcher, _ids), ids_arr, is_docid in zip(self._shards, self._shard_ids_np, self._shard_docids):
                 neighbors, distances = searcher.search(q_t, final_num_neighbors=per_shard)
                 if len(neighbors) == 0:
                     continue
-                id_chunks.append(ids_arr[np.asarray(neighbors, dtype=np.int64)])
+                if is_docid:
+                    # docid-mode: neighbors are strings == str(embedding_id).
+                    # int() gives the id directly. DON'T index ids_arr with it —
+                    # the id value is not a positional offset (the classic
+                    # silent-corruption trap when strings coerce to int64).
+                    chunk = np.fromiter((int(n) for n in neighbors), dtype=np.int64, count=len(neighbors))
+                else:
+                    chunk = ids_arr[np.asarray(neighbors, dtype=np.int64)]
+                id_chunks.append(chunk)
                 score_chunks.append(np.asarray(distances, dtype=np.float32))
             if id_chunks:
                 all_ids = np.concatenate(id_chunks)
