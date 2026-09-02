@@ -112,7 +112,10 @@ async def profile_browser(url: str) -> float:
     t0 = time.perf_counter()
     async with AsyncWebCrawler(config=config) as crawler:
         t_open = time.perf_counter()
-        await uf._fetch_via_crawl4ai(crawler, url, uf._DEFAULT_TIMEOUT_S)
+        try:
+            await uf._fetch_via_crawl4ai(crawler, url, uf._DEFAULT_TIMEOUT_S)
+        except uf._BrowserBlocked as e:  # anti-bot wall — still a timing sample
+            print(f"  browser: blocked ({e.reason[:60]})")
         t_fetch = time.perf_counter()
     print(f"  browser: startup {(t_open - t0) * 1000:.0f}ms  fetch {(t_fetch - t_open) * 1000:.0f}ms")
     return (t_fetch - t0) * 1000

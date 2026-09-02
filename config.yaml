@@ -13,7 +13,7 @@ indexing:
   alias_backend: llm
   delta_index: true
 attachments:
-  max_file_size_mb: 10
+  max_file_size_mb: 30  # Gmail caps a message at 25 MB; anything larger still gets a manifest row (fetch_status)
   max_pdf_pages: 20
   max_images_per_message: 10
   max_attachment_text_tokens: 50000

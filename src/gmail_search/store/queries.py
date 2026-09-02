@@ -259,11 +259,11 @@ def upsert_attachment(conn, att: Attachment, *, user_id: Optional[str] = None) -
     uid = resolve_write_user_id(conn, user_id=user_id)
     cursor = conn.execute(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
-           extracted_text, image_path, raw_path, user_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+           extracted_text, image_path, raw_path, fetch_status, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT(message_id, filename) DO UPDATE SET
              mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
-             raw_path=excluded.raw_path
+             raw_path=excluded.raw_path, fetch_status=excluded.fetch_status
            RETURNING id""",
         (
             att.message_id,
@@ -273,6 +273,7 @@ def upsert_attachment(conn, att: Attachment, *, user_id: Optional[str] = None) -
             att.extracted_text,
             att.image_path,
             att.raw_path,
+            att.fetch_status,
             uid,
         ),
     )
@@ -304,9 +305,123 @@ def get_attachments_for_message(conn, message_id: str, *, user_id: Optional[str]
             extracted_text=r["extracted_text"],
             image_path=r["image_path"],
             raw_path=r["raw_path"],
+            fetch_status=r["fetch_status"],
         )
         for r in rows
     ]
+
+
+def record_unfetched_attachment(
+    conn,
+    *,
+    message_id: str,
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    fetch_status: str,
+    user_id: Optional[str] = None,
+) -> int:
+    """Manifest-only row for an attachment whose bytes we did NOT store
+    (`skipped_too_large` / `fetch_failed`). Never downgrades a row that
+    already has bytes on disk: a transient failure on re-sync must not
+    turn a good row into an unfetched one."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    cursor = conn.execute(
+        """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
+           raw_path, fetch_status, user_id)
+           VALUES (%s, %s, %s, %s, NULL, %s, %s)
+           ON CONFLICT(message_id, filename) DO UPDATE SET
+             fetch_status = CASE WHEN attachments.raw_path IS NULL
+                                 THEN excluded.fetch_status ELSE attachments.fetch_status END,
+             size_bytes   = CASE WHEN attachments.raw_path IS NULL
+                                 THEN excluded.size_bytes ELSE attachments.size_bytes END
+           RETURNING id""",
+        (message_id, filename, mime_type, size_bytes, fetch_status, uid),
+    )
+    row = cursor.fetchone()
+    conn.commit()
+    if row is None:
+        return 0
+    try:
+        return int(row["id"])
+    except (KeyError, TypeError):
+        return int(row[0])
+
+
+def find_unfetched_attachments(conn, *, user_id: Optional[str] = None, limit: Optional[int] = None) -> list[dict]:
+    """Rows whose bytes were never stored (fetch_status <> 'ok'), oldest
+    first. Input for `refetch-attachments`."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    sql = (
+        "SELECT id, message_id, filename, mime_type, size_bytes, fetch_status "
+        "FROM attachments WHERE fetch_status <> 'ok' AND user_id = %s ORDER BY id"
+    )
+    params: list = [uid]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
+    return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+
+
+def _size_estimate_regex(min_size_estimate: int) -> str:
+    """Cheap text prefilter: at least as many digits as `min_size_estimate`
+    (i.e. >= 10^(digits-1)). Callers re-check the exact value in Python.
+    Avoids a jsonb cast over every raw_json on the table."""
+    digits = len(str(max(int(min_size_estimate), 1)))
+    return r'"sizeEstimate": ?[1-9][0-9]{%d,}' % (digits - 1)
+
+
+def _stored_attachment_filenames(conn, message_id: str, user_id: str) -> set[str]:
+    rows = conn.execute(
+        "SELECT filename FROM attachments WHERE message_id = %s AND user_id = %s AND raw_path IS NOT NULL",
+        (message_id, user_id),
+    ).fetchall()
+    return {r["filename"] for r in rows}
+
+
+def iter_missing_attachment_metas(
+    conn,
+    *,
+    user_id: Optional[str] = None,
+    min_size_estimate: int = 10 * 1024 * 1024,
+    message_ids: Optional[list[str]] = None,
+):
+    """Yield `(message_id, att_meta)` for every attachment Gmail listed in a
+    message's raw_json that has no stored bytes. Legacy backfill: messages
+    ingested before `fetch_status` existed have NO row for a dropped
+    file, so the only record of it is the part tree in raw_json.
+
+    Only messages whose Gmail sizeEstimate is >= `min_size_estimate` are
+    scanned — a dropped file had to be bigger than the old cap, so the
+    message had to be too. Pass `message_ids` to look at just those
+    messages (no size filter, no table scan)."""
+    from gmail_search.gmail.client import _sanitize_filename
+    from gmail_search.gmail.parser import attachment_metas_from_raw
+
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    if message_ids:
+        rows = conn.execute(
+            "SELECT id, raw_json FROM messages WHERE user_id = %s AND id = ANY(%s) ORDER BY date",
+            (uid, list(message_ids)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, raw_json FROM messages WHERE user_id = %s AND raw_json ~ %s ORDER BY date",
+            (uid, _size_estimate_regex(min_size_estimate)),
+        ).fetchall()
+    for r in rows:
+        try:
+            raw = json.loads(r["raw_json"])
+        except (TypeError, ValueError):
+            continue
+        if not message_ids and int(raw.get("sizeEstimate") or 0) < min_size_estimate:
+            continue
+        stored = _stored_attachment_filenames(conn, r["id"], uid)
+        for meta in attachment_metas_from_raw(raw):
+            name = meta.get("filename") or ""
+            if name in stored or _sanitize_filename(name) in stored:
+                continue
+            yield r["id"], meta
 
 
 def get_pending_extraction_message_ids(conn, *, user_id: Optional[str] = None) -> list[str]:
@@ -625,6 +740,122 @@ def url_from_stub_filename(filename: str) -> str | None:
 # already abandoned under the old linear-backoff regime.
 _MAX_CRAWL_ATTEMPTS = 10
 
+# Host circuit breaker (see crawl_host_state in pg_schema.sql). Strikes
+# count DISTINCT URLs so one stubborn link can't block a whole host;
+# three different links walled by the same host is the host's policy.
+_HOST_STRIKES_TO_BLOCK = 3
+_HOST_BLOCK_BASE_DAYS = 14
+_HOST_BLOCK_MAX_DAYS = 90
+
+
+# ─── crawler memory: dead URLs ─────────────────────────────────────────
+
+
+def mark_url_dead(conn, filename: str, reason: str) -> None:
+    """Remember that every copy of this stub is dead. Idempotent; a
+    later call refreshes the reason. Callers commit."""
+    conn.execute(
+        """INSERT INTO crawl_url_state (filename, status, reason, updated_at)
+           VALUES (%s, 'dead', %s, now())
+           ON CONFLICT (filename) DO UPDATE
+             SET status = 'dead', reason = EXCLUDED.reason, updated_at = now()""",
+        (filename, (reason or "")[:200]),
+    )
+
+
+def is_url_dead(conn, filename: str) -> bool:
+    row = conn.execute("SELECT 1 FROM crawl_url_state WHERE filename = %s AND status = 'dead'", (filename,)).fetchone()
+    return row is not None
+
+
+def clear_url_dead(conn, filename: str) -> None:
+    """A page came back for this stub after all: drop the tombstone so
+    later copies (new users, new mail) are crawled/filled normally."""
+    conn.execute("DELETE FROM crawl_url_state WHERE filename = %s", (filename,))
+
+
+# ─── crawler memory: host circuit breaker ──────────────────────────────
+
+
+def blocked_hosts(conn) -> set[str]:
+    """Hosts currently under a block. Small table, one query per crawl batch."""
+    rows = conn.execute("SELECT host FROM crawl_host_state WHERE blocked_until > now()").fetchall()
+    return {r["host"] for r in rows}
+
+
+_HOST_STATE_COLS = (
+    "h.host, h.block_count, h.blocked_until, h.last_reason, h.updated_at,"
+    " (SELECT count(*) FROM crawl_host_strike s WHERE s.host = h.host) AS strikes"
+)
+
+
+def host_state(conn, host: str) -> Optional[dict]:
+    row = conn.execute(f"SELECT {_HOST_STATE_COLS} FROM crawl_host_state h WHERE h.host = %s", (host,)).fetchone()
+    return dict(row) if row else None
+
+
+def record_host_strike(conn, host: str, url: str, reason: str) -> bool:
+    """One anti-bot wall on `url`. Returns True when this strike tipped the
+    host into a block. Strikes are counted per DISTINCT url (a primary key
+    on (host, url)), so one stubborn link, or two links alternating, can't
+    block a host on their own. Callers commit."""
+    reason = (reason or "")[:200]
+    # Make sure the host row exists, then lock it so two concurrent strikes
+    # can't both count to the threshold and double-escalate the block.
+    conn.execute(
+        "INSERT INTO crawl_host_state (host, last_reason) VALUES (%s, %s) ON CONFLICT (host) DO NOTHING",
+        (host, reason),
+    )
+    row = conn.execute(
+        "SELECT block_count, blocked_until FROM crawl_host_state WHERE host = %s FOR UPDATE", (host,)
+    ).fetchone()
+    if row["blocked_until"] is not None and row["blocked_until"].timestamp() > _now_ts(conn):
+        return False  # already blocked; nothing to escalate mid-block
+    conn.execute(
+        "INSERT INTO crawl_host_strike (host, url, reason) VALUES (%s, %s, %s) ON CONFLICT (host, url) DO NOTHING",
+        (host, url, reason),
+    )
+    strikes = int(conn.execute("SELECT count(*) AS c FROM crawl_host_strike WHERE host = %s", (host,)).fetchone()["c"])
+    if strikes < _HOST_STRIKES_TO_BLOCK:
+        conn.execute("UPDATE crawl_host_state SET last_reason = %s, updated_at = now() WHERE host = %s", (reason, host))
+        return False
+    block_count = int(row["block_count"]) + 1
+    days = min(_HOST_BLOCK_BASE_DAYS * (2 ** (block_count - 1)), _HOST_BLOCK_MAX_DAYS)
+    conn.execute(
+        "UPDATE crawl_host_state SET block_count = %s, blocked_until = now() + (interval '1 day' * %s),"
+        " last_reason = %s, updated_at = now() WHERE host = %s",
+        (block_count, days, reason, host),
+    )
+    conn.execute("DELETE FROM crawl_host_strike WHERE host = %s", (host,))
+    return True
+
+
+def clear_host_strikes(conn, host: str) -> None:
+    """A successful fetch from `host`: forget its in-progress strikes (an
+    active block is left alone — it expires on its own). Callers commit."""
+    conn.execute("DELETE FROM crawl_host_strike WHERE host = %s", (host,))
+
+
+def unblock_host(conn, host: str) -> None:
+    """Operator override: lift a block now. block_count is kept so a
+    repeat offence still escalates. Callers commit."""
+    conn.execute("UPDATE crawl_host_state SET blocked_until = NULL, updated_at = now() WHERE host = %s", (host,))
+    conn.execute("DELETE FROM crawl_host_strike WHERE host = %s", (host,))
+
+
+def list_host_state(conn, *, blocked_only: bool = True) -> list[dict]:
+    where = "WHERE h.blocked_until > now()" if blocked_only else ""
+    rows = conn.execute(
+        f"SELECT {_HOST_STATE_COLS} FROM crawl_host_state h {where}"
+        " ORDER BY h.blocked_until DESC NULLS LAST, h.updated_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _now_ts(conn) -> float:
+    """DB clock, so block comparisons use the same source as `now()` in SQL."""
+    return conn.execute("SELECT extract(epoch from now()) AS t").fetchone()["t"]
+
 
 def pending_url_stubs(conn, limit: int) -> list[dict]:
     """Return URL stubs that haven't been fetched yet, oldest message
@@ -657,7 +888,6 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # Overfetch by 5× so that even when most of the batch is denied
     # we still return `limit` real URLs. Cheap: the filter runs in
     # Python, and denied rows get deleted in the same pass.
-    from gmail_search.gmail.url_extract import _is_denied
 
     # Fast lane / slow lane to avoid head-of-line blocking. A failed crawl
     # leaves extracted_text NULL, so without attempt-tracking the SAME dead /
@@ -671,25 +901,52 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # 1h/2h/3h-then-dead-in-6h cliff. `_process_one` stamps each attempt. The
     # partial index idx_attachments_crawl_lane serves the (crawl_attempts ASC,
     # id DESC) order directly.
+    #
+    # Crawler memory (crawl_url_state / crawl_host_state): the per-row cap
+    # above is defeated by new mail — every email carrying a link inserts a
+    # fresh 0-attempt copy, so a URL that already burned its budget was
+    # re-fetched on each arrival. A stub filename in crawl_url_state is dead
+    # for ALL its copies. Stubs on a blocked host are abandoned here (jumped
+    # to the cap + recorded dead) so they leave the queue without a fetch.
     overfetch = max(limit * 5, 500)
-    rows = conn.execute(
-        """SELECT id, message_id, filename
-             FROM attachments
-            WHERE mime_type = 'text/html'
-              AND extracted_text IS NULL
-              AND filename LIKE %s
-              AND crawl_attempts < %s
-              AND (crawl_last_attempt IS NULL
-                   OR crawl_last_attempt
-                        < now() - (interval '1 hour' * power(2, crawl_attempts - 1)))
-            ORDER BY crawl_attempts ASC, id DESC
-            LIMIT %s""",
-        ("URL: %", _MAX_CRAWL_ATTEMPTS, overfetch),
-    ).fetchall()
-
     out: list[dict] = []
-    deny_ids: list[int] = []
     seen_urls: set[str] = set()
+    # A slice made entirely of denied / blocked-host rows would return no
+    # work and the daemon would read that as "backlog drained". Those rows
+    # are removed or abandoned below, so re-pull a few times until the
+    # slice yields live URLs (or the table really is drained).
+    for _pass in range(6):
+        rows = conn.execute(
+            """SELECT a.id, a.message_id, a.filename
+                 FROM attachments a
+                WHERE a.mime_type = 'text/html'
+                  AND a.extracted_text IS NULL
+                  AND a.filename LIKE %s
+                  AND a.crawl_attempts < %s
+                  AND (a.crawl_last_attempt IS NULL
+                       OR a.crawl_last_attempt
+                            < now() - (interval '1 hour' * power(2, a.crawl_attempts - 1)))
+                  AND NOT EXISTS (SELECT 1 FROM crawl_url_state s WHERE s.filename = a.filename)
+                ORDER BY a.crawl_attempts ASC, a.id DESC
+                LIMIT %s""",
+            ("URL: %", _MAX_CRAWL_ATTEMPTS, overfetch),
+        ).fetchall()
+        if not rows:
+            break
+        blocked = blocked_hosts(conn)
+        deny_ids, host_blocked = _sift_stub_rows(rows, blocked, seen_urls, out, limit)
+        _purge_denied(conn, deny_ids)
+        _abandon_host_blocked(conn, host_blocked)
+        if out or not (deny_ids or host_blocked):
+            break
+    return out
+
+
+def _sift_stub_rows(rows, blocked: set[str], seen_urls: set[str], out: list[dict], limit: int):
+    from gmail_search.gmail.url_extract import _is_denied  # noqa: PLC0415 (import cycle at module load)
+
+    deny_ids: list[int] = []
+    host_blocked: list[tuple[int, str]] = []  # (id, filename)
     for r in rows:
         url = url_from_stub_filename(r["filename"])
         if not url:
@@ -697,6 +954,9 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
             continue
         if _is_denied(url):
             deny_ids.append(int(r["id"]))
+            continue
+        if blocked and _host_of(url) in blocked:
+            host_blocked.append((int(r["id"]), r["filename"]))
             continue
         # Dedup within the batch: the same URL is linked from many messages,
         # and `fill_url_attachment` fans a single fetch out to every copy, so
@@ -708,16 +968,33 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
         out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url, "filename": r["filename"]})
         if len(out) >= limit:
             break
+    return deny_ids, host_blocked
 
-    if deny_ids:
-        B = 1000
-        for i in range(0, len(deny_ids), B):
-            batch = deny_ids[i : i + B]
-            placeholders = ",".join(["%s"] * len(batch))
-            conn.execute(f"DELETE FROM attachments WHERE id IN ({placeholders})", batch)
-        conn.commit()
 
-    return out
+def _purge_denied(conn, deny_ids: list[int]) -> None:
+    if not deny_ids:
+        return
+    B = 1000
+    for i in range(0, len(deny_ids), B):
+        batch = deny_ids[i : i + B]
+        placeholders = ",".join(["%s"] * len(batch))
+        conn.execute(f"DELETE FROM attachments WHERE id IN ({placeholders})", batch)
+    conn.commit()
+
+
+def _abandon_host_blocked(conn, host_blocked: list[tuple[int, str]]) -> None:
+    """Abandon every unfilled copy of each walled URL, not just the row we
+    happened to pull, so the batch after this one is clean too."""
+    if not host_blocked:
+        return
+    for _id, fn in host_blocked:
+        conn.execute(
+            "UPDATE attachments SET crawl_attempts = %s, crawl_last_attempt = now()"
+            " WHERE filename = %s AND extracted_text IS NULL",
+            (_MAX_CRAWL_ATTEMPTS, fn),
+        )
+        mark_url_dead(conn, fn, "host blocked")
+    conn.commit()
 
 
 def insert_embedding(conn, rec: EmbeddingRecord, *, user_id: Optional[str] = None) -> int:

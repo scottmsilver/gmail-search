@@ -758,3 +758,278 @@ def test_crawl_proxy_config_shape(monkeypatch):
         "username": "user",
         "password": "pw",
     }
+
+
+# --- anti-bot walls: abandon the URL, strike the host ---------------------
+
+
+def _install_fake_crawl4ai(monkeypatch, *, success, error_message="", markdown="body text"):
+    """Stub the three crawl4ai imports `_fetch_via_crawl4ai` makes and return
+    a fake crawler whose `arun` yields one result with the given outcome."""
+    import sys as _sys
+    import types as _types
+
+    root = _types.ModuleType("crawl4ai")
+    root.CrawlerRunConfig = lambda **k: None
+    cfs = _types.ModuleType("crawl4ai.content_filter_strategy")
+    cfs.PruningContentFilter = lambda **k: None
+    mdg = _types.ModuleType("crawl4ai.markdown_generation_strategy")
+    mdg.DefaultMarkdownGenerator = lambda **k: None
+    monkeypatch.setitem(_sys.modules, "crawl4ai", root)
+    monkeypatch.setitem(_sys.modules, "crawl4ai.content_filter_strategy", cfs)
+    monkeypatch.setitem(_sys.modules, "crawl4ai.markdown_generation_strategy", mdg)
+
+    class _Md:
+        fit_markdown = markdown
+        raw_markdown = markdown
+
+    class _Result:
+        def __init__(self):
+            self.success = success
+            self.error_message = error_message
+            self.markdown = _Md()
+            self.metadata = {"title": "T"}
+
+    class _Crawler:
+        async def arun(self, url, config=None):
+            return [_Result()]
+
+    return _Crawler()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Blocked by anti-bot protection: DataDome captcha",
+        "Blocked by anti-bot protection: Cloudflare JS challenge",
+        "Blocked by anti-bot protection: Akamai block (Reference #)",
+        "Blocked by anti-bot protection: HTTP 403 with HTML content (41264 bytes)",
+        "Blocked by anti-bot protection: Structural: minimal_text on small page",
+    ],
+)
+def test_antibot_browser_failure_raises_blocked(monkeypatch, reason):
+    crawler = _install_fake_crawl4ai(monkeypatch, success=False, error_message=reason)
+    with pytest.raises(uf._BrowserBlocked) as ei:
+        asyncio.run(uf._fetch_via_crawl4ai(crawler, "https://wall.example.com/p", 5.0))
+    assert ei.value.url == "https://wall.example.com/p"
+    assert ei.value.reason == reason
+
+
+def test_other_browser_failure_returns_none(monkeypatch):
+    crawler = _install_fake_crawl4ai(
+        monkeypatch, success=False, error_message="Page.content: Unable to retrieve content because the page is navigating"
+    )
+    assert asyncio.run(uf._fetch_via_crawl4ai(crawler, "https://x.example.com/p", 5.0)) is None
+
+
+def test_browser_success_still_returns_markdown(monkeypatch):
+    crawler = _install_fake_crawl4ai(monkeypatch, success=True, markdown="rendered body")
+    assert asyncio.run(uf._fetch_via_crawl4ai(crawler, "https://x.example.com/p", 5.0)) == ("T", "rendered body")
+
+
+def test_fetch_url_markdown_swallows_blocked(monkeypatch):
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("browser", url)
+
+    async def fake_browser(crawler, url, timeout_s):
+        raise uf._BrowserBlocked(url, "Blocked by anti-bot protection: DataDome captcha")
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+    monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
+    assert asyncio.run(uf.fetch_url_markdown(None, "https://wall.example.com/p")) is None
+
+
+def test_process_one_antibot_abandons_url_and_strikes_host(monkeypatch):
+    calls = {"abandon": [], "strike": [], "mark": [], "ok": []}
+    monkeypatch.setattr(uf, "_ssrf_guard", lambda url: True)
+    monkeypatch.setattr(uf, "_mark_attempt_sync", lambda db, fn: calls["mark"].append(fn))
+    monkeypatch.setattr(uf, "_abandon_sync", lambda db, fn, reason="": calls["abandon"].append((fn, reason)))
+    monkeypatch.setattr(uf, "_host_strike_sync", lambda db, url, reason: calls["strike"].append((url, reason)))
+    monkeypatch.setattr(uf, "_host_ok_sync", lambda db, url: calls["ok"].append(url))
+
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("browser", url)
+
+    async def fake_browser(crawler, url, timeout_s):
+        raise uf._BrowserBlocked(url, "Blocked by anti-bot protection: Cloudflare JS challenge")
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+    monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
+
+    stub = {"id": 1, "url": "https://wall.example.com/p", "filename": "URL: https://wall.example.com/p"}
+    ok = asyncio.run(uf._process_one(None, stub, asyncio.Semaphore(1), None, 5.0))
+    assert ok is False
+    assert calls["mark"] == [stub["filename"]]
+    assert calls["abandon"] == [(stub["filename"], "Blocked by anti-bot protection: Cloudflare JS challenge")]
+    assert calls["strike"] == [(stub["url"], "Blocked by anti-bot protection: Cloudflare JS challenge")]
+    assert calls["ok"] == []
+
+
+def test_process_one_success_clears_host_strikes(monkeypatch):
+    calls = {"ok": []}
+    monkeypatch.setattr(uf, "_ssrf_guard", lambda url: True)
+    monkeypatch.setattr(uf, "_mark_attempt_sync", lambda db, fn: None)
+    monkeypatch.setattr(uf, "_host_ok_sync", lambda db, url: calls["ok"].append(url))
+
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("ok", ("t", "body"))
+
+    async def fake_persist(db_path, stub, result):
+        return True
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+    monkeypatch.setattr(uf, "_persist_result", fake_persist)
+    stub = {"id": 1, "url": "https://fine.example.com/p", "filename": "URL: https://fine.example.com/p"}
+    assert asyncio.run(uf._process_one(None, stub, asyncio.Semaphore(1), None, 5.0)) is True
+    assert calls["ok"] == [stub["url"]]
+
+
+def test_run_continuous_antibot_abandons_and_strikes(monkeypatch):
+    stubs = [
+        {"id": i, "url": f"https://s{i}.example.com/p", "filename": f"URL: https://s{i}.example.com/p"}
+        for i in range(3)
+    ]
+    served = {"done": False}
+
+    def fake_pending(conn, n):
+        if served["done"]:
+            return []
+        served["done"] = True
+        return list(stubs)
+
+    calls = {"abandon": [], "strike": [], "ok": []}
+    monkeypatch.setattr(uf, "pending_url_stubs", fake_pending)
+    monkeypatch.setattr(uf, "get_connection", lambda db_path: type("C", (), {"close": lambda self: None})())
+    monkeypatch.setattr(uf, "build_http_client", lambda timeout_s=10.0: type("X", (), {"aclose": _noop_async})())
+    monkeypatch.setattr(uf, "build_cffi_session", lambda: None)
+    monkeypatch.setattr(uf, "_ssrf_guard", lambda url: True)
+    monkeypatch.setattr(uf, "_mark_attempt_sync", lambda db, fn: None)
+    monkeypatch.setattr(uf, "_abandon_sync", lambda db, fn, reason="": calls["abandon"].append(fn))
+    monkeypatch.setattr(uf, "_host_strike_sync", lambda db, url, reason: calls["strike"].append(url))
+    monkeypatch.setattr(uf, "_host_ok_sync", lambda db, url: calls["ok"].append(url))
+
+    async def fake_persist(db_path, stub, result):
+        return result is not None
+
+    monkeypatch.setattr(uf, "_persist_result", fake_persist)
+
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("ok", ("t", "body")) if "s0" in url else ("browser", url)
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+
+    async def fake_browser(crawler, url, timeout_s):
+        if "s1" in url:
+            raise uf._BrowserBlocked(url, "Blocked by anti-bot protection: DataDome captcha")
+        return ("bt", "rendered")
+
+    monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
+
+    class _FakeCrawler:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    import sys as _sys
+    import types as _types
+
+    fake_mod = _types.ModuleType("crawl4ai")
+    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
+    fake_mod.BrowserConfig = lambda **k: None
+    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+
+    r = asyncio.run(uf.run_continuous(None, http_concurrency=2, browser_cap=1, target=3))
+    assert r == {"total": 3, "done": 2, "failed": 1}
+    assert calls["abandon"] == ["URL: https://s1.example.com/p"]
+    assert calls["strike"] == ["https://s1.example.com/p"]
+    assert sorted(calls["ok"]) == ["https://s0.example.com/p", "https://s2.example.com/p"]
+
+
+def test_process_one_strikes_terminal_host_not_redirector(monkeypatch):
+    # The email links a redirector; the wall is on the terminal host. The
+    # strike must land on the terminal host, or every mimecast/avanan link
+    # would eventually block the redirector for everyone.
+    calls = {"abandon": [], "strike": []}
+    monkeypatch.setattr(uf, "_ssrf_guard", lambda url: True)
+    monkeypatch.setattr(uf, "_mark_attempt_sync", lambda db, fn: None)
+    monkeypatch.setattr(uf, "_abandon_sync", lambda db, fn, reason="": calls["abandon"].append(fn))
+    monkeypatch.setattr(uf, "_host_strike_sync", lambda db, url, reason: calls["strike"].append(url))
+
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("browser", "https://wall.example.com/landing")
+
+    async def fake_browser(crawler, url, timeout_s):
+        raise uf._BrowserBlocked(url, "Blocked by anti-bot protection: Akamai block")
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+    monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
+    stub = {"id": 1, "url": "https://redir.example.com/x", "filename": "URL: https://redir.example.com/x"}
+    assert asyncio.run(uf._process_one(None, stub, asyncio.Semaphore(1), None, 5.0)) is False
+    assert calls["abandon"] == [stub["filename"]]
+    assert calls["strike"] == ["https://wall.example.com/landing"]
+
+
+def test_browser_blocked_reason_is_sanitized():
+    e = uf._BrowserBlocked("https://x.example.com", "captcha\n\x1b[31mforged log\x1b[0m" + "x" * 500)
+    assert "\n" not in e.reason and "\x1b" not in e.reason and len(e.reason) <= 200
+
+
+def test_run_continuous_skips_render_when_redirect_lands_on_blocked_host(monkeypatch):
+    stubs = [{"id": 0, "url": "https://redir.example.com/x", "filename": "URL: https://redir.example.com/x"}]
+    served = {"done": False}
+
+    def fake_pending(conn, n):
+        if served["done"]:
+            return []
+        served["done"] = True
+        return list(stubs)
+
+    calls = {"abandon": [], "browser": []}
+    monkeypatch.setattr(uf, "pending_url_stubs", fake_pending)
+    monkeypatch.setattr(uf, "blocked_hosts", lambda conn: {"wall.example.com"})
+    monkeypatch.setattr(uf, "get_connection", lambda db_path: type("C", (), {"close": lambda self: None})())
+    monkeypatch.setattr(uf, "build_http_client", lambda timeout_s=10.0: type("X", (), {"aclose": _noop_async})())
+    monkeypatch.setattr(uf, "build_cffi_session", lambda: None)
+    monkeypatch.setattr(uf, "_ssrf_guard", lambda url: True)
+    monkeypatch.setattr(uf, "_mark_attempt_sync", lambda db, fn: None)
+    monkeypatch.setattr(uf, "_abandon_sync", lambda db, fn, reason="": calls["abandon"].append((fn, reason)))
+
+    async def fake_resolve(url, timeout_s, http_client=None, cffi_session=None):
+        return ("browser", "https://wall.example.com/landing")
+
+    async def fake_browser(crawler, url, timeout_s):
+        calls["browser"].append(url)
+        return ("t", "rendered")
+
+    monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
+    monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
+
+    class _FakeCrawler:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    import sys as _sys
+    import types as _types
+
+    fake_mod = _types.ModuleType("crawl4ai")
+    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
+    fake_mod.BrowserConfig = lambda **k: None
+    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+
+    r = asyncio.run(uf.run_continuous(None, http_concurrency=1, browser_cap=1, target=1))
+    assert r == {"total": 1, "done": 0, "failed": 1}
+    assert calls["browser"] == []
+    assert calls["abandon"] == [("URL: https://redir.example.com/x", "host blocked")]
+
+
+def test_strike_key_ignores_query_and_fragment():
+    k = uf._strike_key
+    assert k("https://Wall.example.com/page?x=1#a") == "https://wall.example.com/page"
+    assert k("https://wall.example.com/page#2") == k("https://wall.example.com/page?y=9")
+    assert k("https://wall.example.com") == "https://wall.example.com/"
+    assert k("https://wall.example.com/a") != k("https://wall.example.com/b")

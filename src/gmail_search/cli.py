@@ -144,6 +144,137 @@ def sync(ctx):
     click.echo(f"Synced {count} new messages.")
 
 
+def _refetch_work_from_unfetched_rows(conn, *, user_id: str) -> list[tuple[str, dict]]:
+    """(message_id, att_meta) for every row with fetch_status != 'ok'. The
+    Gmail attachmentId is not stored on the row, so it is re-read from the
+    message's raw_json by filename."""
+    import json as _json
+
+    from gmail_search.gmail.client import _sanitize_filename
+    from gmail_search.gmail.parser import attachment_metas_from_raw
+    from gmail_search.store.queries import find_unfetched_attachments
+
+    work: list[tuple[str, dict]] = []
+    for row in find_unfetched_attachments(conn, user_id=user_id):
+        raw_row = conn.execute(
+            "SELECT raw_json FROM messages WHERE id = %s AND user_id = %s", (row["message_id"], user_id)
+        ).fetchone()
+        if raw_row is None:
+            continue
+        try:
+            metas = attachment_metas_from_raw(_json.loads(raw_row["raw_json"]))
+        except (TypeError, ValueError, RecursionError) as e:
+            logger.warning(f"refetch: unreadable raw_json on {row['message_id']}: {e}")
+            continue
+        match = [m for m in metas if _sanitize_filename(m.get("filename") or "") == row["filename"]]
+        if not match:
+            logger.warning(f"refetch: no raw_json part matches {row['filename']!r} on {row['message_id']}")
+            continue
+        work.append((row["message_id"], match[0]))
+    return work
+
+
+def _dedupe_refetch_work(work: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+    from gmail_search.gmail.client import _sanitize_filename
+
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, dict]] = []
+    for message_id, meta in work:
+        key = (message_id, _sanitize_filename(meta.get("filename") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((message_id, meta))
+    return out
+
+
+def _print_refetch_plan(work: list[tuple[str, dict]]) -> None:
+    total = 0
+    for message_id, meta in work:
+        size = int(meta.get("size") or 0)
+        total += size
+        click.echo(f"  {message_id}  {size / 1024 / 1024:7.1f} MB  {meta.get('filename')}")
+    click.echo(f"{len(work)} attachment(s), {total / 1024 / 1024:.1f} MB total")
+
+
+@main.command(
+    "refetch-attachments",
+    help="Re-fetch attachments whose bytes were never stored: rows with fetch_status != 'ok', "
+    "plus (default on) files that Gmail lists in raw_json but that have no row at all — "
+    "the pre-2026-09 silent drops.",
+)
+@click.option("--email", type=str, default=None, help="Gmail account to backfill. Defaults to GMS_BOOTSTRAP_EMAIL.")
+@click.option("--dry-run", is_flag=True, default=False, help="List what would be fetched and exit.")
+@click.option("--limit", type=int, default=None, help="Fetch at most this many attachments.")
+@click.option(
+    "--scan-raw-json/--no-scan-raw-json",
+    default=True,
+    help="Also scan messages.raw_json for listed-but-missing files (one full pass over large messages; ~3 min per 400k messages).",
+)
+@click.option("--min-size-mb", type=float, default=10.0, help="Only scan messages whose Gmail sizeEstimate is at least this big.")
+@click.option("--message-id", "message_ids", multiple=True, help="Restrict to these Gmail message ids (repeatable).")
+@common_options
+@click.pass_context
+def refetch_attachments(ctx, email, dry_run, limit, scan_raw_json, min_size_mb, message_ids):
+    import os as _os
+    from collections import Counter
+
+    from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
+    from gmail_search.gmail.client import ingest_attachment
+    from gmail_search.store.queries import iter_missing_attachment_metas
+
+    if email:
+        _os.environ["GMS_BOOTSTRAP_EMAIL"] = email
+
+    cfg = ctx.obj["config"]
+    data_dir = ctx.obj["data_dir"]
+    conn = get_connection(ctx.obj["db_path"])
+    active_user_id = _resolve_uid(conn)
+
+    work = _refetch_work_from_unfetched_rows(conn, user_id=active_user_id)
+    if scan_raw_json:
+        min_bytes = int(min_size_mb * 1024 * 1024)
+        work.extend(
+            iter_missing_attachment_metas(
+                conn,
+                user_id=active_user_id,
+                min_size_estimate=min_bytes,
+                message_ids=list(message_ids) or None,
+            )
+        )
+    work = _dedupe_refetch_work(work)
+    if message_ids:
+        wanted = set(message_ids)
+        work = [w for w in work if w[0] in wanted]
+    if limit is not None:
+        work = work[:limit]
+
+    _print_refetch_plan(work)
+    if dry_run or not work:
+        conn.close()
+        return
+
+    from gmail_search.gmail.auth import build_gmail_service
+
+    service = build_gmail_service(data_dir, email=email)
+    cap = cfg["attachments"]["max_file_size_mb"] * 1024 * 1024
+    tally: Counter = Counter()
+    for message_id, meta in work:
+        status = ingest_attachment(
+            conn,
+            service,
+            message_id,
+            meta,
+            attachments_dir=data_dir / "attachments",
+            max_attachment_size=cap,
+            user_id=active_user_id,
+        )
+        tally[status] += 1
+        click.echo(f"  {status:18s} {message_id}  {meta.get('filename')}")
+    conn.close()
+    click.echo("Done: " + ", ".join(f"{k}={v}" for k, v in sorted(tally.items())))
+
+
 @main.command(help="Extract text and images from downloaded attachments (and Drive docs linked from bodies)")
 @click.option(
     "--email",
@@ -538,6 +669,36 @@ def crawl(ctx, loop, interval, concurrency, limit):
             logger.warning(f"crawl loop error: {e}")
             progress.heartbeat()
         _time.sleep(interval)
+
+
+@main.command(name="crawl-hosts", help="Show hosts the crawler has blocked for anti-bot walls; --unblock lifts one.")
+@common_options
+@click.option("--all", "show_all", is_flag=True, help="Include hosts with strikes but no active block.")
+@click.option("--unblock", default=None, metavar="HOST", help="Lift the block on HOST now.")
+@click.pass_context
+def crawl_hosts(ctx, show_all, unblock):
+    from gmail_search.store.db import get_connection
+    from gmail_search.store.queries import list_host_state, unblock_host
+
+    conn = get_connection(ctx.obj["db_path"])
+    try:
+        if unblock:
+            unblock_host(conn, unblock.lower())
+            conn.commit()
+            click.echo(f"Unblocked {unblock}.")
+            return
+        rows = list_host_state(conn, blocked_only=not show_all)
+    finally:
+        conn.close()
+    if not rows:
+        click.echo("No blocked hosts.")
+        return
+    for r in rows:
+        until = r["blocked_until"].strftime("%Y-%m-%d") if r["blocked_until"] else "-"
+        click.echo(
+            f"{r['host']:<45} until {until}  blocks={r['block_count']} strikes={r['strikes']}"
+            f"  {(r['last_reason'] or '')[:60]}"
+        )
 
 
 def _extract_pending_attachments(conn, att_config: dict, *, user_id: str | None = None) -> int:

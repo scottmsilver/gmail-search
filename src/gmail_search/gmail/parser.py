@@ -58,6 +58,15 @@ def _extract_parts(payload: dict) -> tuple[str, str, list[dict]]:
     return "\n".join(text_parts), "\n".join(html_parts), attachments
 
 
+def attachment_metas_from_raw(raw: dict) -> list[dict]:
+    """Attachment part metadata (`filename`, `mime_type`, `attachment_id`,
+    `size`) from a stored Gmail `messages.get` response. Same walk
+    `parse_message` does at ingest; exposed so the backfill can re-read
+    what Gmail listed from `messages.raw_json` without another API call."""
+    _, _, metas = _extract_parts(raw.get("payload") or {})
+    return metas
+
+
 def _parse_rfc2822_to_utc(s: str):
     """Parse an RFC 2822 date string to a UTC-aware datetime, or
     return None if unparseable.

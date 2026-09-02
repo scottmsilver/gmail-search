@@ -2,11 +2,13 @@ import asyncio
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Query  # noqa: F401  (Body used in POST /api/sql)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
 from gmail_search.auth import require_user_id
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
@@ -478,18 +480,28 @@ def _attachment_manifest_dict(a) -> dict:
     size = int(getattr(a, "size_bytes", 0) or 0)
     text = getattr(a, "extracted_text", "") or ""
     text_chars = len(text)
+    # "ok" = bytes on disk. Anything else means Gmail lists the file but
+    # we never stored it (too large / fetch failed): advertise the row so
+    # the file isn't mistaken for absent, but offer no byte-backed mode.
+    fetch_status = getattr(a, "fetch_status", "ok") or "ok"
+    fetched = fetch_status == "ok"
+    # Drive/URL stubs are "ok" with no raw_path (their content lives in
+    # extracted_text), so byte-backed modes need BOTH the status and a path.
+    has_bytes = fetched and bool(getattr(a, "raw_path", None))
     is_pdf = mime == "application/pdf"
     is_image = mime.startswith("image/")
     fits_inline = size > 0 and size <= _INLINE_BYTES_CAP
-    can_inline_pdf = is_pdf and fits_inline
-    can_inline_image = is_image and fits_inline
-    can_render_pages = is_pdf  # page rasterization path works regardless of size
+    can_inline_pdf = is_pdf and fits_inline and has_bytes
+    can_inline_image = is_image and fits_inline and has_bytes
+    can_render_pages = is_pdf and has_bytes  # rasterization works regardless of size, but needs bytes
     # Decision tree: if we already have "enough" text (500 chars ≈ a short
     # paragraph is roughly the threshold where text is usually useful),
     # prefer text. Otherwise prefer the binary path appropriate to the
     # mime type. Fall back to "text" so the agent at least tries
     # on-demand extraction.
-    if text_chars >= 500:
+    if not fetched:
+        suggested = "unfetched"
+    elif text_chars >= 500:
         suggested = "text"
     elif can_inline_image:
         suggested = "inline_image"
@@ -504,6 +516,7 @@ def _attachment_manifest_dict(a) -> dict:
         "filename": getattr(a, "filename", None),
         "mime_type": mime,
         "size_bytes": size,
+        "fetch_status": fetch_status,
         "text_chars": text_chars,
         "can_inline_pdf": can_inline_pdf,
         "can_inline_image": can_inline_image,
@@ -846,6 +859,81 @@ def create_app(
     # `nonlocal` declaration.
     _ready = {"value": False}
 
+    # Search canary state for /healthz?ready=1. Readiness used to mean only
+    # "the index loaded" — which stayed green through the 2026-07 deploy-skew
+    # incident where EVERY search 500'd for nine days. The canary runs a real
+    # (rate-limited) search through the bootstrap engine so readiness means
+    # "queries actually succeed".
+    #
+    # /healthz is UNAUTHENTICATED, so the public `error` field carries only
+    # exception CLASS names — full messages (which can hold paths, DB
+    # diagnostics, API details) go to the server log. The lock makes probes
+    # single-flight: concurrent health checks at interval expiry can't
+    # stampede the engine (sync endpoints run on a threadpool).
+    _canary = {"ts": 0.0, "ok": True, "error": None}
+    _canary_lock = threading.Lock()
+
+    def _canary_interval_seconds() -> float:
+        try:
+            return float(os.environ.get("GMAIL_SEARCH_CANARY_INTERVAL", "300"))
+        except (TypeError, ValueError):
+            return 300.0
+
+    def _canary_fail(stage: str, exc: BaseException) -> None:
+        logger.error("search canary FAILED (%s): %s: %s", stage, type(exc).__name__, exc)
+        _canary.update(ok=False, error=f"{stage}: {type(exc).__name__} (details in server log)")
+
+    def _run_search_canary() -> dict:
+        """Run (or return the cached result of) the readiness search probe.
+
+        Skips — reporting ok — only when there is legitimately nothing to
+        probe (no bootstrap user yet, no index yet). Everything else that
+        breaks the probe (DB down, engine won't build, search throws) FAILS
+        the canary: those conditions break real searches too. Not a wedge:
+        every probe retries, so readiness recovers on the next success."""
+        import time as _time
+
+        from gmail_search.auth.write_user import get_bootstrap_user_id
+
+        with _canary_lock:
+            now = _time.time()
+            if now - _canary["ts"] < _canary_interval_seconds():
+                return dict(_canary)
+            _canary["ts"] = now
+
+            try:
+                conn_c = get_connection(db_path)
+                try:
+                    uid = get_bootstrap_user_id(conn_c)
+                finally:
+                    conn_c.close()
+            except RuntimeError as exc:
+                if "not found" in str(exc):
+                    # Fresh install, no bootstrap user yet: nothing to probe.
+                    _canary.update(ok=True, error=None)
+                else:
+                    _canary_fail("bootstrap lookup", exc)
+                return dict(_canary)
+            except Exception as exc:  # noqa: BLE001 — DB down ⇒ real searches are broken too
+                _canary_fail("db", exc)
+                return dict(_canary)
+
+            try:
+                engine = get_engine(uid)
+            except FileNotFoundError:
+                # No index yet — same "legitimately ready" contract as prewarm.
+                _canary.update(ok=True, error=None)
+                return dict(_canary)
+            except Exception as exc:  # noqa: BLE001 — engine won't build ⇒ searches are 500ing
+                _canary_fail("engine build failed", exc)
+                return dict(_canary)
+            try:
+                engine.search_threads("health canary probe", top_k=1)
+                _canary.update(ok=True, error=None)
+            except Exception as exc:  # noqa: BLE001 — the whole point: catch anything a real search throws
+                _canary_fail("search", exc)
+            return dict(_canary)
+
     def _user_index_dir(user_id: str) -> Path:
         # Per-user fallback dir; resolve_active_index_dir uses the DB
         # pointer first and only returns this if there's no pointer row.
@@ -1058,7 +1146,18 @@ def create_app(
         if not ready:
             return {"ok": True}
         if _ready["value"]:
-            return {"ok": True, "ready": True}
+            canary = _run_search_canary()
+            if canary["ok"]:
+                return {"ok": True, "ready": True, "search_ok": True}
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "ready": False,
+                    "search_ok": False,
+                    "reason": f"search canary failing: {canary['error']}",
+                },
+                status_code=503,
+            )
         return JSONResponse({"ok": False, "ready": False, "reason": "index warming"}, status_code=503)
 
     @app.get("/", response_class=HTMLResponse)
@@ -2304,11 +2403,16 @@ def create_app(
 
         _secret = os.environ.get("GMS_SESSION_SECRET")
         if _secret and len(_secret) >= 32:
+            ttl_sec = 900
+            exp = int(_time.time()) + ttl_sec
             out["blob_token"] = _jwt.encode(
-                {"aid": attachment_id, "uid": user_id, "exp": int(_time.time()) + 900},
+                {"aid": attachment_id, "uid": user_id, "exp": exp},
                 _secret,
                 algorithm="HS256",
             )
+            # Let callers plan batch sizes instead of guessing at "~15 min".
+            out["fetch_url_expires_at"] = exp
+            out["fetch_url_ttl_sec"] = ttl_sec
         if inline and size <= max_inline_bytes:
             data = resolved.read_bytes()
             out["sha256"] = _hashlib.sha256(data).hexdigest()
@@ -2762,6 +2866,7 @@ def create_app(
         pid file already points at a live process.
         """
         from fastapi.responses import JSONResponse
+
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
         pid_path = data_dir / pid_filename
@@ -2808,6 +2913,7 @@ def create_app(
         409 if a daemon is already running for THIS user.
         """
         from fastapi.responses import JSONResponse
+
         from gmail_search.jobs import gmail_search_command, spawn_detached
 
         email = _user_email(user_id)

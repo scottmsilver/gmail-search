@@ -14,7 +14,10 @@ DEFAULTS: dict[str, Any] = {
         "task_type_query": "RETRIEVAL_QUERY",
     },
     "attachments": {
-        "max_file_size_mb": 10,
+        # Gmail caps a whole message at 25 MB, so 30 MB means "keep every
+        # attachment Gmail can carry". Anything above still gets a
+        # manifest row (fetch_status='skipped_too_large'), never a silent drop.
+        "max_file_size_mb": 30,
         "max_pdf_pages": 20,
         "max_images_per_message": 10,
         "max_attachment_text_tokens": 50000,

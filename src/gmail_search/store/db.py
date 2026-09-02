@@ -26,6 +26,7 @@ TABLE_DOCS: dict[str, str] = {
         "- id (TEXT PK): Gmail message ID. Use as cite_ref source via thread_id.\n"
         "- thread_id (TEXT): Gmail thread this message belongs to.\n"
         "- from_addr (TEXT): 'Name <email>' format. For sender or domain matching, prefer BM25 (below) over LIKE.\n"
+        "  BM25 keeps a domain as ONE token including its TLD: `from_addr:landmarkswest.com` matches, `from_addr:landmarkswest` does not.\n"
         "- to_addr (TEXT): comma-separated 'Name <email>' recipients.\n"
         "- subject (TEXT): often starts with 'Re:' or 'Fwd:'.\n"
         "- body_text (TEXT): plain-text body.\n"
@@ -72,7 +73,9 @@ TABLE_DOCS: dict[str, str] = {
         "- size_bytes (INT).\n"
         "- extracted_text (TEXT): parsed text (PDF/DOCX/TXT). NULL if image-only or extraction failed.\n"
         "- image_path (TEXT): on-disk path to extracted image, NULL if non-image.\n"
-        "- raw_path (TEXT): on-disk path to original raw bytes.\n"
+        "- raw_path (TEXT): on-disk path to original raw bytes. NULL for Drive/URL stubs and for unfetched rows.\n"
+        "- fetch_status (TEXT): 'ok' | 'skipped_too_large' | 'fetch_failed'. Non-ok means Gmail lists the file but the bytes\n"
+        "  were not stored (size_bytes is then Gmail's declared size). The email still carried the file — do not report it as absent.\n"
         "\n"
         "FAST FREE-TEXT SEARCH — use BM25, NOT `LIKE '%...%'`:\n"
         "  `attachments_bm25_idx` covers (filename, extracted_text).\n"
@@ -163,6 +166,12 @@ _INTERNAL_TABLES = {
     "embeddings",
     "sync_state",
     "query_cache",
+    # URL-crawler bookkeeping (dead-URL tombstones, per-host anti-bot
+    # circuit breaker). Operational state, inspected via `gmail-search
+    # crawl-hosts`, not something the chat LLM should query.
+    "crawl_url_state",
+    "crawl_host_state",
+    "crawl_host_strike",
     # scann_index_pointer is a single-row KV tracking the active ScaNN
     # index directory. Infrastructure, not something an LLM should query.
     "scann_index_pointer",

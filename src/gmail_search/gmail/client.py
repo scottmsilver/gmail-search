@@ -12,6 +12,7 @@ from gmail_search.store.db import get_connection
 from gmail_search.store.models import Attachment
 from gmail_search.store.queries import (
     get_sync_state,
+    record_unfetched_attachment,
     set_sync_state,
     upsert_attachment,
     upsert_drive_stub,
@@ -25,8 +26,9 @@ def _sanitize_filename(filename: str) -> str:
     """Strip path components to prevent directory traversal."""
     # Take only the final component, strip any path separators
     name = Path(filename).name
-    # Remove any remaining dangerous characters
-    name = name.replace("\x00", "").strip(". ")
+    # Remove NULs and other control characters (newlines / terminal escapes
+    # would otherwise reach logs and CLI output verbatim).
+    name = "".join(ch for ch in name if ch.isprintable() or ch == " ").strip(". ")
     return name or "unnamed_attachment"
 
 
@@ -40,6 +42,109 @@ def _download_attachment_data(service: Resource, message_id: str, attachment_id:
     # input — Python tolerated it but the math was wrong.
     padded = data + "=" * (-len(data) % 4)
     return base64.urlsafe_b64decode(padded)
+
+
+def _declared_size(att_meta: dict) -> int:
+    """Gmail's declared part size, clamped to >= 0 so a bogus negative can't
+    slip under the size cap."""
+    try:
+        return max(int(att_meta.get("size") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _download_to_path(
+    service: Resource, message_id: str, attachment_id: str, raw_path: Path, *, max_attachment_size: int
+) -> int | None:
+    """Fetch and write the bytes; return their length, or None when the
+    DECODED payload exceeds the cap (the declared size is not trusted)."""
+    data = _download_attachment_data(service, message_id, attachment_id)
+    if len(data) > max_attachment_size:
+        return None
+    raw_path.write_bytes(data)
+    return len(data)
+
+
+def _is_credential_error(exc: BaseException) -> bool:
+    from gmail_search.gmail.auth import classify_credential_error
+
+    return classify_credential_error(exc) is not None
+
+
+def ingest_attachment(
+    conn,
+    service: Resource,
+    message_id: str,
+    att_meta: dict,
+    *,
+    attachments_dir: Path,
+    max_attachment_size: int,
+    user_id: str | None = None,
+) -> str:
+    """Store one attachment Gmail listed on `message_id` and ALWAYS leave a
+    row behind. Returns the row's `fetch_status`:
+
+    - "ok": bytes written under `attachments_dir/<message_id>/`.
+    - "skipped_too_large": declared size > `max_attachment_size`; no API
+      call is made, a manifest-only row records the declared size.
+    - "fetch_failed": `attachments.get` raised; manifest-only row.
+
+    Before 2026-09-02 the last two cases hit `continue` and wrote nothing,
+    so an 18 MB PDF looked exactly like an email with no PDF at all."""
+    safe_name = _sanitize_filename(att_meta["filename"])
+    mime_type = att_meta["mime_type"]
+    declared = _declared_size(att_meta)
+
+    def _unfetched(status: str) -> str:
+        record_unfetched_attachment(
+            conn,
+            message_id=message_id,
+            filename=safe_name,
+            mime_type=mime_type,
+            size_bytes=declared,
+            fetch_status=status,
+            user_id=user_id,
+        )
+        return status
+
+    if declared > max_attachment_size:
+        logger.warning(f"Not storing attachment {safe_name} ({declared} bytes) — exceeds size limit; manifest row only")
+        return _unfetched("skipped_too_large")
+
+    msg_att_dir = attachments_dir / message_id
+    msg_att_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = msg_att_dir / safe_name
+    try:
+        size = _download_to_path(
+            service, message_id, att_meta["attachment_id"], raw_path, max_attachment_size=max_attachment_size
+        )
+    except Exception as e:
+        logger.warning(f"Failed to download attachment {safe_name} on {message_id}: {e}; manifest row only")
+        _unfetched("fetch_failed")
+        # A dead/scope-stripped token is not an attachment-local problem:
+        # let it reach the watch loop's classify_credential_error so the
+        # cycle is marked unhealthy instead of "synced fine".
+        if _is_credential_error(e):
+            raise
+        return "fetch_failed"
+    if size is None:
+        logger.warning(f"Not storing attachment {safe_name}: decoded payload exceeds size limit; manifest row only")
+        return _unfetched("skipped_too_large")
+
+    upsert_attachment(
+        conn,
+        Attachment(
+            id=None,
+            message_id=message_id,
+            filename=safe_name,
+            mime_type=mime_type,
+            size_bytes=size,
+            raw_path=str(raw_path),
+            fetch_status="ok",
+        ),
+        user_id=user_id,
+    )
+    return "ok"
 
 
 def download_messages(
@@ -192,33 +297,14 @@ def download_messages(
                     _upsert_url_stub(conn, message_id=msg.id, url=url)
 
             for att_meta in att_metas:
-                if att_meta["size"] > max_attachment_size:
-                    logger.warning(
-                        f"Skipping attachment {att_meta['filename']} "
-                        f"({att_meta['size']} bytes) — exceeds size limit"
-                    )
-                    continue
-
-                msg_att_dir = attachments_dir / msg.id
-                msg_att_dir.mkdir(exist_ok=True)
-                raw_path = msg_att_dir / _sanitize_filename(att_meta["filename"])
-
-                try:
-                    data = _download_attachment_data(service, msg.id, att_meta["attachment_id"])
-                    raw_path.write_bytes(data)
-                except Exception as e:
-                    logger.warning(f"Failed to download attachment: {e}")
-                    continue
-
-                att = Attachment(
-                    id=None,
-                    message_id=msg.id,
-                    filename=att_meta["filename"],
-                    mime_type=att_meta["mime_type"],
-                    size_bytes=len(data),
-                    raw_path=str(raw_path),
+                ingest_attachment(
+                    conn,
+                    service,
+                    msg.id,
+                    att_meta,
+                    attachments_dir=attachments_dir,
+                    max_attachment_size=max_attachment_size,
                 )
-                upsert_attachment(conn, att)
 
             downloaded += 1
 
@@ -349,27 +435,14 @@ def sync_new_messages(
                 _upsert_url_stub(conn, message_id=msg.id, url=url)
 
         for att_meta in att_metas:
-            if att_meta["size"] > max_attachment_size:
-                continue
-            msg_att_dir = attachments_dir / msg.id
-            msg_att_dir.mkdir(exist_ok=True)
-            safe_name = _sanitize_filename(att_meta["filename"])
-            raw_path = msg_att_dir / safe_name
-            try:
-                data = _download_attachment_data(service, msg.id, att_meta["attachment_id"])
-                raw_path.write_bytes(data)
-            except Exception as e:
-                logger.warning(f"Failed to download attachment: {e}")
-                continue
-            att = Attachment(
-                id=None,
-                message_id=msg.id,
-                filename=safe_name,
-                mime_type=att_meta["mime_type"],
-                size_bytes=len(data),
-                raw_path=str(raw_path),
+            ingest_attachment(
+                conn,
+                service,
+                msg.id,
+                att_meta,
+                attachments_dir=attachments_dir,
+                max_attachment_size=max_attachment_size,
             )
-            upsert_attachment(conn, att)
 
         count += 1
 

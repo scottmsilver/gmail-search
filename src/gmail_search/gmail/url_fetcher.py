@@ -26,7 +26,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from gmail_search.store.db import JobProgress, get_connection
-from gmail_search.store.queries import fill_url_attachment, pending_url_stubs
+from gmail_search.store.queries import (
+    blocked_hosts,
+    clear_host_strikes,
+    clear_url_dead,
+    fill_url_attachment,
+    mark_url_dead,
+    pending_url_stubs,
+    record_host_strike,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,9 +165,10 @@ def _truncate_markdown(text: str, max_chars: int = _MAX_CRAWL_CHARS) -> str:
 
 async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str, str] | None:
     """Single URL fetch through an already-open `AsyncWebCrawler`.
-    Returns (title, markdown) or None. Never raises — all exceptions
-    are caught and logged, and a failure just means the row stays
-    pending for the next pass.
+    Returns (title, markdown) or None. Engine/timeout errors are caught
+    and logged (None → the row stays pending for the next pass). The one
+    exception raised is `_BrowserBlocked`, for anti-bot walls, which the
+    orchestrators turn into abandon-URL + strike-host.
     """
     try:
         from crawl4ai import CrawlerRunConfig
@@ -211,8 +220,13 @@ async def _fetch_via_crawl4ai(crawler, url: str, timeout_s: float) -> tuple[str,
         result = result_container
 
     if result is None or not getattr(result, "success", False):
-        reason = getattr(result, "error_message", "no result") if result else "no result"
-        logger.info(f"url_fetcher: crawl failed for {url}: {str(reason)[:200]}")
+        reason = _clean_reason(getattr(result, "error_message", "no result") if result else "no result")
+        logger.info(f"url_fetcher: crawl failed for {url}: {reason}")
+        if _is_antibot_reason(reason):
+            # A wall doesn't come down with backoff — retrying burns another
+            # Chromium render through the egress proxy each time. Let the
+            # orchestrator abandon the URL and strike the host.
+            raise _BrowserBlocked(url, reason[:200])
         return None
 
     markdown = ""
@@ -273,6 +287,39 @@ class _SSRFBlocked(Exception):
     """A redirect hop resolved to a blocked (private/loopback/link-local)
     target. Raised so the caller does NOT fall back to crawl4ai, which would
     follow the same attacker-controlled redirect WITHOUT the per-hop guard."""
+
+
+class _BrowserBlocked(Exception):
+    """The browser render hit an anti-bot wall (captcha, JS challenge,
+    Akamai/DataDome/Cloudflare 403) or crawl4ai judged the page structurally
+    empty. Neither changes on retry. Raised out of `_fetch_via_crawl4ai` so
+    the orchestrator abandons the URL and strikes the host instead of
+    spending the retry budget on more renders."""
+
+    def __init__(self, url: str, reason: str):
+        reason = _clean_reason(reason)
+        super().__init__(f"{url}: {reason}")
+        self.url = url  # the TERMINAL url the browser rendered — the wall's host
+        self.reason = reason
+
+
+# Substrings of crawl4ai's `error_message` that mean "a wall, not a hiccup".
+# Measured 2026-09-01 over two weeks of crawl.log: these five families were
+# 6,300 of 7,140 browser failures, from only 345 distinct URLs.
+_ANTIBOT_MARKERS = ("anti-bot", "captcha", "challenge", "akamai", "datadome", "http 403")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _clean_reason(reason: str, limit: int = 200) -> str:
+    """Failure reasons derive from remote page content: strip control
+    characters (newlines, ANSI escapes) so they can't forge log lines or
+    terminal output, and bound the length."""
+    return _CONTROL_CHARS_RE.sub(" ", str(reason or ""))[:limit]
+
+
+def _is_antibot_reason(reason: str) -> bool:
+    low = (reason or "").lower()
+    return any(m in low for m in _ANTIBOT_MARKERS)
 
 
 _JSON_PROSE_RE = re.compile(r'"([^"\\]{40,})"')
@@ -771,7 +818,10 @@ async def fetch_url_markdown(
         return data  # type: ignore[return-value]
     if kind == "fail":
         return None
-    return await _fetch_via_crawl4ai(crawler, data, timeout_s)  # data = guarded browser_url
+    try:
+        return await _fetch_via_crawl4ai(crawler, data, timeout_s)  # data = guarded browser_url
+    except _BrowserBlocked:
+        return None
 
 
 def _fetch_pdf_url(url: str) -> tuple[str, str] | None:
@@ -826,23 +876,31 @@ def _mark_attempt_sync(db_path, filename: str) -> None:
     duplicate stubs back off / abandon together instead of each being retried.
     Deliberately cross-user: URL reachability is a property of the URL, not
     of the mailbox that linked it — a dead domain is dead for everyone."""
+    from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
+
     conn = get_connection(db_path)
     try:
-        conn.execute(
+        rows = conn.execute(
             "UPDATE attachments SET crawl_attempts = crawl_attempts + 1, "
-            f"crawl_last_attempt = now() WHERE id IN ({_LOCKED_UNFILLED_COPIES})",
+            f"crawl_last_attempt = now() WHERE id IN ({_LOCKED_UNFILLED_COPIES})"
+            " RETURNING crawl_attempts",
             (filename,),
-        )
+        ).fetchall()
+        # The row cap alone is defeated by new mail (each arrival is a fresh
+        # 0-attempt copy). Once any copy has spent the budget, remember the
+        # URL itself as dead so later copies are never selected.
+        if any(int(r["crawl_attempts"]) >= _MAX_CRAWL_ATTEMPTS for r in rows):
+            mark_url_dead(conn, filename, "retry cap")
         conn.commit()
     finally:
         conn.close()
 
 
-def _abandon_sync(db_path, filename: str) -> None:
+def _abandon_sync(db_path, filename: str, reason: str = "unreachable") -> None:
     """PERMANENT-failure fast path: jump all copies of this URL straight to the
-    retry cap (NEVER-succeeds: private/reserved IP, NXDOMAIN dead domain) so we
-    don't burn repeated browser fetches over the ~3 weeks of exponential
-    backoff a normal-failing URL would take to reach the cap."""
+    retry cap (NEVER-succeeds: private/reserved IP, NXDOMAIN dead domain,
+    anti-bot wall) and record the URL dead so new copies from new mail stay
+    dead too — otherwise every arrival re-bought a browser render."""
     from gmail_search.store.queries import _MAX_CRAWL_ATTEMPTS  # noqa: PLC0415
 
     conn = get_connection(db_path)
@@ -852,9 +910,56 @@ def _abandon_sync(db_path, filename: str) -> None:
             f"WHERE id IN ({_LOCKED_UNFILLED_COPIES})",
             (_MAX_CRAWL_ATTEMPTS, filename),
         )
+        mark_url_dead(conn, filename, _clean_reason(reason))
         conn.commit()
     finally:
         conn.close()
+
+
+def _strike_key(url: str) -> str:
+    """Canonical form a strike is keyed on: scheme://host/path, no query
+    or fragment, host lower-cased. Strikes count DISTINCT urls, so
+    without this three links to one walled page (`/wall#1`, `/wall#2`,
+    `/wall?x=3`) in a single crafted email would block the host."""
+    p = urlparse(url)
+    return f"{(p.scheme or 'https').lower()}://{(p.hostname or '').lower()}{p.path or '/'}"
+
+
+def _host_strike_sync(db_path, url: str, reason: str) -> None:
+    """Record an anti-bot wall against `url`'s host — `url` must be the
+    TERMINAL url the browser rendered, not the email's original link, so
+    a redirector (mimecast, avanan, ...) isn't blamed for its targets'
+    walls. Logs when the host tips into a block. Never raises."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return
+    reason = _clean_reason(reason)
+    try:
+        conn = get_connection(db_path)
+        try:
+            if record_host_strike(conn, host, _strike_key(url), reason):
+                logger.warning(f"url_fetcher: host {host} blocked after repeated anti-bot walls ({reason[:80]})")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"url_fetcher: host strike bookkeeping failed for {host}: {e}")
+
+
+def _host_ok_sync(db_path, url: str) -> None:
+    """A page came back from `url`'s host: forget its in-progress strikes."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return
+    try:
+        conn = get_connection(db_path)
+        try:
+            clear_host_strikes(conn, host)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"url_fetcher: host clear bookkeeping failed for {host}: {e}")
 
 
 def _write_result_sync(db_path, stub: dict, title: str, markdown: str) -> None:
@@ -885,6 +990,10 @@ def _write_result_sync(db_path, stub: dict, title: str, markdown: str) -> None:
             reps[stub_owner] = stub["id"]
         for rep_id in reps.values():
             fill_url_attachment(conn, attachment_id=rep_id, title=title, text=markdown, url=stub["url"])
+        # The page came back — if a final-retry stamp had already tombstoned
+        # the URL (attempt N is stamped BEFORE it runs), lift it so later
+        # copies from new mail / new users are crawled and filled normally.
+        clear_url_dead(conn, stub["filename"])
         dup_ids = [r["id"] for r in rows if r["id"] not in set(reps.values())]
         if dup_ids:
             conn.execute(
@@ -945,14 +1054,25 @@ async def _process_one(
         )
 
     if kind == "ok":
-        return await _persist_result(db_path, stub, data)
+        ok = await _persist_result(db_path, stub, data)
+        if ok:
+            await asyncio.to_thread(_host_ok_sync, db_path, stub["url"])
+        return ok
     if kind == "fail":
         return False
     # Browser phase — HTTP slot released; acquire the small browser pool.
     bsem = browser_sem if browser_sem is not None else sem
     async with bsem:
-        result = await _fetch_via_crawl4ai(crawler, data, timeout_s)
-    return await _persist_result(db_path, stub, result)
+        try:
+            result = await _fetch_via_crawl4ai(crawler, data, timeout_s)
+        except _BrowserBlocked as e:
+            await asyncio.to_thread(_abandon_sync, db_path, stub["filename"], e.reason)
+            await asyncio.to_thread(_host_strike_sync, db_path, e.url, e.reason)
+            return False
+    ok = await _persist_result(db_path, stub, result)
+    if ok:
+        await asyncio.to_thread(_host_ok_sync, db_path, data)  # terminal url: the host that served it
+    return ok
 
 
 async def run(
@@ -1087,12 +1207,29 @@ async def run_continuous(
     http_client = build_http_client(timeout_s)
     cffi_session = build_cffi_session()
 
+    # Hosts under a block, refreshed on every DB pull. `pending_url_stubs`
+    # already drops stubs whose ORIGINAL host is blocked; this set catches
+    # the redirect case — a benign link that resolves onto a blocked host
+    # must not be rendered either.
+    # One immutable snapshot, swapped whole on the event loop, so a worker
+    # never sees a half-refreshed set from the producer's thread.
+    blocked_ref: list[frozenset[str]] = [frozenset()]
+
     def _fetch_pending(n: int):
         conn = get_connection(db_path)
         try:
-            return pending_url_stubs(conn, n)
+            rows = pending_url_stubs(conn, n)
+            try:
+                snapshot = frozenset(blocked_hosts(conn))
+            except Exception as e:  # noqa: BLE001 — bookkeeping must not stop the crawl
+                logger.info(f"url_fetcher: could not refresh blocked hosts: {e}")
+                snapshot = blocked_ref[0]
+            return rows, snapshot
         finally:
             conn.close()
+
+    def _host_is_blocked(url: str) -> bool:
+        return (urlparse(url).hostname or "").lower() in blocked_ref[0]
 
     async def _producer():
         """Refill `stub_q` from the DB until `target` stubs are enqueued. A
@@ -1102,7 +1239,7 @@ async def run_continuous(
         to stamp attempts first."""
         while counters["pulled"] < target:
             want = min(http_concurrency * 2, target - counters["pulled"])
-            rows = await asyncio.to_thread(_fetch_pending, want)
+            rows, blocked_ref[0] = await asyncio.to_thread(_fetch_pending, want)
             if not rows:
                 break  # backlog drained
             for stub in rows:
@@ -1126,8 +1263,17 @@ async def run_continuous(
                     stub["url"], timeout_s=timeout_s, http_client=http_client, cffi_session=cffi_session
                 )
                 if kind == "ok":
-                    counters["done" if await _persist_result(db_path, stub, data) else "failed"] += 1
+                    if await _persist_result(db_path, stub, data):
+                        counters["done"] += 1
+                        await asyncio.to_thread(_host_ok_sync, db_path, stub["url"])
+                    else:
+                        counters["failed"] += 1
                 elif kind == "fail":
+                    counters["failed"] += 1
+                elif _host_is_blocked(data):
+                    # Redirected onto a host we've already given up on —
+                    # don't spend a render finding that out again.
+                    await asyncio.to_thread(_abandon_sync, db_path, stub["filename"], "host blocked")
                     counters["failed"] += 1
                 else:
                     await browser_q.put((stub, data))  # hand off; do NOT block HTTP
@@ -1150,10 +1296,22 @@ async def run_continuous(
                     stub, burl = item
                     try:
                         result = await _fetch_via_crawl4ai(crawler, burl, timeout_s)
+                    except _BrowserBlocked as e:
+                        # Wall: abandon every copy of the URL and strike the
+                        # host that walled us (the terminal url, not the
+                        # email's link). No retry budget is spent on renders.
+                        await asyncio.to_thread(_abandon_sync, db_path, stub["filename"], e.reason)
+                        await asyncio.to_thread(_host_strike_sync, db_path, e.url, e.reason)
+                        counters["failed"] += 1
+                        continue
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"url_fetcher: browser worker error on {burl}: {e}")
                         result = None
-                    counters["done" if await _persist_result(db_path, stub, result) else "failed"] += 1
+                    if await _persist_result(db_path, stub, result):
+                        counters["done"] += 1
+                        await asyncio.to_thread(_host_ok_sync, db_path, burl)  # the host that served it
+                    else:
+                        counters["failed"] += 1
                 except Exception as e:  # noqa: BLE001 — never let the worker die
                     logger.warning(f"url_fetcher: browser worker loop error: {e}")
                     counters["failed"] += 1

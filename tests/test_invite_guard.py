@@ -17,6 +17,8 @@ positive skips ALL links.
 
 from __future__ import annotations
 
+import pytest
+
 from gmail_search.gmail import invite_guard
 from gmail_search.store.models import Message
 
@@ -296,7 +298,9 @@ def test_gate_only_decides_skip_all_not_per_url(monkeypatch):
 
 def test_model_id_default_and_override(monkeypatch):
     monkeypatch.delenv("GMAIL_INVITE_GUARD_MODEL", raising=False)
-    assert "flash" in invite_guard._guard_model().lower()
+    # Default is the OpenRouter-routed ministral picked by the 2026-09 eval.
+    assert invite_guard._guard_model() == invite_guard._DEFAULT_GUARD_MODEL
+    assert invite_guard._is_openrouter_model(invite_guard._guard_model())
     monkeypatch.setenv("GMAIL_INVITE_GUARD_MODEL", "gemini-x-custom")
     assert invite_guard._guard_model() == "gemini-x-custom"
 
@@ -374,3 +378,122 @@ def test_benign_message_creates_stubs_and_caches_none(db_backend, monkeypatch):
         assert get_crawl_blocked_reason(conn, message_id=msg.id) is None
     finally:
         conn.close()
+
+
+def test_benign_classifier_verdict_is_cached_and_not_recalled(db_backend, monkeypatch):
+    # Invite-shaped mail the classifier clears must be remembered as
+    # "judged benign", not NULL — NULL reads as "never gated" and the
+    # update loop's catch-up scan re-ran Gemini on the same emails every
+    # pass (the Aug 2026 bill: ~26k calls for a few hundred messages).
+    from gmail_search.store.queries import get_crawl_blocked_reason, upsert_message
+
+    calls = {"n": 0}
+
+    def _fake(subject, body, *, model=None):
+        calls["n"] += 1
+        return {"is_actionable_invitation": False, "confidence": 0.95, "reason": "event recap newsletter"}
+
+    monkeypatch.setattr(invite_guard, "classify_actionable_invitation", _fake)
+    conn = _conn(db_backend)
+    try:
+        msg = _msg(subject="You're invited to read our event recap", body="https://news.example.com/recap")
+        upsert_message(conn, msg)
+
+        assert invite_guard.skip_link_crawl_cached(conn, msg, []) is False
+        assert calls["n"] == 1
+        assert get_crawl_blocked_reason(conn, message_id=msg.id) == invite_guard._BENIGN_VERDICT
+
+        # Re-sync: verdict comes from the cache, still crawls, no new call.
+        assert invite_guard.skip_link_crawl_cached(conn, msg, []) is False
+        assert calls["n"] == 1
+    finally:
+        conn.close()
+
+
+def test_calendar_invite_email_from_organizer_auto_skips(monkeypatch):
+    # Google Calendar invitations arrive FROM THE ORGANIZER (not
+    # calendar-notification@google.com), so the sender rule misses them.
+    # They carry one-click Yes/No/Maybe RESPOND links: deterministic skip,
+    # and the classifier must not even be consulted.
+    def _boom(*a, **k):  # pragma: no cover
+        raise AssertionError("classifier must not run for a calendar invitation email")
+
+    monkeypatch.setattr(invite_guard, "classify_actionable_invitation", _boom)
+    msg = _msg(
+        from_addr="Joy Silver <joysilver@gmail.com>",
+        subject="Invitation: Family Birthday Dinner @ Tue Dec 7, 2021 6pm - 8pm (PST) (scottmsilver@gmail.com)",
+        body="You have been invited to the following event.\nReply for scottmsilver@gmail.com\nYes No Maybe\n"
+        "https://calendar.google.com/calendar/event?action=RESPOND&eid=abc&rst=1",
+    )
+    skip, reason = invite_guard.should_skip_all_link_crawl(msg, [])
+    assert skip is True
+    assert reason and "calendar" in reason.lower()
+
+
+def test_plain_mail_saying_invitation_is_not_calendar_shaped():
+    msg = _msg(subject="Invitation: please read", body="Here is the wedding invitation PDF. https://drive.example.com/x")
+    assert invite_guard.looks_like_calendar_invite_email(msg) is False
+
+
+def test_old_style_google_calendar_invite_auto_skips():
+    msg = _msg(
+        from_addr="Joy Silver <joysilver@gmail.com>",
+        subject="Invitation: Nueva Middle School Dance @ Fri Oct 28, 2016 7pm - 9pm (scottmsilver@gmail.com)",
+        body="more details »\nhttps://www.google.com/calendar/event?action=VIEW&eid=MnBuazd1\nInvitation from Google Calendar",
+    )
+    assert invite_guard.looks_like_calendar_invite_email(msg) is True
+
+
+def test_openrouter_model_id_routes_to_openrouter(monkeypatch):
+    # A vendor/model id goes to OpenRouter with a strict JSON schema; the
+    # Gemini client must not be touched.
+    import httpx
+
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"is_actionable_invitation": true, "confidence": 0.9, "reason": "rsvp"}'}}]}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        seen["url"] = url
+        seen["body"] = json
+        seen["auth"] = headers.get("Authorization", "")
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setenv("OPENROUTER_KEY", "sk-or-test")
+    monkeypatch.setattr(invite_guard, "_genai_client", lambda: (_ for _ in ()).throw(AssertionError("gemini must not be called")))
+
+    v = invite_guard.classify_actionable_invitation("Please RSVP", "https://evt.vendor.com/r/x", model="mistralai/ministral-8b-2512")
+    assert v == {"is_actionable_invitation": True, "confidence": 0.9, "reason": "rsvp"}
+    assert seen["url"].startswith("https://openrouter.ai/api/v1/")
+    assert seen["auth"] == "Bearer sk-or-test"
+    assert seen["body"]["model"] == "mistralai/ministral-8b-2512"
+    assert seen["body"]["response_format"]["json_schema"]["strict"] is True
+    assert "BEGIN UNTRUSTED EMAIL" in seen["body"]["messages"][0]["content"]
+
+
+def test_openrouter_path_without_key_raises_so_gate_fails_closed(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        invite_guard.classify_actionable_invitation("Please RSVP", "x", model="mistralai/ministral-8b-2512")
+
+
+def test_gemini_model_id_is_not_openrouter(monkeypatch):
+    monkeypatch.delenv("GMAIL_INVITE_GUARD_BACKEND", raising=False)
+    assert invite_guard._is_openrouter_model("gemini-2.5-flash") is False
+    assert invite_guard._is_openrouter_model("mistralai/ministral-8b-2512") is True
+
+
+def test_calendar_invite_with_note_subject_is_calendar_shaped():
+    msg = _msg(
+        from_addr="Tony Xu <tony@example.com>",
+        subject="Invitation with note: Dinner with marketplace engineering @ Thu Mar 5, 2026 7pm (scottmsilver@gmail.com)",
+        body="Looking forward to it!\nReply for scottmsilver@gmail.com: Yes No Maybe\nhttps://calendar.google.com/calendar/event?action=RESPOND&eid=abc",
+    )
+    assert invite_guard.looks_like_calendar_invite_email(msg) is True

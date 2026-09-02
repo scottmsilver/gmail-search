@@ -206,31 +206,36 @@ def test_no_index_present_is_ready(serve_env):
         assert sresp.json().get("pending_index") is True
 
 
-def test_prewarm_failure_does_not_wedge_readiness(serve_env):
-    """A generic prewarm failure (not FileNotFoundError) must not wedge
-    readiness — ?ready=1 still flips to 200 — and the next request still
-    cold-loads (constructor invoked again on the request path)."""
+def test_prewarm_failure_does_not_wedge_readiness(serve_env, monkeypatch):
+    """A generic prewarm failure (not FileNotFoundError) must not WEDGE
+    readiness. Since the search canary landed, readiness reports the truth
+    while the engine won't build — 503 with an engine-build reason, because
+    searches would 500 — but every probe retries the build, and readiness
+    recovers to 200 the moment construction succeeds. (Pre-canary this
+    asserted a green 200 despite the broken engine — the exact blind spot
+    behind the 2026-07 nine-day search outage.)"""
     from fastapi.testclient import TestClient
 
+    monkeypatch.setenv("GMAIL_SEARCH_CANARY_INTERVAL", "0")
     _ControllableEngine._raise = RuntimeError("scann blew up")
 
     app = _make_app(serve_env)
     with TestClient(app) as client:
+        # Prewarm completes (flips _ready) but the canary reports the
+        # broken build honestly.
+        assert _wait_until(lambda: "canary" in client.get("/healthz?ready=1").json().get("reason", ""))
+        resp = client.get("/healthz?ready=1")
+        assert resp.status_code == 503
+        assert "engine build failed" in resp.json()["reason"]
+
+        # Not a wedge: every probe retries the build (cold-load path engaged).
+        count_before = _ControllableEngine._count
+        client.get("/healthz?ready=1")
+        assert _ControllableEngine._count > count_before
+
+        # And when construction starts succeeding, readiness recovers.
+        _ControllableEngine._raise = None
         assert _wait_until(lambda: client.get("/healthz?ready=1").status_code == 200)
-        assert client.get("/healthz?ready=1").status_code == 200
-
-        count_after_prewarm = _ControllableEngine._count
-        assert count_after_prewarm >= 1  # prewarm attempted a build
-
-        # First request cold-loads. The constructor still raises, so search
-        # surfaces a 500 path? No — get_engine raises RuntimeError which is
-        # not caught by api_search's FileNotFoundError handler. We only
-        # assert the build was attempted again (cold-load path engaged).
-        try:
-            client.get("/api/search?q=hi")
-        except Exception:
-            pass
-        assert _ControllableEngine._count > count_after_prewarm
 
 
 def test_prewarm_does_not_clobber_request_built_engine(serve_env):

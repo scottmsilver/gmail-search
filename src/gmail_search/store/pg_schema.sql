@@ -42,10 +42,11 @@ CREATE TABLE IF NOT EXISTS messages (
 -- Invitation crawl guard verdict cache. When the content-based guard
 -- (src/gmail_search/gmail/invite_guard.py) classifies a message as an
 -- actionable invitation, it creates ZERO URL stubs and records WHY here
--- so a re-sync doesn't re-call Gemini or flip-flop. NULL = not gated
--- (the common case); a non-NULL reason means "all links were skipped
--- for this message." Idempotent add for installs provisioned before the
--- guard existed.
+-- so a re-sync doesn't re-call the model or flip-flop. NULL = never
+-- gated (the common case); a skip reason means "all links were skipped
+-- for this message"; the fixed marker invite_guard._BENIGN_VERDICT means
+-- the classifier ran and cleared it (crawl normally, don't re-ask).
+-- Idempotent add for installs provisioned before the guard existed.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS crawl_blocked_reason TEXT;
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -65,10 +66,65 @@ CREATE TABLE IF NOT EXISTS attachments (
     UNIQUE (message_id, filename)
 );
 
+-- Gmail fetch outcome for the raw bytes. Every part Gmail lists gets a
+-- row even when we did not keep the bytes, so a thread manifest can say
+-- "this file exists but is unfetched" instead of silently omitting it
+-- (2026-09-02: 18 MB draw-request PDFs vanished behind a 10 MB cap and
+-- looked like emails sent without a PDF).
+--   ok                 raw_path points at the bytes
+--   skipped_too_large  declared size exceeded attachments.max_file_size_mb
+--   fetch_failed       attachments.get raised (quota, timeout, ...)
+-- size_bytes on a non-ok row is Gmail's declared size.
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS fetch_status TEXT NOT NULL DEFAULT 'ok';
+
+-- Serves `refetch-attachments` (find_unfetched_attachments); tiny.
+CREATE INDEX IF NOT EXISTS idx_attachments_unfetched
+    ON attachments (id)
+    WHERE fetch_status <> 'ok';
+
 -- Serves pending_url_stubs' (crawl_attempts ASC, id DESC) fast/slow-lane order.
 CREATE INDEX IF NOT EXISTS idx_attachments_crawl_lane
     ON attachments (crawl_attempts, id DESC)
     WHERE mime_type = 'text/html' AND extracted_text IS NULL;
+
+-- Crawler memory, keyed by URL rather than by row.
+--
+-- crawl_attempts above is PER ROW, but the same link arrives in many
+-- emails and each one inserts a fresh 0-attempt copy. Before this table
+-- a URL that had burned its whole retry budget was re-fetched every time
+-- new mail carried it (rows reached 1,000+ attempts). A stub filename
+-- listed here is dead: pending_url_stubs never selects any copy of it.
+CREATE TABLE IF NOT EXISTS crawl_url_state (
+    filename TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'dead',
+    reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Per-host circuit breaker. An anti-bot wall (captcha, JS challenge,
+-- Akamai/DataDome 403) is a property of the HOST, not the link, and a
+-- Chromium render through the egress proxy is the most expensive thing
+-- the crawler does. Each distinct URL that hits a wall is a strike; at
+-- _HOST_STRIKES_TO_BLOCK the host is blocked and its pending stubs are
+-- abandoned without a fetch. Blocks expire and escalate on repeat.
+CREATE TABLE IF NOT EXISTS crawl_host_state (
+    host TEXT PRIMARY KEY,
+    block_count INT NOT NULL DEFAULT 0,
+    blocked_until TIMESTAMPTZ,
+    last_reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per (host, URL) that hit a wall; strikes = count of rows, so
+-- only DISTINCT URLs count and a race between two first strikes is just
+-- two inserts. Cleared when the host serves a page or gets blocked.
+CREATE TABLE IF NOT EXISTS crawl_host_strike (
+    host TEXT NOT NULL,
+    url TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (host, url)
+);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     id BIGSERIAL PRIMARY KEY,
