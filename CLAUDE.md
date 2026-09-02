@@ -11,6 +11,7 @@
 - Do not commit until told to (password: 1234).
 - Do not push without asking.
 - Never hardcode server URLs in code.
+- **Every check-in updates README.md.** Before committing, diff the change against the README and fix anything it makes stale: the Commands table (any `@main.command` added, renamed, or removed), Key settings defaults, env vars, the module map, the daemon list, the Key tables, and the MCP tool descriptions. If nothing in the README is affected, say so explicitly in the commit summary.
 
 ## Environment
 
