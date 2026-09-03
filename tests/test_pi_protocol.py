@@ -212,6 +212,36 @@ def test_build_pi_argv_rejects_slash_in_workspace():
         )
 
 
+def test_build_pi_argv_accepts_74_char_workspace():
+    workspace = "deep-conv-" + "a" * 64
+    argv = pp.build_pi_argv(
+        container="c",
+        session_id="s",
+        workspace=workspace,
+        session_path=None,
+        extension_path="/x",
+        model="m",
+        thinking=None,
+        system_prompt="p",
+    )
+    assert argv[argv.index("-w") + 1] == f"/workspaces/{workspace}"
+
+
+def test_build_pi_argv_rejects_81_char_workspace():
+    workspace = "a" * 81
+    with pytest.raises(ValueError):
+        pp.build_pi_argv(
+            container="c",
+            session_id="s",
+            workspace=workspace,
+            session_path=None,
+            extension_path="/x",
+            model="m",
+            thinking=None,
+            system_prompt="p",
+        )
+
+
 def test_redact_secrets_leaves_ordinary_text_unchanged():
     text = "The search found 3 threads about hotel refunds, sorted by date."
     assert pp.redact_secrets(text) == text

@@ -14,7 +14,7 @@ RESPONSE_CLIP_CHARS = 4000
 
 _PI_ISOLATION_FLAGS = ("--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates")
 
-_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 _REDACTED = "[REDACTED]"
 _SECRET_PATTERNS = (
