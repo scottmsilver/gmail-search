@@ -12,9 +12,10 @@ Assumes:
 - Workspace dir `deploy/claudebox/workspaces/` exists.
 
 Usage:
-    python scripts/run_deep_compare.py                 # 3 default queries
-    python scripts/run_deep_compare.py "my query"      # custom queries
-    python scripts/run_deep_compare.py --backends adk  # subset
+    python scripts/run_deep_compare.py                           # 3 default queries
+    python scripts/run_deep_compare.py "my query"                # custom queries
+    python scripts/run_deep_compare.py --backends adk            # subset
+    python scripts/run_deep_compare.py --user-email you@example.com
 """
 
 from __future__ import annotations
@@ -99,6 +100,29 @@ _PER_STAGE_MODEL_VARS = (
 _CLAUDE_MODEL_DEFAULT = "sonnet"
 
 
+def _resolve_user_id(email: str | None) -> str | None:
+    """Resolve an email to a user_id, or return None if not provided.
+
+    If an email is given, looks up the user in the database and returns
+    their user_id. If resolution fails, prints an error and exits with
+    code 2. If no email is provided, prints a warning and returns None."""
+    if email is None:
+        import sys
+
+        print("WARNING: no --user-email provided; tool calls will run unscoped", file=sys.stderr)
+        return None
+
+    from gmail_search.agents.mcp_tools_server import _resolve_user_id_by_email
+
+    user_id = _resolve_user_id_by_email(email)
+    if user_id is None:
+        import sys
+
+        print(f"error: no user found for {email}", file=sys.stderr)
+        sys.exit(2)
+    return user_id
+
+
 def _scope_model_envs(backend: str) -> None:
     """ADK and claude_code accept different model name spaces. Per-stage
     overrides like `sonnet` work for claudebox but blow up ADK. Strip
@@ -110,9 +134,11 @@ def _scope_model_envs(backend: str) -> None:
     elif backend == "claude_code":
         for k in _PER_STAGE_MODEL_VARS:
             os.environ.setdefault(k, _CLAUDE_MODEL_DEFAULT)
+    elif backend == "pi":
+        pass  # model comes from GMAIL_PI_MODEL
 
 
-async def _run_one_turn(question: str, backend: str, timeout_s: float) -> dict[str, Any]:
+async def _run_one_turn(question: str, backend: str, timeout_s: float, user_id: str | None = None) -> dict[str, Any]:
     """Run one deep-mode turn end-to-end and capture metrics."""
     os.environ["GMAIL_DEEP_BACKEND"] = backend
     os.environ["GMAIL_DEEP_REAL"] = "1"
@@ -133,6 +159,7 @@ async def _run_one_turn(question: str, backend: str, timeout_s: float) -> dict[s
             conversation_id=None,
             mode="deep",
             question=question,
+            user_id=user_id,
         )
     finally:
         conn.close()
@@ -145,7 +172,7 @@ async def _run_one_turn(question: str, backend: str, timeout_s: float) -> dict[s
     started_at = time.monotonic()
     try:
         async with asyncio.timeout(timeout_s):
-            async for frame in _real_run(db_path, session_id, question, default_model=None):
+            async for frame in _real_run(db_path, session_id, question, default_model=None, user_id=user_id):
                 parsed = _parse_sse_frame(frame)
                 if parsed is None:
                     continue
@@ -176,13 +203,15 @@ def _summarize(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _run_compare(queries: list[str], backends: list[str], timeout_s: float) -> list[dict[str, Any]]:
+async def _run_compare(
+    queries: list[str], backends: list[str], timeout_s: float, user_id: str | None = None
+) -> list[dict[str, Any]]:
     runs = []
     for question in queries:
         print(f"\n=== Q: {question}", flush=True)
         for backend in backends:
             print(f"  -> {backend} ...", end=" ", flush=True)
-            result = await _run_one_turn(question, backend, timeout_s)
+            result = await _run_one_turn(question, backend, timeout_s, user_id=user_id)
             print(
                 f"done in {result['wall_s']}s, ${result['total_cost_usd']:.4f}, "
                 f"{result['tool_calls']} tools, {len(result['artifacts'])} artifacts, "
@@ -223,15 +252,25 @@ def _save_report(runs: list[dict[str, Any]], out_path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("queries", nargs="*", help="Override the default canonical queries.")
-    parser.add_argument("--backends", default="adk,claude_code", help="Comma-separated backend list.")
+    parser.add_argument(
+        "--backends",
+        default="adk,claude_code",
+        help="Comma-separated backend list (adk, claude_code, claude_native, pi).",
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="Per-turn timeout in seconds.")
     parser.add_argument("--out", default="scripts/deep_compare_report.json", help="JSON output path.")
+    parser.add_argument(
+        "--user-email",
+        default=os.environ.get("GMS_BOOTSTRAP_EMAIL"),
+        help="User email for scoped tool calls (default: GMS_BOOTSTRAP_EMAIL env var).",
+    )
     args = parser.parse_args()
 
     queries = args.queries or DEFAULT_QUERIES
     backends = [b.strip() for b in args.backends.split(",") if b.strip()]
 
-    runs = asyncio.run(_run_compare(queries, backends, args.timeout))
+    user_id = _resolve_user_id(args.user_email)
+    runs = asyncio.run(_run_compare(queries, backends, args.timeout, user_id=user_id))
     _print_table(runs)
     _save_report(runs, Path(args.out))
 

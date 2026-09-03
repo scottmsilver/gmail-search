@@ -340,6 +340,8 @@ src/gmail_search/
     gc.py           — Artifact retention sweeper
     cost.py         — Per-stage cost tally
     session.py      — agent_sessions / agent_events persistence
+    deep_events.py  — Event synthesis shared by claude_native + pi
+    pi_protocol.py / pi_rpc.py / runtime_pi.py — Pi harness deep backend
 
 web/                — Next.js 15 + assistant-ui + shadcn/ui app
   app/
@@ -358,6 +360,7 @@ web/                — Next.js 15 + assistant-ui + shadcn/ui app
 deploy/
   caddy/            — Reverse proxy config (gms.i.oursilverfamily.com)
   claudebox/        — Containerized Anthropic agent sandbox (deep mode)
+  pi/               — Pi agent harness sandbox (deep mode, per-token)
   logrotate/        — copytruncate rotation for data/*.log + systemd timer
   lnav/             — lnav format for the JSON log schema
 
@@ -489,12 +492,14 @@ Planner ──► Retriever ──► Analyst ──► Writer ──► Critic
                  (max 2 critic rounds)
 ```
 
+- **Backends** — `adk` (Gemini orchestrator), `claude_code` (claudebox + orchestrator), `claude_native` (one Claude Code loop, plan-billed), `pi` (one [Pi harness](https://github.com/earendil-works/pi) loop in `deploy/pi/`, per-token billed via `GMAIL_PI_MODEL`). Pick per turn in the model picker or default with `GMAIL_DEEP_BACKEND`.
 - **Planner / Retriever / Analyst / Writer / Critic** each run as a Gemini-3.1-pro-preview sub-agent. The picker model propagates to all sub-agents.
 - **Sandbox** — `agents/sandbox.py` runs the Analyst's Python in a Docker container with staged JSON evidence, hardened workdir, and an in-image preamble synced at boot. JSON tool output is capped to avoid 1M-token overflow.
 - **Citations** — Writer + Critic are grounded against an explicit allowed-citations list. Refs use collision-free `cite_refs`.
 - **Streaming** — `/api/deep` SSE proxies stream stages into the chat UI under a single AssistantWork disclosure. Each stage emits its cost, and per-turn cost is shown under the assistant response.
 - **Artifacts** — generated artifacts (PDFs, CSVs, images) appear as `[art:…]` chips that open in a right-side preview drawer. `prune-artifacts` GCs them.
 - **Persistence** — every event is in `agent_events`; turns are persisted at the moment they start so mid-stream navigation doesn't drop them.
+- **Security posture (`pi` backend)** — `pi-sandbox` is one shared container/UID for every turn, not a per-tenant boundary; see `deploy/pi/README.md`'s "Security posture" section, and set `GMAIL_PI_BUILTIN_TOOLS=0` to disable its `bash` tool until per-session isolation exists.
 
 ## Cost
 
@@ -539,7 +544,7 @@ Proportionate for a single host — no agents, collectors, or SaaS. All on disk 
 - **Search canary + watchdog** — `/healthz?ready=1` runs a real, rate-limited search through the engine and returns 503 when it throws, so readiness means "queries succeed", not just "the index loaded" (a 2026-07 deploy-skew incident 500'd every search for nine days while readiness stayed green). `scripts/serve_watchdog.sh`, run from a `systemctl --user` timer every 5 minutes, restarts `serve` after consecutive unhealthy probes. `GMAIL_SEARCH_CANARY_INTERVAL` throttles the canary.
 - **Credential health** — each sync cycle records whether the broker token worked; a dead or scope-stripped token shows up as an unhealthy Gmail status in Settings instead of looking like "no new mail".
 
-Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB-handler concurrency, default 24), `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` (serve query cap, default 10min), `GMS_SQL_MAX_PLAN_COST` (agent-SQL pre-flight cost gate, default 50M), `GMAIL_AGENT_HTTP_TIMEOUT` (in-process API client timeout).
+Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB-handler concurrency, default 24), `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` (serve query cap, default 10min), `GMS_SQL_MAX_PLAN_COST` (agent-SQL pre-flight cost gate, default 50M), `GMAIL_AGENT_HTTP_TIMEOUT` (in-process API client timeout), `GMAIL_PI_MODEL` (default `google/gemini-3.7-flash`), `GMAIL_PI_THINKING`, `GMAIL_PI_CONTAINER` (default `pi-sandbox`), `GMAIL_PI_EXTENSION_PATH` (default `/opt/gmail-tools`), `GMAIL_PI_BUILTIN_TOOLS` (default on), `GMAIL_PI_HARD_TIMEOUT` (default 900), `GMAIL_PI_IDLE_TIMEOUT` (default 300).
 
 ## Tech stack
 

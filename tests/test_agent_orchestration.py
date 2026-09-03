@@ -286,6 +286,58 @@ def test_cite_refs_extractor_pulls_from_search_results():
     assert refs == ["aaabbbcc", "11112222", "33334444"]
 
 
+def test_cite_refs_extractor_handles_batch_tool_responses():
+    """Batch tools return {results: [{input: {...}, result: <single-response>}, ...]}.
+    The extractor must dive into nested result.results to collect cite_refs."""
+    from gmail_search.agents.orchestration import _cite_refs_from_tool_calls
+
+    tool_calls = [
+        {
+            "name": "search_emails_batch",
+            "response": {
+                "results": [
+                    {
+                        "input": {"query": "a"},
+                        "result": {"results": [{"cite_ref": "r1"}, {"cite_ref": "r2"}]},
+                    },
+                    {
+                        "input": {"query": "b"},
+                        "result": {"results": [{"cite_ref": "r2"}, {"cite_ref": "r3"}]},
+                    },
+                ]
+            },
+        }
+    ]
+    refs = _cite_refs_from_tool_calls(tool_calls)
+    assert refs == ["r1", "r2", "r3"]
+
+
+def test_cite_refs_extractor_mixes_batch_and_single_responses():
+    """The extractor must handle mixed tool call logs where some are
+    batch (nested {input, result}) and some are single-tool (flat results)."""
+    from gmail_search.agents.orchestration import _cite_refs_from_tool_calls
+
+    tool_calls = [
+        {
+            "name": "search_emails",
+            "response": {"results": [{"cite_ref": "x"}]},
+        },
+        {
+            "name": "search_emails_batch",
+            "response": {
+                "results": [
+                    {
+                        "input": {"query": "batch_q"},
+                        "result": {"results": [{"cite_ref": "y"}]},
+                    }
+                ]
+            },
+        },
+    ]
+    refs = _cite_refs_from_tool_calls(tool_calls)
+    assert refs == ["x", "y"]
+
+
 def test_artifact_ids_extractor_pulls_only_integer_ids():
     """`_artifact_ids_from_tool_calls` collects artifact ids
     `run_code` returned via its tool_result. Non-integer entries

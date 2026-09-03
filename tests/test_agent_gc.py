@@ -99,3 +99,50 @@ def test_prune_default_retention_is_30_days():
     """Double-check the published contract: the module-level
     DEFAULT_RETENTION_DAYS matches the design doc's 30-day window."""
     assert DEFAULT_RETENTION_DAYS == 30
+
+
+class _FakeStaleConn:
+    """Answers the stale-conversation SELECT with the ids given and
+    accepts the mapping DELETE."""
+
+    def __init__(self, stale_ids: list[str]) -> None:
+        self._stale_ids = stale_ids
+        self.committed = False
+
+    def execute(self, sql: str, params=None):
+        if sql.lstrip().upper().startswith("SELECT"):
+            return _Result(rows=[{"id": i} for i in self._stale_ids], rowcount=len(self._stale_ids))
+        return _Result(rows=[], rowcount=len(self._stale_ids))
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+class _Result:
+    def __init__(self, rows, rowcount):
+        self._rows = rows
+        self.rowcount = rowcount
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_prune_conversation_workspaces_removes_pi_session_file(tmp_path):
+    from gmail_search.agents import gc
+
+    ws_root = tmp_path / "workspaces"
+    (ws_root / "deep-conv-stale1").mkdir(parents=True)
+    (ws_root / "deep-conv-fresh2").mkdir(parents=True)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "stale1.jsonl").write_text("{}\n")
+    (sessions / "fresh2.jsonl").write_text("{}\n")
+
+    result = gc.prune_conversation_workspaces(
+        _FakeStaleConn(["stale1"]), retention_days=30, workspaces_root=str(ws_root), pi_sessions_root=str(sessions)
+    )
+
+    assert result.dirs_deleted == 1
+    assert not (ws_root / "deep-conv-stale1").exists() and (ws_root / "deep-conv-fresh2").exists()
+    assert not (sessions / "stale1.jsonl").exists()
+    assert (sessions / "fresh2.jsonl").exists()

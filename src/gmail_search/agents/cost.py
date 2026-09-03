@@ -46,6 +46,7 @@ GEMINI_PRICING: dict[str, Pricing] = {
     "gemini-2.5-flash": Pricing(input=0.075, output=0.30),
     "gemini-2.5-flash-lite": Pricing(input=0.10, output=0.40),
     "gemini-3.1-pro-preview": Pricing(input=1.25, output=10.00),
+    "gemini-3.7-flash": Pricing(input=0.75, output=3.75, cached_input=0.075),
     # Fallback; matches Flash pricing so we never undercount by
     # accident when a brand-new model id shows up.
     "default": Pricing(input=0.075, output=0.30),
@@ -91,6 +92,7 @@ def record_agent_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    usd_override: float | None = None,
 ) -> float:
     """Append one `deep_<agent_name>` row to the `costs` table and
     return the estimated USD amount. Reuses the shared `record_cost`
@@ -102,8 +104,12 @@ def record_agent_cost(
     `image_count`, which means "images processed" for the embed
     pipeline). `image_count` stays 0 for deep-mode rows since text-only
     LLM calls produce no images.
+
+    `usd_override`, when given, is a provider-reported figure (pi's
+    `get_session_stats.cost`) and replaces the pricing-table estimate,
+    which only knows Gemini rates.
     """
-    usd = estimate_agent_cost_usd(model, input_tokens, output_tokens)
+    usd = usd_override if usd_override is not None else estimate_agent_cost_usd(model, input_tokens, output_tokens)
     # session_id is threaded through `message_id` — the column is
     # TEXT + required, and a session id is as good an anchor as any
     # for deep-mode rows. Prefix with `deep:` to make it unambiguous

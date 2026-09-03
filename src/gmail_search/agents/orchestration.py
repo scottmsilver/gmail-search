@@ -427,18 +427,42 @@ def _artifact_ids_from_tool_calls(tool_calls: list[dict]) -> list[int]:
     return ids
 
 
+def _rows_with_cite_refs(resp: dict) -> list[dict]:
+    """Yield rows that may contain cite_ref fields from a tool response.
+    Handles both single-tool and batch-tool response shapes:
+    - Single: response has {results: [{cite_ref: "..."}, ...]}, yield those rows
+    - Batch: response has {results: [{input: {...}, result: {...}}, ...]},
+      yield nested rows from each entry's result.results
+    """
+    rows: list[dict] = []
+    for row in resp.get("results") or []:
+        if not isinstance(row, dict):
+            continue
+        # Batch shape: {input: {...}, result: {results: [...]}}
+        if "result" in row and isinstance(row["result"], dict):
+            nested_results = row["result"].get("results")
+            if isinstance(nested_results, list):
+                for nested_row in nested_results:
+                    if isinstance(nested_row, dict):
+                        rows.append(nested_row)
+        # Single shape: cite_ref is at top level
+        else:
+            rows.append(row)
+    return rows
+
+
 def _cite_refs_from_tool_calls(tool_calls: list[dict]) -> list[str]:
     """Walk Retriever tool_results and collect the `cite_ref` tokens
-    returned by search_emails / query_emails. These are the ONLY
-    tokens the Writer may cite as `[ref:CITE_REF]`."""
+    returned by search_emails / query_emails, handling both single and
+    batch tool response shapes. These are the ONLY tokens the Writer
+    may cite as `[ref:CITE_REF]`."""
     refs: list[str] = []
     seen: set[str] = set()
     for tc in tool_calls:
         resp = tc.get("response")
         if not isinstance(resp, dict):
             continue
-        # search_emails + query_emails both return {results: [...]}
-        for row in resp.get("results") or []:
+        for row in _rows_with_cite_refs(resp):
             cr = row.get("cite_ref") if isinstance(row, dict) else None
             if isinstance(cr, str) and cr not in seen:
                 seen.add(cr)

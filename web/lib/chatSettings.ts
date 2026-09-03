@@ -71,6 +71,7 @@ const loadFromStorage = () => {
     const deepBackend: DeepBackend =
       parsed.deepBackend === "claude_code" ||
       parsed.deepBackend === "claude_native" ||
+      parsed.deepBackend === "pi" ||
       parsed.deepBackend === "adk"
         ? parsed.deepBackend
         : current.deepBackend;

@@ -270,7 +270,7 @@ type DeepStreamArgs = {
   // Which deep backend the Python service should run: "adk" (default),
   // "claude_code" (claudebox + orchestrator), or "claude_native"
   // (single-agent claudebox loop). Forwarded as `backend`.
-  deepBackend?: "adk" | "claude_code" | "claude_native";
+  deepBackend?: "adk" | "claude_code" | "claude_native" | "pi";
   // Inbound session cookie — forwarded to FastAPI so require_user_id
   // can resolve which user this turn belongs to.
   cookie: string;
@@ -537,12 +537,14 @@ export async function POST(req: NextRequest) {
   }
 
   // Per-request overrides from the UI picker; fall back to defaults.
-  const deepBackend: "adk" | "claude_code" | "claude_native" =
+  const deepBackend: "adk" | "claude_code" | "claude_native" | "pi" =
     body.deep_backend === "claude_code"
       ? "claude_code"
       : body.deep_backend === "claude_native"
         ? "claude_native"
-        : "adk";
+        : body.deep_backend === "pi"
+          ? "pi"
+          : "adk";
   // For deep mode with a Claude backend (code or native) we accept the
   // picker's model alias verbatim ("sonnet" / "opus" / etc.) — the
   // Python runtime resolves it. For everything else (chat, battle,

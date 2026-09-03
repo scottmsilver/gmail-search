@@ -43,6 +43,8 @@ def _is_valid_conversation_id(conversation_id: str) -> bool:
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
+
 from gmail_search.agents.session import (
     append_event,
     conversation_owner,
@@ -55,7 +57,6 @@ from gmail_search.agents.session import (
 )
 from gmail_search.auth import require_user_id
 from gmail_search.store.db import get_connection
-from pydantic import BaseModel
 
 
 def _use_real_pipeline() -> bool:
@@ -238,7 +239,7 @@ async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         conn.close()
 
 
-_VALID_BACKENDS = ("adk", "claude_code", "claude_native")
+_VALID_BACKENDS = ("adk", "claude_code", "claude_native", "pi")
 
 
 def _deep_backend(override: str | None = None) -> str:
@@ -648,6 +649,42 @@ def _build_conversation_history_preamble(
     )
 
 
+async def _stream_task_events(poll_conn, session_id: str, task: "asyncio.Task") -> AsyncIterator[str]:
+    """Mirror `agent_events` rows into SSE frames until `task` finishes,
+    then drain whatever landed after the last poll."""
+    last_seq = 0
+    while True:
+        for ev in fetch_events_after(poll_conn, session_id, after_seq=last_seq):
+            last_seq = max(last_seq, ev.seq)
+            yield _sse(ev.kind, {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload})
+        if task.done():
+            break
+        await asyncio.sleep(0.1)
+    for ev in fetch_events_after(poll_conn, session_id, after_seq=last_seq):
+        yield _sse(ev.kind, {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload})
+
+
+def _finish_single_agent_turn(
+    conn, task: "asyncio.Task", *, conversation_id: str | None, session_id: str, runner_name: str
+) -> str | None:
+    """After a single-agent runner task ends: surface an uncaught
+    exception as a visible failure, else persist the rich assistant
+    message and return the `persist_ok` frame (None if persist failed)."""
+    exc = task.exception()
+    if exc is not None:
+        logger.exception(f"{runner_name} raised in session {session_id}: {exc}")
+        return _surface_deep_failure(
+            conn,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            reason="the analysis run failed (see server logs); please retry.",
+            final_answer=f"Deep analysis failed ({runner_name} raised).",
+        )
+    if _persist_rich_assistant_message(conn, conversation_id=conversation_id, session_id=session_id):
+        return _sse("persist_ok", {"session_id": session_id})
+    return None
+
+
 async def _real_run(
     db_path: Path,
     session_id: str,
@@ -672,8 +709,11 @@ async def _real_run(
     Writer on Pro and the rest on Flash. When `default_model` is None,
     each stage falls back to its env var or its hardcoded default.
 
-    `GMAIL_DEEP_BACKEND=claude_code` swaps in the claudebox adapter
-    and registers a side-channel MCP session for the turn.
+    `GMAIL_DEEP_BACKEND` selects the runtime adapter: `adk` (default,
+    full multi-agent orchestrator), `claude_code` (claudebox adapter,
+    registers a side-channel MCP session for the turn), `claude_native`
+    (single-agent claudebox loop with all MCP tools, no orchestrator),
+    or `pi` (single-agent pi runtime, no orchestrator).
     """
     import asyncio
     import time as _time
@@ -721,7 +761,15 @@ async def _real_run(
     # per-turn spend inline.
     turn_cost_usd = 0.0
 
-    def _record_cost(*, agent_name: str, model: str, input_tokens: int, output_tokens: int) -> None:
+    def _record_cost(
+        *,
+        agent_name: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        usd_override: float | None = None,
+        **extra,
+    ) -> None:
         nonlocal turn_cost_usd
         usd = record_agent_cost(
             conn,
@@ -730,6 +778,7 @@ async def _real_run(
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            usd_override=usd_override,
         )
         turn_cost_usd += usd
         append_event(
@@ -738,6 +787,7 @@ async def _real_run(
             agent_name=agent_name,
             kind="cost",
             payload={
+                **extra,
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -786,6 +836,37 @@ async def _real_run(
         except Exception:
             logger.exception("per-turn claudebox credential preflight failed (continuing)")
     workspace = _claudebox_workspace_for(conversation_id, session_id)
+    if backend == "pi":
+        from gmail_search.agents.runtime_pi import pi_run
+
+        _ensure_workspace_dir(workspace)
+        pi_task = asyncio.create_task(
+            pi_run(
+                db_path=db_path,
+                session_id=session_id,
+                workspace=workspace,
+                conversation_id=conversation_id,
+                question=question,
+                model=None,
+                cost_sink=_record_cost,
+                user_id=user_id,
+            )
+        )
+        try:
+            async for frame in _stream_task_events(poll_conn, session_id, pi_task):
+                yield frame
+            tail = _finish_single_agent_turn(
+                conn, pi_task, conversation_id=conversation_id, session_id=session_id, runner_name="pi_run"
+            )
+            if tail is not None:
+                yield tail
+        finally:
+            try:
+                poll_conn.close()
+            except Exception:
+                logger.exception(f"closing poll_conn for session {session_id} failed")
+            conn.close()
+        return
     if backend == "claude_native":
         from gmail_search.agents.runtime_claude_native import native_run
         from gmail_search.agents.session import (
@@ -895,59 +976,30 @@ async def _real_run(
                 user_id=user_id,
             )
         )
-        last_seq = 0
         try:
-            while True:
-                new_events = list(fetch_events_after(poll_conn, session_id, after_seq=last_seq))
-                for ev in new_events:
-                    last_seq = max(last_seq, ev.seq)
-                    yield _sse(
-                        ev.kind,
-                        {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload},
-                    )
-                if native_task.done():
-                    break
-                await asyncio.sleep(0.1)
-            for ev in fetch_events_after(poll_conn, session_id, after_seq=last_seq):
-                yield _sse(
-                    ev.kind,
-                    {"seq": ev.seq, "agent": ev.agent_name, "payload": ev.payload},
-                )
-            exc = native_task.exception()
-            if exc is not None:
-                # BUG #2: native_run raised OUTSIDE its own try/except
-                # (its internal failures emit an error event + finalize
-                # themselves, so reaching here means the turn produced NO
-                # assistant bubble). Surface a visible failure to both the
-                # live SSE client and the DB so the turn doesn't vanish.
-                logger.exception(f"native_run raised in session {session_id}: {exc}")
-                reason = "the analysis run failed (see server logs); please retry."
-                yield _surface_deep_failure(
-                    conn,
-                    conversation_id=conversation_id,
-                    session_id=session_id,
-                    reason=reason,
-                    final_answer="Deep analysis failed (native_run raised).",
-                )
-            else:
-                # Persist a rich assistant message into conversation_messages
-                # so the chat-thread UI shows tool calls on reload (without
-                # this, the front-end's persistAssistantText writes a text-
-                # only version and we lose all debug detail). Emit a
-                # `persist_ok` SSE frame ONLY on commit success — the
-                # front-end's serverPersistedRichAssistant flag gates on
-                # this frame, so a silent persist failure causes the
-                # front-end to fall back to its text-only PUT (loss of
-                # rich detail, but at least an assistant bubble exists
-                # on reload). Without the explicit `persist_ok` gate, a
-                # persist failure would leave NO assistant row at all.
-                persisted = _persist_rich_assistant_message(
-                    conn,
-                    conversation_id=conversation_id,
-                    session_id=session_id,
-                )
-                if persisted:
-                    yield _sse("persist_ok", {"session_id": session_id})
+            # BUG #2: native_run can raise OUTSIDE its own try/except
+            # (its internal failures emit an error event + finalize
+            # themselves, so reaching here with an exception means the
+            # turn produced NO assistant bubble). `_finish_single_agent_turn`
+            # surfaces a visible failure to both the live SSE client and
+            # the DB so the turn doesn't vanish; otherwise it persists a
+            # rich assistant message into conversation_messages so the
+            # chat-thread UI shows tool calls on reload (without this,
+            # the front-end's persistAssistantText writes a text-only
+            # version and we lose all debug detail) and emits a
+            # `persist_ok` SSE frame ONLY on commit success — the
+            # front-end's serverPersistedRichAssistant flag gates on
+            # this frame, so a silent persist failure causes the
+            # front-end to fall back to its text-only PUT (loss of
+            # rich detail, but at least an assistant bubble exists on
+            # reload).
+            async for frame in _stream_task_events(poll_conn, session_id, native_task):
+                yield frame
+            tail = _finish_single_agent_turn(
+                conn, native_task, conversation_id=conversation_id, session_id=session_id, runner_name="native_run"
+            )
+            if tail is not None:
+                yield tail
         finally:
             try:
                 poll_conn.close()

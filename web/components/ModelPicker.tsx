@@ -194,6 +194,18 @@ export const ModelPicker = () => {
                 >
                   Claude Native
                 </button>
+                <button
+                  type="button"
+                  onClick={() => switchDeepBackend("pi")}
+                  className={
+                    deepBackend === "pi"
+                      ? "flex-1 rounded bg-teal-700 text-white px-2 py-1 font-medium hover:bg-teal-600"
+                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
+                  }
+                  title="Pi harness: single agent in the pi-sandbox container, billed per token via the provider set in GMAIL_PI_MODEL. Model picker does not apply."
+                >
+                  Pi
+                </button>
               </div>
             </div>
           )}

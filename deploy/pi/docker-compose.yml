@@ -1,0 +1,18 @@
+services:
+  pi-sandbox:
+    build:
+      context: .
+    image: gmail-search-pi:local
+    container_name: pi-sandbox
+    restart: unless-stopped
+    environment:
+      GMS_MCP_URL: ${GMS_MCP_URL}
+      GMAIL_MCP_SERVICE_TOKEN: ${GMAIL_MCP_SERVICE_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+    - ../claudebox/workspaces:/workspaces
+    - ./sessions:/sessions
+    - ./pi-agent:/home/pi/.pi/agent
+    extra_hosts:
+    - host.docker.internal:host-gateway

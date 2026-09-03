@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_RETENTION_DAYS = 30
 _SCRATCH_ROOT = "data/agent_scratch"
 _WORKSPACES_ROOT = "deploy/claudebox/workspaces"
+_PI_SESSIONS_ROOT = "deploy/pi/sessions"
 
 
 @dataclass
@@ -143,11 +144,29 @@ def prune_scratch_dirs(
     return ScratchPruneResult(dirs_deleted, bytes_freed)
 
 
+def _delete_pi_session_file(sessions_root, conversation_id: str) -> bool:
+    """Remove the pi session transcript for a pruned conversation so
+    the next deep turn starts a fresh session instead of resuming a
+    workspace that no longer exists."""
+    from pathlib import Path as _Path
+
+    path = _Path(sessions_root) / f"{conversation_id}.jsonl"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("prune_conversation_workspaces: failed to remove %s: %s", path, exc)
+        return False
+    return True
+
+
 def prune_conversation_workspaces(
     conn,
     *,
     retention_days: int = DEFAULT_RETENTION_DAYS,
     workspaces_root: str | None = None,
+    pi_sessions_root: str | None = None,
 ) -> WorkspacePruneResult:
     """Remove `deploy/claudebox/workspaces/deep-conv-<id>/` dirs whose
     conversation has been idle (no `agent_sessions` row newer than the
@@ -165,7 +184,11 @@ def prune_conversation_workspaces(
     UUID instead of trying to `--resume` into the deleted JSONL.
     The recovery path in `service.py` handles a stale mapping row
     pointing at a missing workspace too, but doing it here keeps the
-    DB and filesystem consistent."""
+    DB and filesystem consistent.
+
+    Also removes the pi session transcript file for each pruned workspace
+    so the next deep turn starts a fresh session instead of resuming a
+    workspace that no longer exists."""
     import os as _os
     import shutil as _shutil
     from pathlib import Path as _Path
@@ -214,6 +237,7 @@ def prune_conversation_workspaces(
             continue
         dirs_deleted += 1
         bytes_freed += size
+        _delete_pi_session_file(pi_sessions_root or _PI_SESSIONS_ROOT, conv_id)
 
     # Drop matching mapping rows so the next deep turn re-establishes
     # a fresh Claude session UUID. ON DELETE CASCADE on the

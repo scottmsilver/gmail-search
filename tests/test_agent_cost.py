@@ -153,3 +153,64 @@ def test_record_agent_cost_participates_in_spend_breakdown(db_backend):
     # Writer runs on pro → strictly more expensive per token than Planner on flash
     assert breakdown["deep_writer"] > breakdown["deep_planner"]
     conn.close()
+
+
+def test_record_agent_cost_uses_override_when_given(monkeypatch):
+    from gmail_search.agents import cost as cost_mod
+
+    captured = {}
+
+    def fake_record_cost(conn, **kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(cost_mod, "record_cost", fake_record_cost)
+    usd = cost_mod.record_agent_cost(
+        object(),
+        session_id="s1",
+        agent_name="pi",
+        model="anthropic/x",
+        input_tokens=1000,
+        output_tokens=10,
+        usd_override=0.42,
+    )
+    assert usd == 0.42
+    assert captured["estimated_cost_usd"] == 0.42
+    assert captured["operation"] == "deep_pi"
+
+
+def test_record_agent_cost_zero_override_not_treated_as_falsy(monkeypatch):
+    from gmail_search.agents import cost as cost_mod
+
+    captured = {}
+
+    def fake_record_cost(conn, **kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(cost_mod, "record_cost", fake_record_cost)
+    usd = cost_mod.record_agent_cost(
+        object(),
+        session_id="s1",
+        agent_name="test",
+        model="gemini-2.5-flash",
+        input_tokens=1_000_000,
+        output_tokens=0,
+        usd_override=0.0,
+    )
+    assert usd == 0.0
+    assert captured["estimated_cost_usd"] == 0.0
+
+
+def test_record_agent_cost_estimates_without_override(monkeypatch):
+    from gmail_search.agents import cost as cost_mod
+
+    monkeypatch.setattr(cost_mod, "record_cost", lambda conn, **kw: None)
+    usd = cost_mod.record_agent_cost(
+        object(), session_id="s1", agent_name="x", model="gemini-2.5-flash", input_tokens=1_000_000, output_tokens=0
+    )
+    assert usd == 0.075
+
+
+def test_gemini_3_7_flash_pricing_is_not_the_default():
+    from gmail_search.agents.cost import estimate_agent_cost_usd
+
+    assert estimate_agent_cost_usd("gemini-3.7-flash", 1_000_000, 0) == 0.75
