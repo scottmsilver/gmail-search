@@ -90,3 +90,18 @@ def test_error_event_uses_agent_name():
     conn = _FakeConn()
     deep_events.emit_error(conn, "s1", RuntimeError("boom"), agent_name="pi")
     assert conn.events == [{"agent_name": "pi", "kind": "error", "payload": {"message": "boom"}}]
+
+
+def test_retriever_events_recognize_batch_tool_names():
+    conn = _FakeConn()
+    calls = [
+        {"name": "search_emails_batch", "args": {"searches": [{"q": "delta"}]}},
+        {
+            "name": "search_emails_batch",
+            "response": {"results": [{"input": {"q": "delta"}, "result": {"results": [{"cite_ref": "t1"}]}}]},
+        },
+    ]
+    deep_events.emit_retriever_events(conn, "s1", calls)
+    kinds = [e["kind"] for e in conn.events]
+    assert kinds == ["tool_call", "evidence"]
+    assert conn.events[1]["payload"]["summary"] == "Retrieval calls: 1× search_emails_batch."

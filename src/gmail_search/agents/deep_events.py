@@ -19,7 +19,21 @@ logger = logging.getLogger(__name__)
 
 # Names of the retrieval tools the UI surfaces under the "retriever"
 # agent. `run_code` is treated separately as the Analyst's tool.
-RETRIEVAL_TOOL_NAMES = frozenset({"search_emails", "query_emails", "get_thread", "sql_query"})
+# Both single and batch tool names are listed; the MCP side channel
+# provides batch ones while the orchestrator uses single names.
+RETRIEVAL_TOOL_NAMES = frozenset(
+    {
+        "search_emails",
+        "query_emails",
+        "get_thread",
+        "sql_query",
+        "search_emails_batch",
+        "query_emails_batch",
+        "get_thread_batch",
+        "sql_query_batch",
+        "find_facts",
+    }
+)
 
 
 def _is_args_entry(tc: dict) -> bool:
