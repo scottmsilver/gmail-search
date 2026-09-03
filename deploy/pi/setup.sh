@@ -4,6 +4,7 @@
 # (ANTHROPIC_API_KEY / GEMINI_API_KEY in .env, or `/login` inside the
 # container).
 set -euo pipefail
+umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "$SCRIPT_DIR"
 say() { printf '[setup] %s\n' "$*"; }

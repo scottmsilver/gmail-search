@@ -499,6 +499,7 @@ Planner ──► Retriever ──► Analyst ──► Writer ──► Critic
 - **Streaming** — `/api/deep` SSE proxies stream stages into the chat UI under a single AssistantWork disclosure. Each stage emits its cost, and per-turn cost is shown under the assistant response.
 - **Artifacts** — generated artifacts (PDFs, CSVs, images) appear as `[art:…]` chips that open in a right-side preview drawer. `prune-artifacts` GCs them.
 - **Persistence** — every event is in `agent_events`; turns are persisted at the moment they start so mid-stream navigation doesn't drop them.
+- **Security posture (`pi` backend)** — `pi-sandbox` is one shared container/UID for every turn, not a per-tenant boundary; see `deploy/pi/README.md`'s "Security posture" section, and set `GMAIL_PI_BUILTIN_TOOLS=0` to disable its `bash` tool until per-session isolation exists.
 
 ## Cost
 

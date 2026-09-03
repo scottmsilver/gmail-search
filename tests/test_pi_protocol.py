@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from gmail_search.agents import pi_protocol as pp
 
 
@@ -180,3 +182,80 @@ def test_build_pi_argv_can_disable_builtin_tools():
         system_prompt="p",
     )
     assert "--no-builtin-tools" not in default
+
+
+def test_build_pi_argv_rejects_traversal_session_id():
+    with pytest.raises(ValueError):
+        pp.build_pi_argv(
+            container="c",
+            session_id="../x",
+            workspace="w",
+            session_path=None,
+            extension_path="/x",
+            model="m",
+            thinking=None,
+            system_prompt="p",
+        )
+
+
+def test_build_pi_argv_rejects_slash_in_workspace():
+    with pytest.raises(ValueError):
+        pp.build_pi_argv(
+            container="c",
+            session_id="s",
+            workspace="a/b",
+            session_path=None,
+            extension_path="/x",
+            model="m",
+            thinking=None,
+            system_prompt="p",
+        )
+
+
+def test_redact_secrets_leaves_ordinary_text_unchanged():
+    text = "The search found 3 threads about hotel refunds, sorted by date."
+    assert pp.redact_secrets(text) == text
+
+
+def test_redact_secrets_google_api_key():
+    text = "key is AIzaSyD-abcdefghijklmnopqrstuvwxyz1234"
+    redacted = pp.redact_secrets(text)
+    assert "AIzaSyD" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_bearer_token():
+    text = "Authorization: Bearer abcDEF123456.token-value_here"
+    redacted = pp.redact_secrets(text)
+    assert "abcDEF123456" not in redacted
+    assert redacted.startswith("Authorization: Bearer [REDACTED]")
+
+
+def test_redact_secrets_sk_style_key():
+    text = "found sk-abcdefghijklmnopqrstuvwxyz in output"
+    redacted = pp.redact_secrets(text)
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_env_style_assignment():
+    assert pp.redact_secrets("GMAIL_MCP_SERVICE_TOKEN=abc.def") == "GMAIL_MCP_SERVICE_TOKEN=[REDACTED]"
+    assert pp.redact_secrets("GEMINI_API_KEY=xyz123") == "GEMINI_API_KEY=[REDACTED]"
+    assert pp.redact_secrets("MY_SECRET=shh") == "MY_SECRET=[REDACTED]"
+    assert pp.redact_secrets("DB_PASSWORD=hunter2") == "DB_PASSWORD=[REDACTED]"
+
+
+def test_redact_secrets_is_case_insensitive():
+    assert pp.redact_secrets("gemini_api_key=xyz123") == "gemini_api_key=[REDACTED]"
+
+
+def test_tool_call_response_entry_redacts_secrets_in_bash_output():
+    ev = {
+        "type": "tool_execution_end",
+        "toolName": "bash",
+        "isError": False,
+        "result": {"content": [{"type": "text", "text": "GMAIL_MCP_SERVICE_TOKEN=abc.def\nOK"}]},
+    }
+    entry = pp.tool_call_response_entry(ev)
+    assert "abc.def" not in entry["response"]["text"]
+    assert "[REDACTED]" in entry["response"]["text"]

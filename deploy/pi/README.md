@@ -88,6 +88,24 @@ Service tokens are long-lived static credentials; rotate by deleting the
 (or `setup.sh`), which mints a fresh one. `/admin/*` endpoints are
 loopback-only by default, so minting only works run from the host.
 
+## Security posture
+
+`pi-sandbox` is **one shared sandbox** for every deep-mode turn from
+every user, running as a single UID with a single provider key and a
+single tenantless MCP service token — the same model as the
+`claudebox` deploy. Every turn's `bash` tool can see every other
+active or recent turn's workspace, session transcripts, and process
+environment (including `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` and the
+service token); tenant scoping comes entirely from the
+per-turn-registered MCP session, not from container-level isolation.
+Treat this as a **single-tenant or trusted-multi-user** deployment
+until per-session isolation (separate container/namespace/UID per
+turn, or a token broker that keeps the service token out of the
+agent's own shell environment) exists. For anything closer to
+multi-tenant, set `GMAIL_PI_BUILTIN_TOOLS=0` — this disables pi's
+`bash` tool (no shell in the sandbox), which removes the main path a
+turn could use to read another turn's environment or files.
+
 ## Smoke test
 
 Without a registered session the extension is deliberately not loaded —

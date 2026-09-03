@@ -7,11 +7,40 @@ Shapes follow packages/coding-agent/docs/rpc.md in the pi repo.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 RESPONSE_CLIP_CHARS = 4000
 
 _PI_ISOLATION_FLAGS = ("--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates")
+
+_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+_REDACTED = "[REDACTED]"
+_SECRET_PATTERNS = (
+    # Google API keys.
+    re.compile(r"AIza[0-9A-Za-z_-]{20,}"),
+    # Bearer tokens (the token half only; keep the "Bearer " prefix).
+    re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]{8,})"),
+    # OpenAI-style secret keys.
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    # NAME=value where NAME ends with KEY/TOKEN/SECRET/PASSWORD (redact the value only).
+    re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))=(\S+)"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace secret-shaped substrings with `[REDACTED]`. Used before
+    logging pi stderr / extension-error records, and before persisting
+    tool-call output to `agent_events`, so provider keys, bearer
+    tokens, and `NAME=value` env dumps never leak into logs or the DB."""
+    result = text
+    for pattern in _SECRET_PATTERNS:
+        if pattern.groups:
+            result = pattern.sub(lambda m: m.group(0).replace(m.group(m.lastindex), _REDACTED), result)
+        else:
+            result = pattern.sub(_REDACTED, result)
+    return result
 
 
 def _as_dict(value) -> dict:
@@ -30,7 +59,7 @@ def tool_call_args_entry(ev: dict) -> dict:
 
 def tool_call_response_entry(ev: dict, *, clip: int = RESPONSE_CLIP_CHARS) -> dict:
     result = ev.get("result") if isinstance(ev.get("result"), dict) else {}
-    text = _text_of_content(result.get("content"))[:clip]
+    text = redact_secrets(_text_of_content(result.get("content")))[:clip]
     return {"name": str(ev.get("toolName") or ""), "response": {"text": text, "is_error": bool(ev.get("isError"))}}
 
 
@@ -103,6 +132,11 @@ def _builtin_tools_flags(builtin_tools: bool) -> list[str]:
     return [] if builtin_tools else ["--no-builtin-tools"]
 
 
+def _require_slug(name: str, value: str) -> None:
+    if not _SLUG_RE.match(value):
+        raise ValueError(f"{name} must match {_SLUG_RE.pattern!r}, got {value!r}")
+
+
 def build_pi_argv(
     *,
     container: str,
@@ -116,7 +150,13 @@ def build_pi_argv(
     builtin_tools: bool = True,
 ) -> list[str]:
     """argv for one turn. Secrets are NOT here — the service token and
-    provider key live in the container's own environment."""
+    provider key live in the container's own environment.
+
+    `session_id` and `workspace` are validated here (not just by the
+    HTTP caller) since this is a shared/reusable helper and not
+    guaranteed to always be called from the validated HTTP path."""
+    _require_slug("session_id", session_id)
+    _require_slug("workspace", workspace)
     return [
         "docker",
         "exec",

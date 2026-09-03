@@ -10,6 +10,7 @@ Public entry point: `pi_run()`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -335,7 +336,7 @@ async def _handle_record(rec: dict, state: _TurnState, on_tool_event: ToolEventS
         if error_message is not None:
             state.error_message = error_message
     elif kind == "extension_error":
-        logger.error("pi extension error: %s", rec)
+        logger.error("pi extension error: %s", pp.redact_secrets(json.dumps(rec)))
 
 
 async def _fetch_usage(client) -> pp.UsageStats | None:
@@ -438,6 +439,8 @@ async def _run_turn(
         await _kill_stray_pi(session_path_for(conversation_id))
         raise
     await client.close()
+    if client.killed:
+        await _kill_stray_pi(session_path_for(conversation_id))
     return outcome
 
 

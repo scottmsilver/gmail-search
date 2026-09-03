@@ -40,6 +40,20 @@ def _handle_stats(cmd: dict, script: dict) -> None:
             "data": script.get("stats", {}),
         }
     )
+    _flood_stdout(script.get("stdout_flood_after_stats", 0))
+
+
+def _flood_stdout(nbytes: int) -> None:
+    """Write >= nbytes of noise JSONL events. Used to simulate pi
+    filling the stdout pipe after answering a request — if the parent
+    doesn't drain stdout concurrently while waiting for us to exit,
+    this write blocks and shutdown deadlocks."""
+    if not nbytes:
+        return
+    line = json.dumps({"type": "noise"}) + "\n"
+    count = nbytes // len(line) + 1
+    sys.stdout.write(line * count)
+    sys.stdout.flush()
 
 
 def main() -> None:
@@ -56,6 +70,8 @@ def main() -> None:
             _handle_stats(cmd, script)
         elif kind == "abort":
             _emit({"id": cmd.get("id"), "type": "response", "command": "abort", "success": True})
+            if script.get("ignore_abort"):
+                continue  # keep reading stdin; exit only on EOF, like real pi
             _emit({"type": "agent_end", "messages": []})
             return
     return

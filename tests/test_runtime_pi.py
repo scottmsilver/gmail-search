@@ -55,6 +55,7 @@ class _FakeClient:
         self.sent: list[dict] = []
         self.aborted = False
         self.closed = False
+        self.killed = False
         self.stray: list[dict] = []
         self._served = 0
 
@@ -342,6 +343,24 @@ def test_error_stop_reason_surfaces_as_error_event(monkeypatch):
     assert conn.events[-1]["kind"] == "error"
     assert "context too large" in conn.events[-1]["payload"]["message"]
     assert conn.finalized == [{"status": "error", "final_answer": None}]
+
+
+def test_killed_on_normal_close_triggers_stray_kill(monkeypatch):
+    """When `close()` had to kill the process (e.g. pi didn't exit on
+    stdin EOF), `_run_turn` must still clean up the in-container
+    process — not just on the exception path."""
+
+    class _KilledOnCloseClient(_FakeClient):
+        async def close(self) -> None:
+            self.killed = True
+            await super().close()
+
+    client = _KilledOnCloseClient(_happy_records())
+    conn, calls = _install(monkeypatch, client)
+    _run()
+    assert client.closed
+    assert calls["kill"] == ["/sessions/c1.jsonl"]
+    assert conn.finalized == [{"status": "done", "final_answer": "Final answer"}]
 
 
 def test_empty_answer_surfaces_as_error_event(monkeypatch):
