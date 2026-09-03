@@ -748,12 +748,12 @@ async def _real_run(
             agent_name=agent_name,
             kind="cost",
             payload={
+                **extra,
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usd": round(usd, 5),
                 "turn_total_usd": round(turn_cost_usd, 5),
-                **extra,
             },
         )
 
