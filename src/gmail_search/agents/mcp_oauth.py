@@ -333,6 +333,21 @@ class GatedBrokerOAuthProvider:
 
     # ── token verification (TokenVerifier path for /mcp) ────────────
 
+    def _session_access_token(self, token: str) -> Optional[AccessToken]:
+        """Try to verify a session token and return an AccessToken if valid."""
+        from gmail_search.agents.mcp_tools_server import verify_session_token
+
+        claims = verify_session_token(token)
+        if claims is None:
+            return None
+        return AccessToken(
+            token=token,
+            client_id=str(claims["uid"]),
+            scopes=["mcp"],
+            expires_at=int(claims["exp"]),
+            resource=None,
+        )
+
     async def load_access_token(self, token: str) -> Optional[AccessToken]:
         tok = self._store.get_access_token(token)
         if tok is not None:
@@ -344,6 +359,10 @@ class GatedBrokerOAuthProvider:
                 self._store.discard_access(tok.token)
                 return None
             return tok
+        # Try session token first, then fall back to transport/service JWTs.
+        session_at = self._session_access_token(token)
+        if session_at is not None:
+            return session_at
         # Fallback: accept the existing transport/service JWTs as valid
         # access tokens for THIS resource, so local + trusted server-side
         # clients keep working through the SDK's bearer auth (which calls
