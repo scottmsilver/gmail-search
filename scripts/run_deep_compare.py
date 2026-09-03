@@ -110,6 +110,8 @@ def _scope_model_envs(backend: str) -> None:
     elif backend == "claude_code":
         for k in _PER_STAGE_MODEL_VARS:
             os.environ.setdefault(k, _CLAUDE_MODEL_DEFAULT)
+    elif backend == "pi":
+        pass  # model comes from GMAIL_PI_MODEL
 
 
 async def _run_one_turn(question: str, backend: str, timeout_s: float) -> dict[str, Any]:
@@ -223,7 +225,11 @@ def _save_report(runs: list[dict[str, Any]], out_path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("queries", nargs="*", help="Override the default canonical queries.")
-    parser.add_argument("--backends", default="adk,claude_code", help="Comma-separated backend list.")
+    parser.add_argument(
+        "--backends",
+        default="adk,claude_code",
+        help="Comma-separated backend list (adk, claude_code, claude_native, pi).",
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="Per-turn timeout in seconds.")
     parser.add_argument("--out", default="scripts/deep_compare_report.json", help="JSON output path.")
     args = parser.parse_args()
