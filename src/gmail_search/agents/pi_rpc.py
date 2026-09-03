@@ -13,10 +13,12 @@ import asyncio
 import itertools
 import json
 import logging
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
 _ids = itertools.count(1)
+STDOUT_LINE_LIMIT = 64 * 1024 * 1024  # 64 MiB; agent_end embeds all messages
 
 
 class PiRpcError(RuntimeError):
@@ -24,10 +26,12 @@ class PiRpcError(RuntimeError):
 
 
 class PiRpcClient:
-    def __init__(self, proc: asyncio.subprocess.Process) -> None:
+    def __init__(self, proc: asyncio.subprocess.Process, pump_task: asyncio.Task) -> None:  # noqa: F821
         self._proc = proc
         self._pending: list[bytes] = []  # test seam for injected lines
         self.stray: list[dict] = []
+        self._pump_task = pump_task
+        self._stderr_tail: deque = deque(maxlen=1)  # last 4000 bytes
 
     @classmethod
     async def spawn(cls, argv: list[str]) -> "PiRpcClient":
@@ -36,8 +40,15 @@ class PiRpcClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=STDOUT_LINE_LIMIT,
         )
-        return cls(proc)
+        client = cls.__new__(cls)
+        client._proc = proc
+        client._pending = []
+        client.stray = []
+        client._stderr_tail = deque(maxlen=1)
+        client._pump_task = asyncio.create_task(client._stderr_pump())
+        return client
 
     @property
     def returncode(self) -> int | None:
@@ -45,6 +56,24 @@ class PiRpcClient:
 
     def _inject_line(self, line: bytes) -> None:
         self._pending.append(line)
+
+    async def _stderr_pump(self) -> None:
+        """Read stderr in background, keep last 4000 bytes."""
+        if self._proc.stderr is None:
+            return
+        tail = bytearray()
+        try:
+            while True:
+                chunk = await self._proc.stderr.read(4096)
+                if not chunk:
+                    break
+                tail.extend(chunk)
+                if len(tail) > 4000:
+                    tail = tail[-4000:]
+        except asyncio.CancelledError:
+            pass
+        if tail:
+            self._stderr_tail.append(bytes(tail))
 
     async def send(self, command: dict) -> None:
         assert self._proc.stdin is not None
@@ -90,6 +119,12 @@ class PiRpcClient:
         except asyncio.TimeoutError:
             self._proc.kill()
             await self._proc.wait()
+        self._pump_task.cancel()
+        try:
+            await self._pump_task
+        except asyncio.CancelledError:
+            pass
+        await self._log_stderr_tail()
 
     async def abort_and_close(self, *, grace: float = 5.0) -> None:
         """Ask pi to stop, wait up to `grace` for it to exit, then kill."""
@@ -102,16 +137,16 @@ class PiRpcClient:
         except asyncio.TimeoutError:
             self._proc.kill()
             await self._proc.wait()
-        await self._drain_stderr()
-
-    async def _drain_stderr(self) -> None:
-        if self._proc.stderr is None:
-            return
+        self._pump_task.cancel()
         try:
-            tail = await asyncio.wait_for(self._proc.stderr.read(4000), 1.0)
-        except asyncio.TimeoutError:
-            return
-        if tail:
+            await self._pump_task
+        except asyncio.CancelledError:
+            pass
+        await self._log_stderr_tail()
+
+    async def _log_stderr_tail(self) -> None:
+        if self._stderr_tail:
+            tail = self._stderr_tail[0]
             logger.warning("pi stderr tail: %s", tail.decode(errors="replace"))
 
 

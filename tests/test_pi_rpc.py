@@ -14,9 +14,13 @@ from gmail_search.agents import pi_rpc
 FAKE_PI = Path(__file__).parent / "fakes" / "fake_pi.py"
 
 
-def _write_script(tmp_path: Path, events: list[dict], stats: dict | None = None, delay: float = 0.0) -> Path:
+def _write_script(
+    tmp_path: Path, events: list[dict], stats: dict | None = None, delay: float = 0.0, stderr_bytes: int = 0
+) -> Path:
     p = tmp_path / "script.json"
-    p.write_text(json.dumps({"events": events, "stats": stats or {}, "delay_before_end": delay}))
+    p.write_text(
+        json.dumps({"events": events, "stats": stats or {}, "delay_before_end": delay, "stderr_bytes": stderr_bytes})
+    )
     return p
 
 
@@ -101,3 +105,54 @@ def test_malformed_line_is_skipped(tmp_path, monkeypatch):
         return first["type"]
 
     assert asyncio.run(run()) == "response"
+
+
+def test_large_line_is_read_intact(tmp_path, monkeypatch):
+    large_text = "x" * (1024 * 1024)  # 1 MiB
+    script = _write_script(tmp_path, [{"type": "agent_end", "messages": [], "data": large_text}])
+    monkeypatch.setenv("FAKE_PI_SCRIPT", str(script))
+
+    async def run():
+        client = await pi_rpc.PiRpcClient.spawn(_argv())
+        await client.send({"type": "prompt", "message": "hi"})
+        while True:
+            rec = await client.read_record(timeout=5.0)
+            assert rec is not None
+            if rec["type"] == "agent_end":
+                return rec.get("data")
+        await client.close()
+
+    result = asyncio.run(run())
+    assert result == large_text and len(result) > 1000000
+
+
+def test_chatty_stderr_does_not_block(tmp_path, monkeypatch):
+    script = _write_script(tmp_path, [{"type": "agent_end", "messages": []}], stderr_bytes=200 * 1024)
+    monkeypatch.setenv("FAKE_PI_SCRIPT", str(script))
+
+    async def run():
+        client = await pi_rpc.PiRpcClient.spawn(_argv())
+        await client.send({"type": "prompt", "message": "hi"})
+        while True:
+            rec = await client.read_record(timeout=5.0)
+            assert rec is not None
+            if rec["type"] == "agent_end":
+                break
+        await client.close()
+        return client.returncode
+
+    assert asyncio.run(run()) == 0
+
+
+def test_abort_and_close_after_close_does_not_raise(tmp_path, monkeypatch):
+    script = _write_script(tmp_path, [{"type": "agent_end", "messages": []}])
+    monkeypatch.setenv("FAKE_PI_SCRIPT", str(script))
+
+    async def run():
+        client = await pi_rpc.PiRpcClient.spawn(_argv())
+        await client.send({"type": "prompt", "message": "hi"})
+        await client.read_record(timeout=5.0)
+        await client.close()
+        await client.abort_and_close()  # should not raise
+
+    asyncio.run(run())

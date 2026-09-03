@@ -20,6 +20,10 @@ def _emit(record: dict) -> None:
 
 def _handle_prompt(cmd: dict, script: dict) -> None:
     _emit({"id": cmd.get("id"), "type": "response", "command": "prompt", "success": True})
+    stderr_bytes = script.get("stderr_bytes", 0)
+    if stderr_bytes:
+        sys.stderr.write("x" * stderr_bytes)
+        sys.stderr.flush()
     for ev in script.get("events", []):
         if ev.get("type") == "agent_end":
             time.sleep(float(script.get("delay_before_end", 0.0)))
