@@ -37,7 +37,7 @@ export const CLAUDE_AVAILABLE_MODELS = [
   "opusplan",
 ] as const;
 
-export type DeepBackend = "adk" | "claude_code" | "claude_native";
+export type DeepBackend = "adk" | "claude_code" | "claude_native" | "pi";
 
 const isClaudeBackend = (backend: DeepBackend): boolean =>
   backend === "claude_code" || backend === "claude_native";
