@@ -4,19 +4,38 @@ Runs `@earendil-works/pi-coding-agent` (the "pi" agent harness) in a
 long-lived container named `pi-sandbox` as the backend for gmail-search's
 deep-analysis mode. The Python driver (`runtime_pi.py`) runs one
 `docker exec -i … pi --mode rpc …` per turn against this container;
-`pi` itself never runs on the host. The extension at
-`extensions/gmail-tools/` bridges pi's tool-call protocol to the host
-MCP tools server at `http://host.docker.internal:7878/mcp`.
+`pi` itself never runs on the host. Pi gets MCP access to the host tools
+server at `http://host.docker.internal:7878/mcp` through the
+[`pi-mcp-adapter`](https://github.com/nicobailon/pi-mcp-adapter) npm
+package, loaded as a pi extension (`-e`) rather than through our own
+bridge code.
 
 ## Layout
 
 - `Dockerfile` — builds `gmail-search-pi:local` from `node:24-bookworm-slim`,
-  installs `pi`, and bakes in the `gmail-tools` extension (with its own
-  `node_modules`, `npm ci --omit=dev`).
-- `docker-compose.yml` — service definition for `pi-sandbox`.
-- `extensions/gmail-tools/` — the pi extension source (Task 8). Copied
-  into the image at `/opt/gmail-tools`; its `node_modules/` is
-  gitignored and rebuilt at image build time.
+  installs `pi`, and installs `pi-mcp-adapter` (pinned exact version) plus
+  its runtime peer deps (`typebox`, `@earendil-works/pi-ai`,
+  `@earendil-works/pi-tui` — the latter two pinned to the same version as
+  `pi-coding-agent`) into `/opt/pi-pkgs`.
+- `pi-pkgs/package.json` + `pi-pkgs/package-lock.json` — the pinned versions
+  and their full resolved dependency graph for the `/opt/pi-pkgs` install
+  above, committed so the image build is reproducible (`npm ci`) instead of
+  re-resolving npm's dependency graph on every build. `node_modules/` here
+  is gitignored — it's a local artifact of regenerating the lockfile, not
+  what ships in the image. Regenerate with `npm install --ignore-scripts
+  --package-lock-only` in that directory after bumping a version.
+- `mcp.json` — static, committed adapter config, copied into the image at
+  `/opt/gmail-mcp.json`. Registers the `gmail` MCP server as a direct-tools
+  server (`directTools: true`) pointed at `${GMS_MCP_URL}` (env
+  interpolation — never a literal URL), with the proxy tool disabled
+  (`disableProxyTool: true`) since direct tools cover everything we need.
+  The bearer token is read per-turn via `"bearerToken": "!cat
+  .session-token"` — the adapter runs that command, with pi's own cwd,
+  when the HTTP server connects.
+- `docker-compose.yml` — service definition for `pi-sandbox`. `PI_CONTAINER_NAME`
+  (default `pi-sandbox`) names the container, and `PI_IMAGE_TAG` (default `local`)
+  tags the built image, so a test container can run beside production under a
+  separate `docker compose -p` project without touching either.
 - `sessions/` — mounted at `/sessions` inside the container. Per-conversation
   `--session <path>.jsonl` transcripts live here so a conversation can
   resume across turns. Gitignored.
@@ -76,12 +95,17 @@ runs, if `.env` doesn't already have one: it reads
 another deploy's token — a stale/expired token elsewhere (e.g.
 claudebox's `.env`) should never leak into this deploy.
 
-`docker-compose.yml` passes the token into the container as
-`GMAIL_MCP_SERVICE_TOKEN`; the `gmail-tools` extension reads it from its
-own process environment and sends it as `Authorization: Bearer <token>`
-on the MCP connection. It is never placed on a command line — `pi
---mode rpc` argv carries only `GMS_SESSION_ID` and the extension path;
-the secret is read from the container's own env by the extension.
+The driver writes a per-turn bearer token to `./.session-token` (mode
+`0600`) in the turn's workspace directory before starting `pi`. The
+adapter config (`mcp.json`'s `mcpServers.gmail.bearerToken`) is
+`"!cat .session-token"` — the adapter runs that command, with pi's own
+cwd, when the `gmail` MCP server connects, and sends the result as
+`Authorization: Bearer <token>` on the MCP connection. The token is
+never placed on a command line or in the container's process
+environment for this path. `docker-compose.yml` still passes
+`GMAIL_MCP_SERVICE_TOKEN` into the container's environment for manual
+`docker exec` testing (see Smoke test below); that static service
+token is unrelated to the per-turn tokens the driver writes.
 
 Service tokens are long-lived static credentials; rotate by deleting the
 `GMAIL_MCP_SERVICE_TOKEN=` line from `.env` and re-running `start.sh`
@@ -106,10 +130,44 @@ multi-tenant, set `GMAIL_PI_BUILTIN_TOOLS=0` — this disables pi's
 `bash` tool (no shell in the sandbox), which removes the main path a
 turn could use to read another turn's environment or files.
 
+## MCP tool access (pi-mcp-adapter)
+
+`mcp.json` gives pi's model direct, first-class tools for every
+`gmail` MCP server tool (`directTools: true` at the server level) —
+they show up in the tool list as `gmail_<tool_name>` (e.g.
+`gmail_sql_query_batch`, `gmail_find_facts`, `gmail_describe_schema`),
+alongside pi's own `read`/`bash`/`edit`/`write`. The proxy `mcp` tool
+is hidden (`disableProxyTool: true`); it isn't needed once every tool
+is registered directly.
+
+`scriptMode: true` also registers the adapter's `mcpScript` tool, which
+runs short JavaScript that calls one or more MCP tools in a loop and
+returns a single combined result — useful when a turn needs to fan out
+over many rows or chain several tool calls without paying context for
+each intermediate result.
+
+**Output guard.** Oversized tool results are capped at 50 KiB / 2,000
+lines of inline text (`settings.outputGuard`, adapter default). A call
+that exceeds this returns a head preview plus a notice, and the full
+text is spilled to a mode-`0600` temp file inside the container that
+the agent can `read`/`grep`. Observed verbatim against
+`pi-sandbox-test` for a 200-row `sql_query_batch` result:
+
+```
+[MCP text output truncated: original 817 lines / 167.6 KiB. Full text saved to: /tmp/pi-mcp-output-XnAr6d/output-102ed920.txt — use read with offset/limit or grep to inspect.]
+```
+
+Spill files are not cleaned up automatically (per the adapter's own
+docs) and may contain sensitive data; the driver sets `TMPDIR` on each
+turn's `docker exec` to `/workspaces/<workspace>/.tmp` (host-created,
+mode 0700, alongside the session-token file) so spills land inside that
+turn's own workspace and are pruned along with it, instead of piling up
+in the shared container's `/tmp`.
+
 ## Smoke test
 
-Without a registered session the extension is deliberately not loaded —
-this checks the bare harness answers over the RPC protocol:
+This bypasses the adapter and MCP entirely (`--no-extensions`) and just
+checks the bare harness answers over the RPC protocol:
 
 ```bash
 docker exec -i -e GMS_SESSION_ID=smoke pi-sandbox pi --mode rpc --no-extensions --no-skills \
@@ -118,8 +176,8 @@ docker exec -i -e GMS_SESSION_ID=smoke pi-sandbox pi --mode rpc --no-extensions 
 EOF
 ```
 
-To exercise the real driver path end to end (extension loaded, MCP
-tools reachable, a real session registered), see Task 9's smoke script
-in `.superpowers/sdd/2026-09-02-pi-deep-backend/task-9-report.md` — it
+To exercise the real driver path end to end (`pi-mcp-adapter` loaded,
+MCP tools reachable, a real session registered), see Task 9's smoke
+script in `.superpowers/sdd/2026-09-02-pi-deep-backend/task-9-report.md` — it
 registers a throwaway session via the admin API, drives one turn through
 `runtime_pi.drive_turn`, and unregisters the session afterward.

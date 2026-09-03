@@ -242,6 +242,73 @@ def test_build_pi_argv_rejects_81_char_workspace():
         )
 
 
+def test_build_pi_argv_appends_mcp_config_flag_after_extension():
+    argv = pp.build_pi_argv(
+        container="c",
+        session_id="s",
+        workspace="w",
+        session_path=None,
+        extension_path="/opt/pi-pkgs/node_modules/pi-mcp-adapter",
+        model="m",
+        thinking=None,
+        system_prompt="p",
+        mcp_config_path="/opt/gmail-mcp.json",
+    )
+    tail = argv[argv.index("pi") :]
+    ext_idx = tail.index("-e")
+    assert tail[ext_idx + 1] == "/opt/pi-pkgs/node_modules/pi-mcp-adapter"
+    assert tail[ext_idx + 2] == "--mcp-config"
+    assert tail[ext_idx + 3] == "/opt/gmail-mcp.json"
+
+
+def test_build_pi_argv_includes_tmpdir_flag_when_given():
+    argv = pp.build_pi_argv(
+        container="c",
+        session_id="s",
+        workspace="deep-conv-c1",
+        session_path=None,
+        extension_path="/x",
+        model="m",
+        thinking=None,
+        system_prompt="p",
+        tmpdir="/workspaces/deep-conv-c1/.tmp",
+    )
+    assert "-e" in argv
+    assert "TMPDIR=/workspaces/deep-conv-c1/.tmp" in argv
+    # Sits next to GMS_SESSION_ID, before the `-w` workdir flag.
+    tmpdir_idx = argv.index("TMPDIR=/workspaces/deep-conv-c1/.tmp")
+    assert argv[tmpdir_idx - 1] == "-e"
+    assert argv.index("GMS_SESSION_ID=s") < tmpdir_idx
+
+
+def test_build_pi_argv_omits_tmpdir_flag_by_default():
+    argv = pp.build_pi_argv(
+        container="c",
+        session_id="s",
+        workspace="w",
+        session_path=None,
+        extension_path="/x",
+        model="m",
+        thinking=None,
+        system_prompt="p",
+    )
+    assert not any(a.startswith("TMPDIR=") for a in argv)
+
+
+def test_build_pi_argv_omits_mcp_config_flag_by_default():
+    argv = pp.build_pi_argv(
+        container="c",
+        session_id="s",
+        workspace="w",
+        session_path=None,
+        extension_path="/x",
+        model="m",
+        thinking=None,
+        system_prompt="p",
+    )
+    assert "--mcp-config" not in argv
+
+
 def test_redact_secrets_leaves_ordinary_text_unchanged():
     text = "The search found 3 threads about hotel refunds, sorted by date."
     assert pp.redact_secrets(text) == text

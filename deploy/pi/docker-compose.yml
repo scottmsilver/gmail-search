@@ -2,8 +2,8 @@ services:
   pi-sandbox:
     build:
       context: .
-    image: gmail-search-pi:local
-    container_name: pi-sandbox
+    image: gmail-search-pi:${PI_IMAGE_TAG:-local}
+    container_name: ${PI_CONTAINER_NAME:-pi-sandbox}
     restart: unless-stopped
     environment:
       GMS_MCP_URL: ${GMS_MCP_URL}

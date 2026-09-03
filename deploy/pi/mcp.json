@@ -1,0 +1,18 @@
+{
+  "settings": {
+    "directTools": true,
+    "disableProxyTool": true,
+    "warnOnLargeDirectTools": false,
+    "outputGuard": true,
+    "scriptMode": true
+  },
+  "mcpServers": {
+    "gmail": {
+      "url": "${GMS_MCP_URL}",
+      "auth": "bearer",
+      "bearerToken": "!cat .session-token",
+      "lifecycle": "eager",
+      "directTools": true
+    }
+  }
+}

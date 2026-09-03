@@ -357,13 +357,16 @@ def _open_db_conn(db_dsn: str | None):
     return psycopg.connect(db_dsn, row_factory=dict_row, autocommit=False)
 
 
-def _resolve_server_db_dsn() -> str | None:
+def _resolve_server_db_dsn() -> str:
     """Server-side DSN resolution. The admin endpoint never trusts a
     caller-supplied value (see `post_session`); instead we read the
     same env var the rest of the codebase uses (`DB_DSN`, mirroring
-    `gmail_search.store.db._pg_dsn`). Returns None if unset so
-    artifact-free sessions still work."""
-    return os.environ.get("DB_DSN") or os.environ.get("GMAIL_DB_DSN") or None
+    `gmail_search.store.db._pg_dsn`). Falls back to the local docker-compose
+    default if unset. The connection is opened lazily so artifact-free
+    sessions still work without a database."""
+    from gmail_search.store.db import _pg_dsn
+
+    return os.environ.get("DB_DSN") or os.environ.get("GMAIL_DB_DSN") or _pg_dsn()
 
 
 # ── Transport-token identity (per-owner /mcp auth) ─────────────────
@@ -383,17 +386,36 @@ _TRANSPORT_AUD = "mcp-transport"
 # register_session(user_id=...) before each run). cc-web only mints
 # transport tokens, so an untrusted VM can never obtain a service token.
 _SERVICE_AUD = "mcp-service"
+# A session token binds ONE registered session_id (`sid`) + its owner
+# (`uid`) to a single /mcp bearer token. It exists for MCP clients (the
+# pi-mcp-adapter extension) that cannot inject a `session_id` tool
+# argument — the server binds the session from the request's token
+# instead. Unlike a transport token (tenant-wide, one per owner) or a
+# service token (tenantless, one per trusted server), a session token is
+# minted per-turn by the orchestrator via /admin/session-tokens and is
+# only ever valid for the one session_id it names.
+_SESSION_AUD = "mcp-session"
 _TRANSPORT_ALGORITHM = "HS256"
 _TRANSPORT_MIN_SECRET_BYTES = 32
 _DEFAULT_TRANSPORT_TTL_SECONDS = 86400
 # Service tokens are static server-side client credentials, so they get a
 # long default lifetime (30 days) rather than the short transport TTL.
 _DEFAULT_SERVICE_TTL_SECONDS = 86400 * 30
+# Session tokens are per-turn; the default TTL just needs to outlive one
+# deep-analysis turn (hard-timeout + a margin — see runtime_pi's minting
+# call), so 20 minutes is generous rather than exact.
+_DEFAULT_SESSION_TOKEN_TTL_SECONDS = 1200
 
 # Per-request transport identity. Unset (None) means no transport token
 # was presented — behavior falls back to the legacy register_session
 # path so the in-process deep-analysis orchestrator keeps working.
 _transport_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("_transport_user_id", default=None)
+# Per-request session-token identity. Set only when the presented bearer
+# token is a session token (aud=mcp-session) with a usable `sid` claim.
+# `_resolve_ctx` prefers this over the plain transport-uid regime.
+_transport_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_transport_session_id", default=None
+)
 
 
 def _transport_secret() -> str | None:
@@ -489,6 +511,60 @@ def mint_service_token(ttl_seconds: int | None = None) -> str:
         "exp": exp,
     }
     return jwt.encode(payload, secret, algorithm=_TRANSPORT_ALGORITHM)
+
+
+def _session_token_ttl_seconds() -> int:
+    raw = os.environ.get("GMAIL_MCP_SESSION_TOKEN_TTL")
+    if not raw:
+        return _DEFAULT_SESSION_TOKEN_TTL_SECONDS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("invalid GMAIL_MCP_SESSION_TOKEN_TTL=%r; using default", raw)
+        return _DEFAULT_SESSION_TOKEN_TTL_SECONDS
+
+
+def mint_session_token(*, session_id: str, user_id: str, ttl_seconds: int) -> tuple[str, int]:
+    """Mint a signed session token binding `sid` (the session_id) + `uid`
+    (its owner) to the `mcp-session` audience. Returns `(token, exp)`.
+
+    Signed with the same secret/algorithm as `mint_transport_token`, so
+    the same signing-secret rotation covers both. Raises RuntimeError if
+    the signing secret is unavailable so the admin endpoint can map that
+    to a 503."""
+    import jwt
+
+    secret = _transport_secret()
+    if secret is None:
+        raise RuntimeError("transport signing secret unavailable")
+    now = int(time.time())
+    exp = now + ttl_seconds
+    payload = {"sid": session_id, "uid": user_id, "aud": _SESSION_AUD, "iat": now, "exp": exp}
+    token = jwt.encode(payload, secret, algorithm=_TRANSPORT_ALGORITHM)
+    return token, exp
+
+
+def verify_session_token(token: str) -> dict | None:
+    """Verify a token's signature + expiry, requiring the `mcp-session`
+    audience specifically. Returns the decoded claims (sid, uid, aud,
+    iat, exp) on success, None on any failure (bad sig, wrong/missing
+    aud, expired, missing exp, or no secret configured)."""
+    import jwt
+
+    secret = _transport_secret()
+    if secret is None:
+        return None
+    try:
+        return jwt.decode(
+            token,
+            secret,
+            algorithms=[_TRANSPORT_ALGORITHM],
+            audience=_SESSION_AUD,
+            options={"require": ["exp", "aud"]},
+        )
+    except jwt.PyJWTError as exc:
+        logger.debug("session token verification failed: %s", exc)
+        return None
 
 
 def _resolve_user_id_by_email(email: str) -> str | None:
@@ -630,11 +706,36 @@ def _get_session(session_id: str) -> SessionContext:
     return ctx
 
 
+def _resolve_session_token_ctx(session_id: str, bound_sid: str) -> SessionContext:
+    """Resolve the SessionContext bound by a session token's `sid`
+    claim. A caller-supplied `session_id` argument, when non-empty,
+    must match the token's bound session — defence-in-depth against a
+    stale or copy-pasted argument, never a way to widen scope. The
+    registered context's owner must also match the token's `uid`, so a
+    session token can never return another owner's context even if
+    `_SESSIONS` were somehow repointed underneath it."""
+    if session_id and session_id != bound_sid:
+        raise RuntimeError(
+            f"session_id {session_id!r} does not match the request's bound session {bound_sid!r} — session mismatch"
+        )
+    ctx = _get_session(bound_sid)
+    token_uid = _transport_user_id.get()
+    if ctx.user_id and token_uid and ctx.user_id != token_uid:
+        raise RuntimeError(f"session {bound_sid!r} owner mismatch: token uid {token_uid!r} != registered owner")
+    return ctx
+
+
 def _resolve_ctx(session_id: str) -> SessionContext:
     """Resolve the SessionContext a tool call should run against,
     preferring the transport identity when one is present.
 
-    Two regimes:
+    Three regimes:
+
+    0. **Session identity set** (a verified per-turn /mcp session
+       token, minted via /admin/session-tokens): the token's `sid` names
+       the ALREADY-REGISTERED session to use — see
+       `_resolve_session_token_ctx`. This is the pi-mcp-adapter path,
+       where the extension cannot inject a `session_id` tool argument.
 
     1. **Transport identity set** (a verified per-owner /mcp token):
        the token's `uid` is the effective user_id, FULL STOP. We return
@@ -654,6 +755,10 @@ def _resolve_ctx(session_id: str) -> SessionContext:
        prior register_session and uses its user_id verbatim. The
        registered `_SESSIONS` entry is never touched by the transport
        path, so its user_id is whatever register_session stored."""
+    session_sid = _transport_session_id.get()
+    if session_sid:
+        return _resolve_session_token_ctx(session_id, session_sid)
+
     transport_uid = _transport_user_id.get()
     if not transport_uid:
         # No transport identity (None == in-process orchestrator path;
@@ -673,10 +778,28 @@ def _resolve_ctx(session_id: str) -> SessionContext:
     return ctx
 
 
+def _effective_session_id(session_id: str) -> str:
+    """Resolve the session_id that logging + persistence should be
+    keyed under — as opposed to `session_id`, the raw tool argument,
+    which a session-token caller (pi-mcp-adapter) always passes as ""
+    since it can't inject one.
+
+    Mirrors the precedence `_resolve_ctx` uses for regime 0 (a verified
+    per-turn session token binds `sid`): when `_transport_session_id`
+    is set, IT is authoritative, full stop — the raw argument must
+    never be used to key `_record_call` / `_publish_one` / a call-log
+    line, or those land under the empty string (a shared, wrong-FK
+    bucket) instead of the bound session. Falls back to the raw
+    argument for the other two regimes (transport-uid and the
+    in-process orchestrator), where no session token is presented and
+    the caller-supplied `session_id` is already correct."""
+    return _transport_session_id.get() or session_id
+
+
 # ── Tool implementations (re-routes) ───────────────────────────────
 
 
-async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> dict:
+async def _tool_search_emails_batch(session_id: str = "", *, searches: list[dict]) -> dict:
     """Re-route to `search_emails_batch`. Threads `user_id` from the
     SessionContext into the impl so the resulting HTTP call to
     /api/* sets the X-User-Id header — FastAPI's `require_user_id`
@@ -684,40 +807,44 @@ async def _tool_search_emails_batch(session_id: str, searches: list[dict]) -> di
     keeping the per-user gate intact even from the MCP path."""
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"searches": searches}
     response = await _search_emails_batch_impl(searches, user_id=ctx.user_id)
-    _record_call(session_id, "search_emails_batch", args, response)
+    _record_call(sid, "search_emails_batch", args, response)
     return response
 
 
-async def _tool_query_emails_batch(session_id: str, filters: list[dict]) -> dict:
+async def _tool_query_emails_batch(session_id: str = "", *, filters: list[dict]) -> dict:
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"filters": filters}
     response = await _query_emails_batch_impl(filters, user_id=ctx.user_id)
-    _record_call(session_id, "query_emails_batch", args, response)
+    _record_call(sid, "query_emails_batch", args, response)
     return response
 
 
-async def _tool_get_thread_batch(session_id: str, thread_ids: list[str]) -> dict:
+async def _tool_get_thread_batch(session_id: str = "", *, thread_ids: list[str]) -> dict:
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"thread_ids": thread_ids}
     response = await _get_thread_batch_impl(thread_ids, user_id=ctx.user_id)
-    _record_call(session_id, "get_thread_batch", args, response)
+    _record_call(sid, "get_thread_batch", args, response)
     return response
 
 
-async def _tool_sql_query_batch(session_id: str, queries: list[str]) -> dict:
+async def _tool_sql_query_batch(session_id: str = "", *, queries: list[str]) -> dict:
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"queries": queries}
     response = await _sql_query_batch_impl(queries, user_id=ctx.user_id)
-    _record_call(session_id, "sql_query_batch", args, response)
+    _record_call(sid, "sql_query_batch", args, response)
     return response
 
 
-async def _tool_find_facts(session_id: str, query: str, exhaustive: bool = True, k: int = 200) -> dict:
+async def _tool_find_facts(session_id: str = "", *, query: str, exhaustive: bool = True, k: int = 200) -> dict:
     """Re-route to `find_facts`. Threads `user_id` from the
     SessionContext so the /api/find_facts call is scoped to the
     session's user via the X-User-Id + admin-token pair."""
@@ -725,21 +852,23 @@ async def _tool_find_facts(session_id: str, query: str, exhaustive: bool = True,
 
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"query": query, "exhaustive": exhaustive, "k": k}
     response = await _find_facts_impl(query, exhaustive=exhaustive, k=k, user_id=ctx.user_id)
-    _record_call(session_id, "find_facts", args, response)
+    _record_call(sid, "find_facts", args, response)
     return response
 
 
-async def _tool_describe_schema(session_id: str) -> dict:  # noqa: D401
+async def _tool_describe_schema(session_id: str = "") -> dict:  # noqa: D401
     """Re-route to `describe_schema`. Threads `user_id` so the schema
     response is prepended with a scoping preamble pinning the active
     user — the LLM uses that to write correct WHERE user_id = ... clauses.
     """
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     response = await _describe_schema_impl(user_id=ctx.user_id)
-    _record_call(session_id, "describe_schema", {}, response)
+    _record_call(sid, "describe_schema", {}, response)
     return response
 
 
@@ -756,13 +885,14 @@ def _rewrite_blob_urls(response: dict) -> None:
             r["fetch_url_note"] = "Signed link, expires in ~15 min — fetch directly (no auth, no session needed)."
 
 
-async def _tool_get_attachment_batch(session_id: str, items: list[dict]) -> dict:
+async def _tool_get_attachment_batch(session_id: str = "", *, items: list[dict]) -> dict:
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"items": items}
     response = await _get_attachment_batch_impl(items, user_id=ctx.user_id)
     _rewrite_blob_urls(response)
-    _record_call(session_id, "get_attachment_batch", args, response)
+    _record_call(sid, "get_attachment_batch", args, response)
     return response
 
 
@@ -869,7 +999,7 @@ def _publish_one(
     return {"id": art_id, "name": final_name, "mime_type": final_mime, "size": size}
 
 
-async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> dict:
+async def _tool_publish_artifact_batch(session_id: str = "", *, items: list[dict]) -> dict:
     """Publish many files as user-visible artifacts in ONE call.
     Each item is `{path, name?, mime_type?}`. Per-item errors land
     in that entry's `result` as `{error: ...}`; the batch as a
@@ -877,29 +1007,30 @@ async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> di
     even if one is missing."""
     set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
     ctx = _resolve_ctx(session_id)
+    sid = _effective_session_id(session_id)
     args = {"items": items}
     if not isinstance(items, list) or not items:
         response = {"error": "items must be a non-empty list of dicts"}
-        _record_call(session_id, "publish_artifact_batch", args, response)
+        _record_call(sid, "publish_artifact_batch", args, response)
         return response
     from gmail_search.agents.tools import BATCH_MAX_ITEMS as _CAP
 
     if len(items) > _CAP:
         response = {"error": f"items cap is {_CAP}; got {len(items)}. Split into multiple batches."}
-        _record_call(session_id, "publish_artifact_batch", args, response)
+        _record_call(sid, "publish_artifact_batch", args, response)
         return response
     results = []
     for it in items:
         result = _publish_one(
             ctx=ctx,
-            session_id=session_id,
+            session_id=sid,
             path=it.get("path", ""),
             name=it.get("name", ""),
             mime_type=it.get("mime_type", ""),
         )
         results.append({"input": it, "result": result})
     response = {"results": results}
-    _record_call(session_id, "publish_artifact_batch", args, response)
+    _record_call(sid, "publish_artifact_batch", args, response)
     return response
 
 
@@ -910,9 +1041,9 @@ async def _tool_publish_artifact_batch(session_id: str, items: list[dict]) -> di
 # Kept as module-level constants so the LLM-facing prose is easy to
 # audit / edit without diving into the function bodies.
 SESSION_PARAM_NOTE = (
-    "ALWAYS pass the `session_id` from your system prompt as the "
-    "first argument. The server uses it to bind the call to the "
-    "right evidence + database context."
+    "`session_id` is bound automatically from your request's own "
+    "credentials — leave it empty (the default). The server uses it "
+    "to bind the call to the right evidence + database context."
 )
 
 SEARCH_BATCH_DESC = (
@@ -1373,6 +1504,44 @@ def _register_admin_routes(app) -> None:
         claims = verify_token(token) or {}
         return JSONResponse({"token": token, "expires_at": claims.get("exp")})
 
+    @app.custom_route("/admin/session-tokens", methods=["POST"])
+    async def mint_session(request: Request) -> JSONResponse:
+        """Mint a per-turn SESSION token binding one already-registered
+        `session_id` to its owner. Admin-gated. Body: `{"session_id":
+        str, "ttl_seconds"?: int}`. The session must already be
+        registered (via POST /admin/sessions) with a non-empty
+        `user_id` — minting for an unregistered session, or one with no
+        owner, would produce a token `_resolve_ctx` can never resolve
+        (or worse, one that resolves to an unscoped context)."""
+        denied = _admin_guard(request)
+        if denied is not None:
+            return denied
+        if _transport_secret() is None:
+            return JSONResponse({"error": "transport signing secret unavailable"}, status_code=503)
+        body = await request.json()
+        session_id = body.get("session_id")
+        if not session_id or not isinstance(session_id, str):
+            return JSONResponse({"error": "session_id required"}, status_code=400)
+        ttl_seconds = body.get("ttl_seconds")
+        if ttl_seconds is not None and not isinstance(ttl_seconds, int):
+            return JSONResponse({"error": "ttl_seconds must be an integer"}, status_code=400)
+
+        ctx = _SESSIONS.get(session_id)
+        if ctx is None:
+            return JSONResponse({"error": f"session {session_id!r} not registered"}, status_code=404)
+        if not ctx.user_id:
+            return JSONResponse({"error": f"session {session_id!r} has no owner (user_id)"}, status_code=400)
+
+        try:
+            token, exp = mint_session_token(
+                session_id=session_id,
+                user_id=ctx.user_id,
+                ttl_seconds=ttl_seconds if ttl_seconds is not None else _session_token_ttl_seconds(),
+            )
+        except RuntimeError:
+            return JSONResponse({"error": "transport signing secret unavailable"}, status_code=503)
+        return JSONResponse({"token": token, "expires_at": exp})
+
 
 def _require_transport_auth() -> bool:
     """Whether a /mcp request MUST carry a valid transport token. When
@@ -1418,6 +1587,35 @@ def _oauth_owner_uid() -> str:
     return uid
 
 
+def _resolve_bearer_identity(token: str | None) -> tuple[str | None, str, str]:
+    """Resolve `(aud, uid, session_sid)` from a /mcp bearer token.
+
+    Tries session-token verification FIRST: session tokens are signed
+    with the same secret as transport/service tokens (see
+    `_transport_secret`), so a session token would also pass
+    `verify_token`'s signature check — but it lacks the shape
+    `verify_token` expects (checked here by requiring the `mcp-session`
+    audience specifically, via `verify_session_token`).
+
+    A session token missing either `uid` or `sid` is a hard rejection —
+    returned exactly as a missing/invalid token (`None, "", ""`) — same
+    defence-in-depth as the uid-less transport token case below."""
+    if not token:
+        return None, "", ""
+    session_claims = verify_session_token(token)
+    if session_claims is not None:
+        uid = str(session_claims.get("uid") or "")
+        session_sid = str(session_claims.get("sid") or "")
+        return (_SESSION_AUD, uid, session_sid) if uid and session_sid else (None, "", "")
+    claims = verify_token(token)
+    aud = claims.get("aud") if claims else None
+    # A validly-signed transport token with no `uid` carries no usable
+    # identity — treat it as an auth failure rather than scoping to an
+    # empty user_id (defence-in-depth against a malformed mint).
+    uid = str(claims.get("uid") or "") if aud == _TRANSPORT_AUD else ""
+    return aud, uid, ""
+
+
 class _TransportAuthMiddleware:
     """Pure-ASGI middleware that authenticates `/mcp` requests with a
     per-owner transport token and scopes the request to the token's
@@ -1429,17 +1627,23 @@ class _TransportAuthMiddleware:
     would otherwise gate it).
 
     Behavior on a /mcp request, branching on the token audience:
+      - `mcp-session` (one turn's session, minted via
+        /admin/session-tokens): set BOTH `_transport_user_id` (the
+        token's `uid`) and `_transport_session_id` (the token's `sid`)
+        for the duration of the request; reset after. This is the
+        pi-mcp-adapter path — the extension can't inject a `session_id`
+        tool argument, so the server binds it from the token instead.
       - `mcp-transport` (tenant-bound) with a non-empty `uid`: set
         `_transport_user_id` to the token's `uid` for the duration of the
         request; reset after. This is the untrusted bhatti VM path.
       - `mcp-service` (tenantless, trusted server-side client like
         claudebox): authenticated, but DO NOT set `_transport_user_id` —
         scoping falls to the registered session via `_get_session`.
-      - Either valid aud → request passes.
+      - Any valid aud → request passes.
       - Missing/invalid/expired/wrong-aud (incl. a transport token with
-        no usable `uid`): 401 JSON iff `GMAIL_MCP_REQUIRE_TRANSPORT_AUTH=1`;
-        otherwise pass through with no transport identity (legacy
-        behavior)."""
+        no usable `uid`, or a session token missing `uid`/`sid`): 401
+        JSON iff `GMAIL_MCP_REQUIRE_TRANSPORT_AUTH=1`; otherwise pass
+        through with no transport identity (legacy behavior)."""
 
     def __init__(self, app):
         self.app = app
@@ -1455,16 +1659,9 @@ class _TransportAuthMiddleware:
             return
 
         token = self._bearer_token(scope)
-        # Accepts BOTH audiences; returns the claims (incl. `aud`) or None.
-        claims = verify_token(token) if token else None
-        aud = claims.get("aud") if claims else None
+        aud, uid, session_sid = _resolve_bearer_identity(token)
 
-        # A validly-signed transport token with no `uid` carries no usable
-        # identity — treat it as an auth failure rather than scoping to an
-        # empty user_id (defence-in-depth against a malformed mint).
-        uid = str(claims.get("uid") or "") if aud == _TRANSPORT_AUD else ""
-
-        # Authenticated iff a service token, or a transport token that
+        # Authenticated iff a service token, or a transport/session token that
         # actually carries a uid. Everything else (no token, bad sig,
         # unknown/missing aud, expired, transport-without-uid) is a miss.
         authenticated = aud == _SERVICE_AUD or bool(uid)
@@ -1539,11 +1736,14 @@ class _TransportAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        reset_token = _transport_user_id.set(uid)
+        reset_uid_token = _transport_user_id.set(uid)
+        reset_sid_token = _transport_session_id.set(session_sid) if session_sid else None
         try:
             await self.app(scope, receive, send)
         finally:
-            _transport_user_id.reset(reset_token)
+            _transport_user_id.reset(reset_uid_token)
+            if reset_sid_token is not None:
+                _transport_session_id.reset(reset_sid_token)
 
     @staticmethod
     def _bearer_token(scope) -> str | None:

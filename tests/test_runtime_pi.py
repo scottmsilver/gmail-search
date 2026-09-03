@@ -130,11 +130,16 @@ def _install_common(monkeypatch, *, side_channel: list[dict] | None = None):
     async def fake_unregister(session_id):
         calls["unregister"].append(session_id)
 
+    async def fake_mint(session_id, **kw):
+        calls.setdefault("mint", []).append({"session_id": session_id, **kw})
+        return "tok-123"
+
     async def fake_fetch(session_id):
         return side_channel or []
 
     monkeypatch.setattr(rc, "register_session_via_admin", fake_register)
     monkeypatch.setattr(rc, "unregister_session_via_admin", fake_unregister)
+    monkeypatch.setattr(rc, "mint_session_token_via_admin", fake_mint)
     monkeypatch.setattr(rc, "_fetch_structured_tool_calls", fake_fetch)
     monkeypatch.setattr(runtime_pi, "sweep_and_extend_final_text", lambda conn, **kw: kw["base_text"])
 
@@ -375,3 +380,150 @@ def test_empty_answer_surfaces_as_error_event(monkeypatch):
     assert conn.events[-1]["kind"] == "error"
     assert "without an assistant answer" in conn.events[-1]["payload"]["message"]
     assert conn.finalized == [{"status": "error", "final_answer": None}]
+
+
+def test_render_instruction_injects_gemini3_budget():
+    text = runtime_pi.render_instruction("google/gemini-3.7-flash")
+    assert "1,048,576" in text
+    assert "314,572" in text
+    assert "{context_window}" not in text
+    assert "{reading_budget}" not in text
+    assert "session_id" not in text
+
+
+def test_context_window_env_override(monkeypatch):
+    monkeypatch.setenv("GMAIL_PI_CONTEXT_WINDOW", "500000")
+    text = runtime_pi.render_instruction("google/gemini-3.7-flash")
+    assert "500,000" in text
+    assert "150,000" in text
+
+
+def test_render_instruction_uses_prefixed_tool_names_and_mcp_script():
+    """Tool names in the prompt must match the adapter-registered names
+    (gmail_-prefixed), and mcpScript must be documented. No bare
+    (unprefixed) call form of a gmail tool should remain — that would
+    point the model at a tool name the server doesn't register."""
+    text = runtime_pi.render_instruction("anthropic/claude-test")
+    assert "gmail_search_emails_batch" in text
+    assert "mcpScript" in text
+    assert "search_emails_batch(" not in text.replace("gmail_search_emails_batch(", "")
+
+
+def test_context_window_for_unknown_model_falls_back_to_default():
+    assert runtime_pi.context_window_for("some/unknown-model") == 200_000
+
+
+def test_context_window_for_known_prefixes():
+    assert runtime_pi.context_window_for("google/gemini-2.5-pro") == 1_048_576
+    assert runtime_pi.context_window_for("anthropic/claude-test") == 200_000
+
+
+# ── session-token file lifecycle ────────────────────────────────────
+
+
+def test_argv_includes_default_mcp_config_flag(monkeypatch):
+    client = _FakeClient(_happy_records())
+    _install(monkeypatch, client)
+    _run()
+    argv = runtime_pi._spawn_client.argv
+    assert argv[argv.index("--mcp-config") + 1] == "/opt/gmail-mcp.json"
+
+
+def test_argv_mcp_config_flag_honors_env_override(monkeypatch):
+    client = _FakeClient(_happy_records())
+    _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_MCP_CONFIG", "/custom/mcp.json")
+    _run()
+    argv = runtime_pi._spawn_client.argv
+    assert argv[argv.index("--mcp-config") + 1] == "/custom/mcp.json"
+
+
+def test_session_token_file_written_0600_and_removed_on_happy_path(monkeypatch, tmp_path):
+    client = _FakeClient(_happy_records())
+    conn, calls = _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_WORKSPACES_ROOT", str(tmp_path))
+
+    written_path = tmp_path / "deep-conv-c1" / ".session-token"
+    original_write = runtime_pi._write_session_token_file
+    captured: dict = {}
+
+    def spy_write(workspace, token):
+        path = original_write(workspace, token)
+        captured["path"] = path
+        captured["mode"] = path.stat().st_mode & 0o777
+        captured["content"] = path.read_text()
+        return path
+
+    monkeypatch.setattr(runtime_pi, "_write_session_token_file", spy_write)
+    _run()
+
+    assert calls["mint"] == [{"session_id": "s1", "ttl_seconds": int(runtime_pi.hard_timeout_seconds()) + 120}]
+    assert captured["path"] == written_path
+    assert captured["mode"] == 0o600
+    assert captured["content"] == "tok-123"
+    # Removed once the turn finishes.
+    assert not written_path.exists()
+
+
+def test_session_token_file_removed_on_error_path(monkeypatch, tmp_path):
+    """Cleanup must run even when the turn itself errors out (e.g. an
+    idle timeout) — the token file must never outlive the turn."""
+    client = _FakeClient(_happy_records()[:2], hang_after=2)
+    conn, calls = _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_WORKSPACES_ROOT", str(tmp_path))
+    monkeypatch.setenv("GMAIL_PI_IDLE_TIMEOUT", "0.2")
+
+    _run()
+
+    assert conn.events[-1]["kind"] == "error"
+    written_path = tmp_path / "deep-conv-c1" / ".session-token"
+    assert not written_path.exists()
+
+
+def test_argv_scopes_tmpdir_to_workspace(monkeypatch):
+    """Output-guard spill files must land under the turn's own
+    workspace (TMPDIR), not the shared sandbox container's /tmp."""
+    client = _FakeClient(_happy_records())
+    _install(monkeypatch, client)
+    _run()
+    argv = runtime_pi._spawn_client.argv
+    assert "TMPDIR=/workspaces/deep-conv-c1/.tmp" in argv
+
+
+def test_run_creates_workspace_tmp_dir_0700(monkeypatch, tmp_path):
+    client = _FakeClient(_happy_records())
+    _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_WORKSPACES_ROOT", str(tmp_path))
+    _run()
+    tmp_dir = tmp_path / "deep-conv-c1" / ".tmp"
+    assert tmp_dir.is_dir()
+    assert (tmp_dir.stat().st_mode & 0o777) == 0o700
+
+
+def test_ensure_workspace_tmp_dir_reasserts_0700_on_existing_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_PI_WORKSPACES_ROOT", str(tmp_path))
+    loose = tmp_path / "deep-conv-c1" / ".tmp"
+    loose.mkdir(parents=True)
+    loose.chmod(0o755)
+    path = runtime_pi._ensure_workspace_tmp_dir("deep-conv-c1")
+    assert path == loose
+    assert (path.stat().st_mode & 0o777) == 0o700
+
+
+def test_session_token_file_not_written_when_registration_never_happens(monkeypatch, tmp_path):
+    """If register_session_via_admin itself fails, no token is minted
+    and there is nothing to clean up — the finally block must not
+    explode on a token_path that was never set."""
+    client = _FakeClient(_happy_records())
+    conn, calls = _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_WORKSPACES_ROOT", str(tmp_path))
+
+    async def failing_register(session_id, **kw):
+        raise RuntimeError("admin unreachable")
+
+    monkeypatch.setattr(rc, "register_session_via_admin", failing_register)
+    _run()
+
+    assert conn.events[-1]["kind"] == "error"
+    assert not (tmp_path / "deep-conv-c1").exists()
+    assert runtime_pi.context_window_for("openai/gpt-5") == 400_000

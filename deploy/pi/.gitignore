@@ -1,4 +1,4 @@
 .env
 sessions/
 pi-agent/
-extensions/gmail-tools/node_modules/
+pi-pkgs/node_modules/
