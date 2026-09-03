@@ -44,6 +44,19 @@ def assistant_text(ev: dict) -> str | None:
     return text or None
 
 
+def assistant_stop(ev: dict) -> tuple[str | None, str | None]:
+    """Extract stopReason and errorMessage from an assistant message_end.
+    Returns (stopReason, errorMessage); both None if not an assistant message_end."""
+    if ev.get("type") != "message_end":
+        return None, None
+    message = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+    if message.get("role") != "assistant":
+        return None, None
+    stop_reason = message.get("stopReason")
+    error_message = message.get("errorMessage")
+    return stop_reason, error_message
+
+
 def bash_as_run_code(start: dict, end: dict, *, clip: int = RESPONSE_CLIP_CHARS) -> list[dict]:
     """Present a pi `bash` call in the `run_code` shape the analyst
     panel understands. `artifacts` is always empty: files reach the

@@ -328,3 +328,31 @@ def test_same_conversation_turns_are_serialized(monkeypatch):
     spawn_order = [e for e in events if e.startswith("spawn:")]
     assert spawn_order == ["spawn:a", "spawn:b"]
     assert events.index("close:a") < events.index("spawn:b")
+
+
+def test_error_stop_reason_surfaces_as_error_event(monkeypatch):
+    records = _happy_records()
+    records[-2] = {
+        "type": "message_end",
+        "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "context too large"},
+    }
+    client = _FakeClient(records)
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    assert conn.events[-1]["kind"] == "error"
+    assert "context too large" in conn.events[-1]["payload"]["message"]
+    assert conn.finalized == [{"status": "error", "final_answer": None}]
+
+
+def test_empty_answer_surfaces_as_error_event(monkeypatch):
+    records = _happy_records()
+    records[-2] = {
+        "type": "message_end",
+        "message": {"role": "assistant", "content": [], "stopReason": "stop"},
+    }
+    client = _FakeClient(records)
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    assert conn.events[-1]["kind"] == "error"
+    assert "without an assistant answer" in conn.events[-1]["payload"]["message"]
+    assert conn.finalized == [{"status": "error", "final_answer": None}]

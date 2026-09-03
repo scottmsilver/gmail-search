@@ -67,6 +67,19 @@ def test_assistant_text_none_for_user_or_empty():
     assert pp.assistant_text({"type": "turn_end"}) is None
 
 
+def test_assistant_stop_extracts_stop_reason_and_error():
+    ev = {
+        "type": "message_end",
+        "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "boom"},
+    }
+    assert pp.assistant_stop(ev) == ("error", "boom")
+
+
+def test_assistant_stop_none_for_non_assistant():
+    assert pp.assistant_stop({"type": "message_end", "message": {"role": "user", "content": []}}) == (None, None)
+    assert pp.assistant_stop({"type": "turn_end"}) == (None, None)
+
+
 def test_bash_as_run_code_produces_args_then_response():
     start = {"type": "tool_execution_start", "toolName": "bash", "args": {"command": "python plot.py"}}
     end = {

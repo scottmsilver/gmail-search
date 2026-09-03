@@ -265,9 +265,21 @@ class _TurnState:
         self.final_text = ""
         self.local_tool_calls: list[dict] = []
         self.open_bash: dict[str, dict] = {}
+        self.stop_reason: str | None = None
+        self.error_message: str | None = None
 
 
 ToolEventSink = Callable[[str, dict], Awaitable[None]]
+
+
+def _raise_if_no_answer(state: _TurnState) -> None:
+    """Raise PiRpcError if pi stopped with error or has no final answer."""
+    if state.stop_reason in ("error", "aborted"):
+        msg = f"pi stopped with {state.stop_reason}: {state.error_message or 'no error message'}"
+        raise PiRpcError(msg)
+    if not state.final_text.strip():
+        msg = f"pi finished without an assistant answer (stop reason: {state.stop_reason})"
+        raise PiRpcError(msg)
 
 
 async def drive_turn(
@@ -297,6 +309,7 @@ async def drive_turn(
         if rec.get("type") == "agent_end":
             break
         await _handle_record(rec, state, on_tool_event)
+    _raise_if_no_answer(state)
     usage = await _fetch_usage(client)
     return TurnOutcome(final_text=state.final_text, local_tool_calls=state.local_tool_calls, usage=usage)
 
@@ -316,6 +329,11 @@ async def _handle_record(rec: dict, state: _TurnState, on_tool_event: ToolEventS
         text = pp.assistant_text(rec)
         if text:
             state.final_text = text
+        stop_reason, error_message = pp.assistant_stop(rec)
+        if stop_reason is not None:
+            state.stop_reason = stop_reason
+        if error_message is not None:
+            state.error_message = error_message
     elif kind == "extension_error":
         logger.error("pi extension error: %s", rec)
 
