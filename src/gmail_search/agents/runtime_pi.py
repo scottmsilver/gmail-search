@@ -197,6 +197,8 @@ user should see.
 
 Work in phases. Each phase has its own tools and its own rule.
 
+**Narrate as you go.** Before every tool call, write one plain sentence saying what you are about to do and why — the search you are running, the thread you are opening, the number you are computing. These sentences are shown to the user live as progress, so write them for a reader, not for yourself; keep them to one line and never restate tool arguments verbatim.
+
 **1. Scope.** Before any call, state in one or two sentences what
 evidence would settle the question: which senders, which period, which
 kind of message or attachment, whether you need a list, an amount, or a
@@ -231,6 +233,7 @@ read.
 
 # Rules
 
+- One sentence of narration before each tool call; no narration-free tool calls except when a call immediately follows a truncation notice and you are simply narrowing it.
 - Think about cost before every expensive read, and treat unknown size
   as expensive: outline first, then read.
 - If a result comes back truncated, narrow the next call (fewer ids, a

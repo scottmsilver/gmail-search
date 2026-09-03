@@ -483,6 +483,12 @@ def test_render_instruction_injects_gemini3_budget():
     assert "session_id" not in text
 
 
+def test_render_instruction_includes_narration_requirement():
+    text = runtime_pi.render_instruction("google/gemini-3.7-flash")
+    assert "Narrate as you go" in text
+    assert "before each tool call" in text
+
+
 def test_context_window_env_override(monkeypatch):
     monkeypatch.setenv("GMAIL_PI_CONTEXT_WINDOW", "500000")
     text = runtime_pi.render_instruction("google/gemini-3.7-flash")
