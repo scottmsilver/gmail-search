@@ -43,6 +43,8 @@ def _is_valid_conversation_id(conversation_id: str) -> bool:
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
+
 from gmail_search.agents.session import (
     append_event,
     conversation_owner,
@@ -55,7 +57,6 @@ from gmail_search.agents.session import (
 )
 from gmail_search.auth import require_user_id
 from gmail_search.store.db import get_connection
-from pydantic import BaseModel
 
 
 def _use_real_pipeline() -> bool:
@@ -721,7 +722,15 @@ async def _real_run(
     # per-turn spend inline.
     turn_cost_usd = 0.0
 
-    def _record_cost(*, agent_name: str, model: str, input_tokens: int, output_tokens: int) -> None:
+    def _record_cost(
+        *,
+        agent_name: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        usd_override: float | None = None,
+        **extra,
+    ) -> None:
         nonlocal turn_cost_usd
         usd = record_agent_cost(
             conn,
@@ -730,6 +739,7 @@ async def _real_run(
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            usd_override=usd_override,
         )
         turn_cost_usd += usd
         append_event(
@@ -743,6 +753,7 @@ async def _real_run(
                 "output_tokens": output_tokens,
                 "usd": round(usd, 5),
                 "turn_total_usd": round(turn_cost_usd, 5),
+                **extra,
             },
         )
 
