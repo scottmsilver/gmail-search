@@ -382,6 +382,98 @@ def test_empty_answer_surfaces_as_error_event(monkeypatch):
     assert conn.finalized == [{"status": "error", "final_answer": None}]
 
 
+def test_interim_prose_emits_assistant_event_between_tool_calls(monkeypatch):
+    """Assistant prose that precedes more tool activity (the model's
+    read plan, its interim reasoning) must be surfaced as an
+    `assistant` event, in order, between the tool_call events it
+    preceded. The final message must NOT be duplicated as an
+    `assistant` event."""
+    records = [
+        {"type": "response", "command": "prompt", "success": True},
+        {"type": "agent_start"},
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll map first."}]},
+        },
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "c1",
+            "toolName": "search_emails_batch",
+            "args": {"searches": [{"query": "hotel"}]},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "c1",
+            "toolName": "search_emails_batch",
+            "isError": False,
+            "result": {"content": [{"type": "text", "text": '{"results": []}'}]},
+        },
+        {
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Final answer"}]},
+        },
+        {"type": "agent_end", "messages": []},
+    ]
+    client = _FakeClient(records)
+    conn, _ = _install(monkeypatch, client)
+    _run()
+
+    kinds = [e["kind"] for e in conn.events]
+    assert kinds[0] == "plan"
+    assert kinds.count("assistant") == 1
+    assistant_events = [e for e in conn.events if e["kind"] == "assistant"]
+    assert assistant_events[0]["payload"] == {"text": "I'll map first.", "truncated": False}
+    # The assistant event lands before the tool_call it preceded.
+    assert kinds.index("assistant") < kinds.index("tool_call")
+    assert kinds[-2:] == ["draft", "final"]
+    assert conn.events[-1]["payload"]["text"] == "Final answer"
+
+
+def test_no_interim_prose_yields_no_assistant_event(monkeypatch):
+    client = _FakeClient(_happy_records())
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    kinds = [e["kind"] for e in conn.events]
+    assert "assistant" not in kinds
+
+
+def test_drive_turn_truncates_long_interim_prose():
+    """`drive_turn`-level test: prose longer than the 4000-char clip is
+    truncated and flagged, independent of the DB/session plumbing."""
+    long_text = "x" * 5000
+    records = [
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": long_text}]}},
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "c1",
+            "toolName": "search_emails_batch",
+            "args": {"searches": []},
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "c1",
+            "toolName": "search_emails_batch",
+            "isError": False,
+            "result": {"content": [{"type": "text", "text": "{}"}]},
+        },
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Final."}]}},
+        {"type": "agent_end", "messages": []},
+    ]
+    client = _FakeClient(records, stats={"tokens": {"input": 1, "output": 1}})
+    events: list[tuple[str, dict]] = []
+
+    async def sink(kind: str, payload: dict) -> None:
+        events.append((kind, payload))
+
+    outcome = asyncio.run(runtime_pi.drive_turn(client, "q", on_tool_event=sink, hard_timeout=5.0, idle_timeout=5.0))
+
+    assistant_events = [p for k, p in events if k == "assistant"]
+    assert len(assistant_events) == 1
+    assert assistant_events[0]["truncated"] is True
+    assert len(assistant_events[0]["text"]) == 4000
+    assert outcome.final_text == "Final."
+
+
 def test_render_instruction_injects_gemini3_budget():
     text = runtime_pi.render_instruction("google/gemini-3.7-flash")
     assert "1,048,576" in text
