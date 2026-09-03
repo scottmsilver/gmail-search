@@ -147,6 +147,23 @@ async def unregister_session_via_admin(session_id: str) -> None:
         )
 
 
+async def mint_session_token_via_admin(session_id: str, *, ttl_seconds: int | None = None) -> str:
+    """Mint a per-turn /mcp session token for an already-registered
+    session_id. The pi-mcp-adapter extension can't inject a session_id
+    tool argument, so the driver binds the session via this bearer
+    token instead — see mcp_tools_server's /admin/session-tokens."""
+    url = f"{_mcp_admin_url()}/admin/session-tokens"
+    body: dict[str, Any] = {"session_id": session_id}
+    if ttl_seconds is not None:
+        body["ttl_seconds"] = ttl_seconds
+    headers = {"Content-Type": "application/json", **_build_mcp_admin_headers()}
+    async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+        response = await client.post(url, json=body, headers=headers)
+    if response.status_code != 200:
+        raise ClaudeboxError(f"MCP admin mint_session_token failed: HTTP {response.status_code}: {response.text[:300]}")
+    return response.json()["token"]
+
+
 async def _fetch_structured_tool_calls(session_id: str) -> list[dict]:
     """Pull the side-channel call log for `session_id` from the MCP
     admin endpoint. The MCP server has the FULL structured response

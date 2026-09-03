@@ -137,6 +137,14 @@ def _require_slug(name: str, value: str) -> None:
         raise ValueError(f"{name} must match {_SLUG_RE.pattern!r}, got {value!r}")
 
 
+def _mcp_config_flags(mcp_config_path: str | None) -> list[str]:
+    return ["--mcp-config", mcp_config_path] if mcp_config_path else []
+
+
+def _tmpdir_flags(tmpdir: str | None) -> list[str]:
+    return ["-e", f"TMPDIR={tmpdir}"] if tmpdir else []
+
+
 def build_pi_argv(
     *,
     container: str,
@@ -148,13 +156,25 @@ def build_pi_argv(
     thinking: str | None,
     system_prompt: str,
     builtin_tools: bool = True,
+    mcp_config_path: str | None = None,
+    tmpdir: str | None = None,
 ) -> list[str]:
     """argv for one turn. Secrets are NOT here — the service token and
     provider key live in the container's own environment.
 
     `session_id` and `workspace` are validated here (not just by the
     HTTP caller) since this is a shared/reusable helper and not
-    guaranteed to always be called from the validated HTTP path."""
+    guaranteed to always be called from the validated HTTP path.
+
+    `GMS_SESSION_ID` on the `docker exec` env stays even though the pi
+    extension no longer needs it to reach the MCP server (the session
+    is now bound from the request's bearer token) — it's still useful
+    for grepping container-side logs by turn.
+
+    `tmpdir`, when set, adds `-e TMPDIR=<value>` so the pi-mcp-adapter's
+    output-guard spill files (see `deploy/pi/README.md`) land under the
+    turn's own workspace instead of the shared container's `/tmp` —
+    scoped per turn and pruned along with the workspace."""
     _require_slug("session_id", session_id)
     _require_slug("workspace", workspace)
     return [
@@ -163,6 +183,7 @@ def build_pi_argv(
         "-i",
         "-e",
         f"GMS_SESSION_ID={session_id}",
+        *_tmpdir_flags(tmpdir),
         "-w",
         f"/workspaces/{workspace}",
         container,
@@ -173,6 +194,7 @@ def build_pi_argv(
         *_builtin_tools_flags(builtin_tools),
         "-e",
         extension_path,
+        *_mcp_config_flags(mcp_config_path),
         *_session_flags(session_path),
         "--model",
         model,
