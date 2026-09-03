@@ -274,11 +274,13 @@ def test_admin_post_session_ignores_caller_supplied_db_dsn(monkeypatch):
     assert "attacker" not in (ctx.db_dsn or "")
 
 
-def test_admin_post_session_no_dsn_when_unset(monkeypatch):
-    """When no server-side DSN env is set, ctx.db_dsn is None — the
-    session still registers successfully (artifact-free turns work
-    fine without a DSN)."""
+def test_admin_post_session_dsn_falls_back_when_unset(monkeypatch):
+    """When no server-side DSN env is set, ctx.db_dsn falls back to the
+    local default (from gmail_search.store.db._pg_dsn). The attacker's
+    caller-supplied DSN is ignored."""
     from starlette.testclient import TestClient
+
+    from gmail_search.store.db import _pg_dsn
 
     monkeypatch.setenv("GMAIL_MCP_ADMIN_TOKEN", "tok-abc")
     monkeypatch.delenv("DB_DSN", raising=False)
@@ -292,7 +294,9 @@ def test_admin_post_session_no_dsn_when_unset(monkeypatch):
         json={"session_id": "sess-nodsn", "evidence_records": None, "db_dsn": "postgres://attacker"},
     )
     assert r.status_code == 200
-    assert mts._SESSIONS["sess-nodsn"].db_dsn is None
+    # The attacker's DSN is ignored; the local default is used.
+    assert mts._SESSIONS["sess-nodsn"].db_dsn == _pg_dsn()
+    assert "attacker" not in (mts._SESSIONS["sess-nodsn"].db_dsn or "")
 
 
 # ── Per-session call-log cap ───────────────────────────────────────

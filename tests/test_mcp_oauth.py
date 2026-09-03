@@ -445,3 +445,88 @@ def test_provider_refresh_token_rotates(oauth_env):
         assert provider.access_tokens[rotated.access_token].resource == f"{_BASE}/mcp"
 
     asyncio.run(drive())
+
+
+# ── session token acceptance (new path for per-turn tokens) ─────
+
+
+def test_load_access_token_accepts_session_token(oauth_env, monkeypatch):
+    """Session tokens (aud=mcp-session) are accepted as access tokens."""
+    import asyncio
+
+    monkeypatch.setenv("GMAIL_MCP_TRANSPORT_SECRET", _SECRET)
+
+    provider = mcp_oauth.GatedBrokerOAuthProvider(
+        broker_start_url="https://auth.oursilverfamily.com/start",
+        callback_url=f"{_BASE}/oauth/callback",
+        owner=_OWNER,
+    )
+
+    async def drive():
+        # Mint a valid session token.
+        from gmail_search.agents.mcp_tools_server import mint_session_token
+
+        tok, exp = mint_session_token(session_id="s1", user_id="u_1", ttl_seconds=60)
+
+        # Load it as an access token.
+        at = await provider.load_access_token(tok)
+        assert at is not None
+        assert at.client_id == "u_1"
+        assert "mcp" in at.scopes
+        assert at.expires_at == exp
+        assert at.token == tok
+
+    asyncio.run(drive())
+
+
+def test_load_access_token_rejects_tampered_session_token(oauth_env, monkeypatch):
+    """Tampered session tokens are rejected."""
+    import asyncio
+
+    monkeypatch.setenv("GMAIL_MCP_TRANSPORT_SECRET", _SECRET)
+
+    provider = mcp_oauth.GatedBrokerOAuthProvider(
+        broker_start_url="https://auth.oursilverfamily.com/start",
+        callback_url=f"{_BASE}/oauth/callback",
+        owner=_OWNER,
+    )
+
+    async def drive():
+        # Mint a valid session token, then tamper with it.
+        from gmail_search.agents.mcp_tools_server import mint_session_token
+
+        tok, _ = mint_session_token(session_id="s1", user_id="u_1", ttl_seconds=60)
+        tampered = tok[:-3] + ("AAA" if not tok.endswith("AAA") else "BBB")
+
+        # Tampered token should be rejected.
+        at = await provider.load_access_token(tampered)
+        assert at is None
+
+    asyncio.run(drive())
+
+
+def test_load_access_token_still_accepts_transport_tokens(oauth_env, monkeypatch):
+    """Transport tokens (aud=mcp-transport) still work after session token fallback."""
+    import asyncio
+
+    from gmail_search.agents import mcp_tools_server as mts
+
+    monkeypatch.setenv("GMAIL_MCP_TRANSPORT_SECRET", _SECRET)
+
+    provider = mcp_oauth.GatedBrokerOAuthProvider(
+        broker_start_url="https://auth.oursilverfamily.com/start",
+        callback_url=f"{_BASE}/oauth/callback",
+        owner=_OWNER,
+    )
+
+    async def drive():
+        # Mint a transport token.
+        transport_tok, _ = mts.mint_transport_token(user_id="u_transport", email="user@example.com", ttl_seconds=60)
+
+        # Load it as an access token.
+        at = await provider.load_access_token(transport_tok)
+        assert at is not None
+        assert at.client_id == "u_transport"
+        assert "mcp" in at.scopes
+
+    asyncio.run(drive())
