@@ -5,19 +5,33 @@ Throwaway spike. Only this notes file is kept; nothing else from the spike is re
 `/tmp/claude-1000/-home-ssilver-development-gmail-search/5f8c1f08-e2d4-4f5c-a75c-2d267b2d8203/scratchpad/pi-spike`).
 
 **Status: all six questions answered, and the loop's been shown converging cleanly
-through the MCP tools (Real run 2).** Step 6 was initially blocked (see history
-below) on two stale/wrong credentials, both resolved. The first real run (Real run 1,
-with `bash` enabled and `user_id=None`) surfaced two significant findings: the agent
-bypassed the intended MCP tool surface almost entirely in favor of direct Postgres
-access via the `bash` builtin tool, and that same `bash` access was used to dump raw
-secrets (`GEMINI_API_KEY`, a minted MCP service token) into tool output — see
-"Security finding" below (the affected log files have since been shredded). A second
-real run (Real run 2, `--no-builtin-tools` + a real registered user id) confirmed
-this was avoidable: the agent converged to a correct, cited answer in 69 seconds
-using only the intended MCP tools, no `bash`, no app-level auth errors, real spend
-of $0.83. It also surfaced a new finding: the RPC event stream is nearly silent
-under `--no-builtin-tools` — see "Finding: the RPC event stream is nearly silent"
-below. **Read the Security finding section before reusing Real run 1's transcript.**
+through the MCP tools (Real run 2 / Process 1).** Step 6 was initially blocked (see
+history below) on two stale/wrong credentials, both resolved. The first real run
+(Real run 1, with `bash` enabled and `user_id=None`) surfaced two significant
+findings: the agent bypassed the intended MCP tool surface almost entirely in favor
+of direct Postgres access via the `bash` builtin tool, and that same `bash` access
+was used to dump raw secrets (`GEMINI_API_KEY`, a minted MCP service token) into
+tool output — see "Security finding" below (the affected log files have since been
+shredded). A second real run (Real run 2, `--no-builtin-tools` + a real registered
+user id) initially looked like a 69-second clean convergence with no
+`tool_execution_*` RPC events at all — **but that read was wrong.** As found and
+corrected in **"Run 2 — correction"** (read that section before citing any Run 2
+number): two overlapping pi processes had been launched against the same
+`--session` file. The process that actually did the 18-tool-call conversation
+(Process 1) converged on its own, with one auto-compaction partway through, in
+**~2 minutes 22 seconds** — that is the real, clean "converges through MCP tools
+alone" number, entirely MCP-tool-based, no `bash`, no app-level auth errors, real
+spend $0.83. The 69-second figure was a second, overlapping pi process (Process 2)
+answering from Process 1's resumed context, not a clean run — which is itself
+useful evidence that `--session` resume works, but not evidence of RPC-event
+behavior. **The "RPC event stream is nearly silent under `--no-builtin-tools`"
+finding below is retracted/unverified** — it was reading Process 2's short,
+tool-call-free turn, not a tool-calling turn that failed to emit events; whether
+`--no-builtin-tools` affects RPC tool-event emission remains genuinely untested.
+See "Run 2 — correction" for the full mechanism and a new driver requirement (never
+run two pi processes against one session file concurrently). **Read the Security
+finding section before reusing Real run 1's transcript, and read "Run 2 —
+correction" before citing anything from the original Real run 2 section above it.**
 
 ### Credential blockers hit and resolved
 
@@ -287,6 +301,14 @@ of nights per hotel with python and publish it."
 (builtin tools, including `bash`, were **left enabled** — the brief's Step 6 command
 does not pass `--no-builtin-tools`, unlike Step 3).
 
+**Note on Question 4 (stats shape):** this run never got a `get_session_stats`
+response — it was killed by the outer timeout before reaching `agent_end`, so the
+driver's queued `get_session_stats` command was never processed. Question 4 above
+("Stats shape") was answered instead by a **separate, deliberately minimal
+follow-up run** (`--no-builtin-tools`, trivial "reply OK, don't call tools"
+prompt) run specifically to get a clean `get_session_stats.data` sample without
+repeating this run's `bash`-access risk — not by this real run.
+
 **Tool names called:** `describe_schema` once (the only MCP-bridged tool call — see
 Question 5's anomaly above), then `bash` **42 times**. Every `bash` call after the
 first few environment-inspection commands was the model writing inline Python that
@@ -448,11 +470,13 @@ really was the `user_id=None` registration, as the controller suspected.
 `totalMessages: 17`, but the session file itself (ground truth, counted directly)
 has **18** tool calls and **18** tool results plus 2 user + 18 assistant messages
 (38 "message"-typed lines total, plus 1 compaction/model_change/thinking_level_change
-each). `get_session_stats`'s counts don't match the session file's actual content —
-worth a later task double-checking whether `get_session_stats` undercounts (possibly
-not counting messages folded into a mid-session `compaction` entry) before relying on
-it for accurate per-session billing/audit counts. The **cost** figure ($0.828) is
-plausible and is the one used below.
+each). **Update, see "Run 2 — correction" below: this is not a `get_session_stats`
+bug.** It's a race artifact of the second of two overlapping pi processes launched
+against the same session file — `toolCalls: 8` is an accurate count of how many
+tool calls had happened *at the moment the second process ran `get_session_stats`*,
+before the first process (which reached 18) had finished. There is no
+`get_session_stats` undercount to investigate. The **cost** figure ($0.828) is
+still the real, correct total cost across both processes' combined token usage.
 
 **Did `describe_schema`/search still return an app-level error? No** — this run made
 no `describe_schema` call, but `find_facts`, `sql_query_batch`, `search_emails_batch`,
@@ -461,6 +485,17 @@ the actual `toolResult` content in the session file — real fact/thread text, n
 error envelope).
 
 ### Finding: the RPC event stream is nearly silent under `--no-builtin-tools`
+
+> **⚠ RETRACTED — see "Run 2 — correction" below.** This entire section was written
+> from `run2-events.jsonl`, which turned out to be the output of a *second*,
+> overlapping pi process (Process 2) answering a short, tool-call-free turn from a
+> resumed session — not evidence that a tool-calling turn failed to emit RPC events.
+> The actual tool-calling process (Process 1) was never observed over RPC at all;
+> its output was lost when Process 2's launch unlinked the shared log file. **Do not
+> use the "action item" below to make an architectural decision** — whether
+> `--no-builtin-tools` affects RPC tool-event emission is genuinely untested by this
+> spike. Left in place, struck through in spirit, so the reasoning trail is visible;
+> read "Run 2 — correction" for what's actually established.
 
 This is the most important new finding from run 2, independent of what the
 controller asked to verify. The **RPC event stream** (`run2-events.jsonl`, what a
@@ -485,31 +520,39 @@ turns showed a full `turn_start → message_start → message_update × N → me
 tool_execution_start → tool_execution_update × N → tool_execution_end → message_start
 → message_end → turn_end` cycle — complete real-time visibility.
 
-**This looks tied to `--no-builtin-tools` specifically** (both runs used identical
-`--session`, identical extension flags), though the exact mechanism wasn't traced
-further (out of scope for this spike). **Action item for later tasks:** if the real
-`GMAIL_PI_MODEL` backend needs live progress/citations/per-tool audit trail (very
-likely, given the deep-analysis UI shows live tool activity), it may need to run
-*with* builtin tools enabled just to get RPC visibility (accepting the "must sandbox
-bash separately" cost from Real run 1's security finding), OR tail/re-read the
-`--session` JSONL file for tool-call visibility instead of relying on RPC events
-under `--no-builtin-tools`. This is a real architectural decision point, not a minor
-detail — pick one now rather than discovering the gap after committing to a design
-that assumes RPC events give live per-tool visibility.
+~~**This looks tied to `--no-builtin-tools` specifically**~~ — **retracted, see the
+banner above.** ~~Action item for later tasks: if the real `GMAIL_PI_MODEL` backend
+needs live progress/citations/per-tool audit trail, it may need to run *with*
+builtin tools enabled just to get RPC visibility, OR tail/re-read the `--session`
+JSONL file for tool-call visibility instead of relying on RPC events under
+`--no-builtin-tools`.~~ **Do not act on this.** Whether `--no-builtin-tools` affects
+RPC tool-event emission for extension tools is an open, untested question — it was
+never actually exercised by a real, single, tool-calling process in this spike. A
+later task should re-test this cleanly (one pi process, `--no-builtin-tools`,
+watching its own dedicated event-output file) before making any design decision
+about relying on RPC events vs. reading the session file for live tool visibility.
 
 ### Cost (run 2)
 
-Real reported cost for the full 69-second, 18-tool-call conversation:
-**$0.8284** (from `get_session_stats.cost`; per-turn `usage.cost.total` sums to the
-same figure). Well under the $1 cap. Wall time (69s) was well under the 6-minute
-cap — the 355s hard timeout was never needed.
+**Update, see "Run 2 — correction" below: this was the combined cost of two
+overlapping pi processes sharing one session file, not one clean 69-second,
+18-tool-call conversation.** The dollar figure is still real and correct; the
+"69-second" framing is not (Process 1, the one that actually did the 18 tool
+calls, took ~2m22s — see the correction).
 
-Compare to Real run 1: $0.7864 for a run that took ~10 minutes, made 42 mostly-
-useless `bash` calls, and never produced an answer. Run 2 spent about the same
-order of magnitude of money but in 15% of the time and produced a complete, cited,
-correct answer — strong evidence that constraining the tool surface to the intended
-MCP tools (dropping `bash`) is both safer (no secret-exfiltration path) and more
-cost/time-efficient, not a tradeoff.
+Real reported cost across both processes' combined token usage: **$0.8284** (from
+`get_session_stats.cost`; per-turn `usage.cost.total` sums to the same figure).
+Well under the $1 cap. Even the corrected wall time (Process 1's ~2m22s) was well
+under the 6-minute cap — the 355s hard timeout was never needed.
+
+Compare to Real run 1: $0.7864 for a run that took ~10 minutes (≈600s), made 42
+mostly-useless `bash` calls, and never produced an answer. Using the corrected
+Process 1 time (~142s) instead of the retracted 69s figure, Run 2 spent about the
+same order of magnitude of money but in **roughly 24% of the time** (142s / 600s)
+and produced a complete, cited, correct answer — still strong evidence that
+constraining the tool surface to the intended MCP tools (dropping `bash`) is both
+safer (no secret-exfiltration path) and more cost/time-efficient, not a tradeoff,
+just a less dramatic ratio than the original (wrong) 15% figure.
 
 ## Run 2 — correction
 
