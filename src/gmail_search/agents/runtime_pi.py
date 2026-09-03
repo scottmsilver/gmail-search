@@ -48,6 +48,9 @@ _DEFAULT_HARD_TIMEOUT = 900.0
 _DEFAULT_IDLE_TIMEOUT = 300.0
 _ABORT_GRACE = 5.0
 _STATS_TIMEOUT = 15.0
+# Cap on interim assistant prose forwarded as an `assistant` event, so a
+# long planning ramble doesn't blow up the event payload.
+_ASSISTANT_TEXT_CLIP_CHARS = 4000
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _BUILTIN_TOOLS_OFF = {"0", "false", "no", "off"}
 _DEFAULT_MCP_CONFIG_PATH = "/opt/gmail-mcp.json"
@@ -461,6 +464,11 @@ class _TurnState:
         self.open_bash: dict[str, dict] = {}
         self.stop_reason: str | None = None
         self.error_message: str | None = None
+        # Set on every assistant `message_end`; flushed as an
+        # `assistant` event the next time a tool call starts, so only
+        # prose followed by more tool activity is surfaced (the last
+        # message stays the final answer, not a duplicated event).
+        self.pending_text: str | None = None
 
 
 ToolEventSink = Callable[[str, dict], Awaitable[None]]
@@ -508,9 +516,26 @@ async def drive_turn(
     return TurnOutcome(final_text=state.final_text, local_tool_calls=state.local_tool_calls, usage=usage)
 
 
+async def _flush_pending_text(state: _TurnState, on_tool_event: ToolEventSink) -> None:
+    """Emit any assistant prose queued since the last tool call as an
+    `assistant` event, then clear it. Called right before a new tool
+    call starts, so interim reasoning/plans show up in event order
+    alongside the tool calls they preceded."""
+    text = state.pending_text
+    if not text:
+        return
+    state.pending_text = None
+    payload = {
+        "text": text[:_ASSISTANT_TEXT_CLIP_CHARS],
+        "truncated": len(text) > _ASSISTANT_TEXT_CLIP_CHARS,
+    }
+    await on_tool_event("assistant", payload)
+
+
 async def _handle_record(rec: dict, state: _TurnState, on_tool_event: ToolEventSink) -> None:
     kind = rec.get("type")
     if kind == "tool_execution_start":
+        await _flush_pending_text(state, on_tool_event)
         await on_tool_event("tool_call", pp.tool_call_args_entry(rec))
         if rec.get("toolName") == "bash":
             state.open_bash[str(rec.get("toolCallId"))] = rec
@@ -523,6 +548,7 @@ async def _handle_record(rec: dict, state: _TurnState, on_tool_event: ToolEventS
         text = pp.assistant_text(rec)
         if text:
             state.final_text = text
+            state.pending_text = text
         stop_reason, error_message = pp.assistant_stop(rec)
         if stop_reason is not None:
             state.stop_reason = stop_reason

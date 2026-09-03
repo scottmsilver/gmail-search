@@ -496,7 +496,7 @@ Planner ──► Retriever ──► Analyst ──► Writer ──► Critic
 - **Planner / Retriever / Analyst / Writer / Critic** each run as a Gemini-3.1-pro-preview sub-agent. The picker model propagates to all sub-agents.
 - **Sandbox** — `agents/sandbox.py` runs the Analyst's Python in a Docker container with staged JSON evidence, hardened workdir, and an in-image preamble synced at boot. JSON tool output is capped to avoid 1M-token overflow.
 - **Citations** — Writer + Critic are grounded against an explicit allowed-citations list. Refs use collision-free `cite_refs`.
-- **Streaming** — `/api/deep` SSE proxies stream stages into the chat UI under a single AssistantWork disclosure. Each stage emits its cost, and per-turn cost is shown under the assistant response.
+- **Streaming** — `/api/deep` SSE proxies stream stages into the chat UI under a single AssistantWork disclosure. Each stage emits its cost, and per-turn cost is shown under the assistant response; the `pi` backend also streams the model's interim prose between tool calls as `assistant` stages.
 - **Artifacts** — generated artifacts (PDFs, CSVs, images) appear as `[art:…]` chips that open in a right-side preview drawer. `prune-artifacts` GCs them.
 - **Persistence** — every event is in `agent_events`; turns are persisted at the moment they start so mid-stream navigation doesn't drop them.
 - **Security posture (`pi` backend)** — `pi-sandbox` is one shared container/UID for every turn, not a per-tenant boundary; see `deploy/pi/README.md`'s "Security posture" section, and set `GMAIL_PI_BUILTIN_TOOLS=0` to disable its `bash` tool until per-session isolation exists.

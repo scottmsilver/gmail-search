@@ -37,6 +37,7 @@ const friendlyLabels: Record<string, string> = {
   revision: "Revision",
   final: "Final answer",
   error: "Error",
+  assistant: "Model",
 };
 
 const StageCard = ({ block }: { block: StageBlock }) => {

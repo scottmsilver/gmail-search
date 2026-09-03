@@ -180,6 +180,7 @@ const STAGE_LABELS: Record<string, string> = {
   critique: "critic",
   revision: "writer (revision)",
   cost: "cost",
+  assistant: "model",
 };
 
 const summarizeDeepStage = (kind: string, payload: unknown): string => {
@@ -227,6 +228,12 @@ const summarizeDeepStage = (kind: string, payload: unknown): string => {
   if (kind === "draft" || kind === "revision") {
     const t = p.text as string | undefined;
     return t ? t.slice(0, 80) + (t.length > 80 ? "…" : "") : "";
+  }
+  if (kind === "assistant") {
+    const t = p.text as string | undefined;
+    if (!t) return "";
+    const oneLine = t.replace(/\s+/g, " ").trim();
+    return oneLine.slice(0, 100) + (oneLine.length > 100 ? "…" : "");
   }
   return "";
 };
