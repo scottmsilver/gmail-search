@@ -328,6 +328,93 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
     assert call["has_cost_sink"] is True
 
 
+def test_real_run_pi_backend_routes_to_pi_run(monkeypatch, tmp_path):
+    """backend="pi" must ensure the workspace, call pi_run with the
+    turn's kwargs (model=None so runtime_pi picks GMAIL_PI_MODEL),
+    skip the claudebox credential preflight, and never build the
+    orchestrator."""
+    import asyncio
+
+    pi_calls: list[dict] = []
+
+    async def fake_pi_run(*, db_path, session_id, workspace, conversation_id, question, model, cost_sink, user_id=None):
+        pi_calls.append(
+            {
+                "session_id": session_id,
+                "workspace": workspace,
+                "conversation_id": conversation_id,
+                "question": question,
+                "model": model,
+                "has_cost_sink": cost_sink is not None,
+                "user_id": user_id,
+            }
+        )
+
+    import gmail_search.agents.runtime_pi as rp
+
+    monkeypatch.setattr(rp, "pi_run", fake_pi_run)
+
+    workspace_dirs: list[str] = []
+    monkeypatch.setattr(service, "_ensure_workspace_dir", lambda w: workspace_dirs.append(w))
+
+    def _preflight_must_not_run():
+        raise AssertionError("credential preflight must be skipped for pi")
+
+    import gmail_search.claudebox_creds as creds
+
+    monkeypatch.setattr(creds, "credentials_health", _preflight_must_not_run)
+
+    class _OrchestratorMustNotRun:
+        def __init__(self, *a, **kw):
+            raise AssertionError("Orchestrator should not be constructed for pi")
+
+    import gmail_search.agents.orchestration as orch_mod
+
+    monkeypatch.setattr(orch_mod, "Orchestrator", _OrchestratorMustNotRun)
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _p: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+    monkeypatch.setattr(service, "_persist_rich_assistant_message", lambda *a, **kw: True)
+
+    frames: list[str] = []
+
+    async def consume():
+        async for frame in service._real_run(
+            tmp_path / "x.db",
+            "sess-PI",
+            "what happened",
+            default_model="opus",
+            backend="pi",
+            conversation_id="conv-9",
+            user_id="u1",
+        ):
+            frames.append(frame)
+
+    asyncio.run(consume())
+
+    assert workspace_dirs == ["deep-conv-conv-9"]
+    assert pi_calls == [
+        {
+            "session_id": "sess-PI",
+            "workspace": "deep-conv-conv-9",
+            "conversation_id": "conv-9",
+            "question": "what happened",
+            "model": None,
+            "has_cost_sink": True,
+            "user_id": "u1",
+        }
+    ]
+    assert any("persist_ok" in f for f in frames)
+
+
+def test_deep_backend_accepts_pi():
+    assert service._deep_backend("pi") == "pi"
+
+
 def test_real_run_adk_backend_does_not_register_mcp_session(monkeypatch, tmp_path):
     """Default backend must NOT touch the MCP session registry —
     that path is entirely claude_code-only."""
