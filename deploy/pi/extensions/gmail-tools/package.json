@@ -1,0 +1,18 @@
+{
+  "name": "gmail-tools-pi-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "typebox": "1.3.25"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@types/node": "26.4.1",
+    "bun-types": "1.4.0",
+    "zod": "4.5.4"
+  }
+}
