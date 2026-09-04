@@ -89,16 +89,39 @@ def _require_pg():
         pytest.skip("Postgres not reachable at 127.0.0.1:5544 — start the paradedb container to enable")
 
 
+def _count_test_user_threads() -> int | None:
+    """Threads the test user has in `thread_summary`, or None when that
+    relation does not exist — a Postgres that is up but has never had the
+    gmail-search schema applied.
+
+    The distinction is the point: a reachable-but-uninitialised server is
+    exactly what CI's service container is, and asking it for a row count
+    raises UndefinedTable instead of answering 0. Catching that here is
+    what lets `_require_corpus` skip rather than hard-fail, which is what
+    this module's docstring has always promised ("Auto-skip when PG /
+    serve env is unavailable, so CI without a DB never hard-fails")."""
+    from psycopg.errors import UndefinedTable
+
+    with H.closing_connection() as conn:
+        try:
+            row = conn.execute(
+                "SELECT count(*) AS n FROM thread_summary WHERE user_id = %s",
+                (H.test_user_id(),),
+            ).fetchone()
+        except UndefinedTable:
+            return None
+    return int(row["n"]) if row else 0
+
+
 def _require_corpus():
     """Skip unless the test user actually has a populated corpus — perf
-    numbers are meaningless on an empty schema."""
+    numbers are meaningless on an empty schema and undefined on a
+    schemaless one."""
     _require_pg()
-    with H.closing_connection() as conn:
-        row = conn.execute(
-            "SELECT count(*) AS n FROM thread_summary WHERE user_id = %s",
-            (H.test_user_id(),),
-        ).fetchone()
-    if not row or row["n"] < 100:
+    n = _count_test_user_threads()
+    if n is None:
+        pytest.skip("Postgres at 127.0.0.1:5544 has no gmail-search schema — perf gate needs a populated DB")
+    if n < 100:
         pytest.skip(f"Test user {H.test_user_id()} has no/sparse corpus in this DB — perf gate needs real data")
 
 
