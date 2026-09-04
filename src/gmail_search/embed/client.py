@@ -1,10 +1,12 @@
 import logging
 import os
 import struct
+import threading
 from pathlib import Path
 from typing import Any
 
 from google import genai  # noqa: E402
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,29 @@ logger = logging.getLogger(__name__)
 # used. Fire them through a bounded thread pool instead. Override via env if
 # Gemini starts returning 429s (the pipeline's _retry_api_call still backs off).
 _EMBED_CONCURRENCY = max(1, int(os.environ.get("GMS_EMBED_CONCURRENCY", "16")))
+
+# Image preprocessing for embed_image (issue #12). The embedding model
+# accepts only PNG and JPEG; anything else is re-encoded as PNG. Images
+# above MAX_IMAGE_PIXELS are downscaled first — our own PDF rasterizer
+# once produced a 27,115 x 18,154 page (492 Mpx) that Gemini rejected
+# with a 400 on every pass. MAX_DECODE_PIXELS is the hard ceiling we
+# are willing to decode at all (RGB bytes = 3x this); above it the file
+# is treated as permanently unembeddable rather than risking the box.
+MAX_IMAGE_PIXELS = 16_000_000
+MAX_DECODE_PIXELS = 600_000_000  # ~1.8 GB as RGB; decodes are serialized by _DECODE_LOCK
+_NATIVE_MIME = {"PNG": "image/png", "JPEG": "image/jpeg"}
+_GRAYSCALE_MODES = {"1", "L", "LA", "I", "F"}
+_SIXTEEN_BIT_GRAY_MODES = {"I;16", "I;16B", "I;16L", "I;16N"}
+_ALPHA_MODES = {"RGBA", "LA", "PA", "P"}  # P may carry a transparency index
+# One decode at a time: bounds peak memory and makes the temporary
+# Pillow-global change in _lifted_decompression_bomb_limit safe.
+_DECODE_LOCK = threading.Lock()
+
+
+class InvalidImage(ValueError):
+    """The file cannot be turned into something the embedding model
+    accepts. Raised BEFORE any API call; the pipeline records it as a
+    permanent failure so the file is never selected again."""
 
 
 def estimate_tokens(text: str) -> int:
@@ -126,6 +151,99 @@ def blob_to_embedding(blob: bytes, dimensions: int) -> list[float]:
     return list(struct.unpack(f"{dimensions}f", blob))
 
 
+def prepare_image_for_embedding(image_path: Path) -> tuple[bytes, str]:
+    """Return (bytes, mime_type) the embedding model will accept, or raise
+    InvalidImage. Valid PNG/JPEG within the pixel cap are passed through
+    untouched; everything else is decoded, first frame taken, downscaled
+    if needed, and re-encoded as PNG."""
+    im = _open_verified_image(image_path)
+    fmt = im.format
+    if fmt in _NATIVE_MIME and im.width * im.height <= MAX_IMAGE_PIXELS:
+        return image_path.read_bytes(), _NATIVE_MIME[fmt]
+    return _reencode_as_png(im), "image/png"
+
+
+def _open_verified_image(image_path: Path) -> Image.Image:
+    """Open, verify() and fully load() the first frame. Any decode
+    problem — not an image, truncated, corrupt — becomes InvalidImage."""
+    try:
+        with _DECODE_LOCK, _lifted_decompression_bomb_limit():
+            with Image.open(image_path) as probe:
+                _reject_if_too_large_to_decode(probe, image_path)
+                probe.verify()
+            im = Image.open(image_path)
+            im.load()
+    except InvalidImage:
+        raise
+    except Exception as e:  # UnidentifiedImageError, OSError("truncated"), ...
+        raise InvalidImage(f"{image_path.name}: {type(e).__name__}: {e}") from e
+    return im
+
+
+def _reject_if_too_large_to_decode(im: Image.Image, image_path: Path) -> None:
+    pixels = im.width * im.height
+    if pixels > MAX_DECODE_PIXELS:
+        raise InvalidImage(f"{image_path.name}: {im.width}x{im.height} ({pixels} px) exceeds decode ceiling")
+
+
+def _reencode_as_png(im: Image.Image) -> bytes:
+    import io
+
+    im = _to_8bit_rgb_or_gray(im)
+    im = _downscale_to_cap(im)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _to_8bit_rgb_or_gray(im: Image.Image) -> Image.Image:
+    """Normalize to 'L' or 'RGB' without the silent damage a bare
+    convert() does: 16-bit grays are scaled (not clipped at 255) and
+    transparent pixels are composited onto white (not dropped)."""
+    if im.mode in _SIXTEEN_BIT_GRAY_MODES:
+        return im.convert("I").point(lambda v: v * (1 / 256)).convert("L")
+    if im.mode in _ALPHA_MODES:
+        im = _flatten_alpha_onto_white(im)
+    target_mode = "L" if im.mode in _GRAYSCALE_MODES else "RGB"
+    return im if im.mode == target_mode else im.convert(target_mode)
+
+
+def _flatten_alpha_onto_white(im: Image.Image) -> Image.Image:
+    rgba = im.convert("RGBA")
+    background = Image.new("RGB", rgba.size, (255, 255, 255))
+    background.paste(rgba, mask=rgba.getchannel("A"))
+    return background
+
+
+def _downscale_to_cap(im: Image.Image) -> Image.Image:
+    pixels = im.width * im.height
+    if pixels <= MAX_IMAGE_PIXELS:
+        return im
+    scale = (MAX_IMAGE_PIXELS / pixels) ** 0.5
+    new_size = (max(1, int(im.width * scale)), max(1, int(im.height * scale)))
+    return im.resize(new_size, Image.Resampling.LANCZOS)
+
+
+class _lifted_decompression_bomb_limit:
+    """Pillow refuses to open() anything over 2x Image.MAX_IMAGE_PIXELS.
+    We enforce our own MAX_DECODE_PIXELS instead, so lift Pillow's limit
+    for the duration of the open and restore it afterwards."""
+
+    def __enter__(self):
+        import warnings
+
+        self._saved = Image.MAX_IMAGE_PIXELS
+        self._warnings = warnings.catch_warnings()
+        self._warnings.__enter__()
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        Image.MAX_IMAGE_PIXELS = None
+
+    def __exit__(self, *exc):
+        Image.MAX_IMAGE_PIXELS = self._saved
+        self._warnings.__exit__(*exc)
+        return False
+
+
 class GeminiEmbedder:
     def __init__(self, config: dict[str, Any]):
         self.model = config["embedding"]["model"]
@@ -188,10 +306,7 @@ class GeminiEmbedder:
     def embed_image(self, image_path: Path, task_type: str | None = None) -> list[float]:
         if task_type is None:
             task_type = self.task_type_document
-        image_bytes = image_path.read_bytes()
-        suffix = image_path.suffix.lower()
-        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
-        mime_type = mime_map.get(suffix, "image/png")
+        image_bytes, mime_type = prepare_image_for_embedding(image_path)
         result = self.client.models.embed_content(
             model=self.model,
             contents=genai.types.Content(

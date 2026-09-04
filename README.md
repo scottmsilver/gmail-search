@@ -14,7 +14,7 @@ Gmail Search fixes this with hybrid search (semantic + BM25 + Gmail signals + yo
 
 - **Connect Claude over MCP** — a streamable-HTTP MCP server exposes the retrieval engine as 8 tools (relevance search, structured filters, fact enumeration, full-thread fetch, read-only SQL, schema, attachment fetch, artifact publish). Point Claude Desktop / claude.ai / Claude Code at it and ask questions over your real mailbox. OAuth 2.1 (owner-gated Google login) for remote access, or a bearer token locally. See [Connect Claude (MCP)](#connect-claude-mcp).
 - **Hybrid ranking with 8 signals** — semantic similarity, BM25 keyword match, recency, Gmail labels (IMPORTANT/PERSONAL/PROMOTIONS), contact frequency, thread engagement, match density, and thread size. Each signal catches things the others miss.
-- **Searches inside attachments** — PDFs get text extracted and pages rendered as images. Office docs (docx, xlsx, pptx, xls), HEIC photos, calendar invites, plain text, CSVs, and ZIP archives are all extracted recursively. Drive links in email bodies are followed and ingested too. Every attachment Gmail lists gets a row: files whose bytes weren't stored (over the size cap, or the fetch failed) carry a `fetch_status` so a manifest never silently omits a file; `refetch-attachments` backfills them.
+- **Searches inside attachments** — PDFs get text extracted and pages rendered as images. Office docs (docx, xlsx, pptx, xls), HEIC photos, calendar invites, plain text, CSVs, and ZIP archives are all extracted recursively. Drive links in email bodies are followed and ingested too. Every attachment Gmail lists gets a row: files whose bytes weren't stored (over the size cap, or the fetch failed) carry a `fetch_status` so a manifest never silently omits a file; `refetch-attachments` backfills them. Images are validated and normalized (first frame, PNG/JPEG only, downscaled to 16 Mpx) before embedding; a file that can never be embedded is marked `embed_status = failed_permanent` once instead of being resubmitted every pass.
 - **URL crawler** — links in emails get fetched, distilled, and folded into the thread's summary. Tracker domains are denylisted (Disconnect's tracker list + custom blocks), bulk mail with too many links is skipped, and crawls go newest-first. The crawler remembers dead URLs across re-mails and trips a per-host circuit breaker on anti-bot walls (`crawl-hosts` shows and lifts blocks). An LLM invite guard skips link crawling on actionable invitations so an RSVP is never accepted by a GET.
 - **Postgres + pg_search BM25** — Postgres is the only backend. FTS uses ParadeDB's `pg_search` (Tantivy) for proper BM25; structured filters (`from:`, `to:`, `subject:`, `has:attachment`, `after:`, `before:`) are SQL pre-filters before ranking.
 - **Gmail-style query parser** — `from:landmarks draw request`, `after:march invoice`, `subject:"engagement letter"`, `has:attachment` work like Gmail operators.
@@ -51,11 +51,17 @@ Gmail Search fixes this with hybrid search (semantic + BM25 + Gmail signals + yo
 ```bash
 git clone https://github.com/scottmsilver/gmail-search.git
 cd gmail-search
-pip install -e .
+uv sync --extra dev        # creates ./.venv with the package (editable), pytest and ruff
 
 # Web UI
 cd web && bun install && cd ..
 ```
+
+Everything runs from the project's own virtualenv: `uv run gmail-search …`, `uv run pytest`, and the
+`systemctl --user` units point at `.venv/bin/gmail-search` / `.venv/bin/python`. Do not install the
+package into a system or conda Python; the daemons pick up whatever `.venv` has on restart, so a
+dependency bump is `uv lock && uv sync --extra dev` followed by
+`systemctl --user restart gmail-search-supervise.service gmail-search-serve.service gmail-search-mcp.service`.
 
 ### 2. Postgres
 
@@ -239,7 +245,7 @@ Every stage is idempotent. Crash anywhere, rerun, it picks up where it left off.
 
 | Table | What | Why |
 |-------|------|-----|
-| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk |
+| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk; `attachments.embed_status` / `embed_error` record image-embed failures that should never be retried |
 | `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search; reconcile daemon detects drift |
 | `message_summaries` | LLM-generated per-thread summaries (markdown) | Inline in inbox + priority + chat |
 | `contact_frequency` | Log-scaled message count per sender | Boosts results from frequent correspondents |

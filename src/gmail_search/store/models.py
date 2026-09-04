@@ -31,6 +31,8 @@ class Attachment:
     # "skipped_too_large", or "fetch_failed". Non-ok rows keep the
     # Gmail-declared size_bytes and have raw_path NULL.
     fetch_status: str = "ok"
+    # Image-embedding outcome: None (not failed) or "failed_permanent".
+    embed_status: str | None = None
 
 
 @dataclass

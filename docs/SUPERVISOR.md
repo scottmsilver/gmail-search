@@ -4,6 +4,8 @@ The supervisor is a watchdog that keeps the three long-lived daemons
 (`watch`, `update --loop`, `summarize --loop`) alive. Liveness is read
 from `job_progress.updated_at` — no pid files on disk.
 
+The venv used below is created with `uv sync --extra dev` in the repo root.
+
 ## Run it once (foreground)
 
 ```
@@ -26,7 +28,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/development/gmail-search
-ExecStart=%h/anaconda3/bin/gmail-search supervise
+ExecStart=%h/development/gmail-search/.venv/bin/gmail-search supervise
 Restart=on-failure
 RestartSec=10
 
@@ -45,5 +47,5 @@ journalctl --user -u gmail-search-supervisor.service -f
 If you're not using systemd-user, a `@reboot` cron line works too:
 
 ```
-@reboot /home/ssilver/anaconda3/bin/gmail-search supervise --data-dir /home/ssilver/development/gmail-search/data >> /home/ssilver/development/gmail-search/data/supervisor.log 2>&1
+@reboot /home/ssilver/development/gmail-search/.venv/bin/gmail-search supervise --data-dir /home/ssilver/development/gmail-search/data >> /home/ssilver/development/gmail-search/data/supervisor.log 2>&1
 ```

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/development/gmail-search
-ExecStart=%h/anaconda3/bin/python -m gmail_search.agents.mcp_tools_server
+ExecStart=%h/development/gmail-search/.venv/bin/python -m gmail_search.agents.mcp_tools_server
 EnvironmentFile=%h/.config/gmail-search/mcp.env
 # Log MCP server output (incl. the per-tool-call "MCP CALL ..." lines emitted
 # by _log_tool_call) to a real file on disk instead of the journal. `append:`

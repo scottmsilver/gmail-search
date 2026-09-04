@@ -306,9 +306,43 @@ def get_attachments_for_message(conn, message_id: str, *, user_id: Optional[str]
             image_path=r["image_path"],
             raw_path=r["raw_path"],
             fetch_status=r["fetch_status"],
+            embed_status=r["embed_status"],
         )
         for r in rows
     ]
+
+
+EMBED_STATUS_FAILED_PERMANENT = "failed_permanent"
+MAX_EMBED_ERROR_LEN = 500
+
+
+def record_image_embed_failure(
+    conn, attachment_id: int, error: str, *, permanent: bool, max_attempts: int
+) -> str | None:
+    """Bump embed_attempts and store the (sanitized) error. Sets
+    embed_status = failed_permanent when `permanent` or when this failure
+    reaches `max_attempts`, so the embed pass never selects this
+    attachment's images again (issue #12). One atomic UPDATE: two daemons
+    run this pass concurrently, and a read-then-write would let both see
+    attempt N-1 and neither apply the cap. Returns the resulting status."""
+    row = conn.execute(
+        """UPDATE attachments
+           SET embed_attempts = embed_attempts + 1,
+               embed_error = %s,
+               embed_status = CASE WHEN %s OR embed_attempts + 1 >= %s THEN %s ELSE embed_status END
+           WHERE id = %s
+           RETURNING embed_status""",
+        (sanitize_embed_error(error), permanent, max_attempts, EMBED_STATUS_FAILED_PERMANENT, attachment_id),
+    ).fetchone()
+    conn.commit()
+    return row[0] if row else None
+
+
+def sanitize_embed_error(error: str) -> str:
+    """Strip control characters (API errors can echo raw bytes) and cap
+    the length so a pathological message can't bloat the row."""
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in error)
+    return cleaned[:MAX_EMBED_ERROR_LEN]
 
 
 def record_unfetched_attachment(

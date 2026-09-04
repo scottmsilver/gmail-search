@@ -77,6 +77,18 @@ CREATE TABLE IF NOT EXISTS attachments (
 -- size_bytes on a non-ok row is Gmail's declared size.
 ALTER TABLE attachments ADD COLUMN IF NOT EXISTS fetch_status TEXT NOT NULL DEFAULT 'ok';
 
+-- Image-embedding outcome (issue #12). The embed pass used to select
+-- images purely by "no embedding row yet", so a file Gemini rejects with
+-- a 400 was resubmitted on every pass forever (~3,000 wasted calls/day
+-- from 8 files). NULL = not failed (the common case);
+-- 'failed_permanent' = a 4xx or a local validation failure, or the
+-- retryable-attempt cap was hit; never selected again. embed_error is
+-- the sanitized, length-capped message; embed_attempts counts passes
+-- that ended in failure for any image of this attachment.
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_status TEXT;
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_error TEXT;
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_attempts INT NOT NULL DEFAULT 0;
+
 -- Serves `refetch-attachments` (find_unfetched_attachments); tiny.
 CREATE INDEX IF NOT EXISTS idx_attachments_unfetched
     ON attachments (id)

@@ -4,6 +4,7 @@ from typing import Any
 
 from gmail_search.embed.client import (
     GeminiEmbedder,
+    InvalidImage,
     embedding_to_blob,
     estimate_tokens,
     format_attachment_text,
@@ -13,10 +14,12 @@ from gmail_search.store.cost import check_budget, estimate_cost, record_cost
 from gmail_search.store.db import get_connection
 from gmail_search.store.models import EmbeddingRecord
 from gmail_search.store.queries import (
+    EMBED_STATUS_FAILED_PERMANENT,
     embedding_exists,
     get_attachments_for_message,
     get_messages_without_embeddings,
     insert_embedding,
+    record_image_embed_failure,
 )
 from tqdm import tqdm
 
@@ -24,24 +27,87 @@ logger = logging.getLogger(__name__)
 
 TEXT_BATCH_SIZE = 50  # messages per batch (each may produce multiple chunks)
 MAX_INPUT_TOKENS = 8192
+# Passes that may end in a retryable (5xx/429) image-embed failure before
+# the attachment is marked failed_permanent. Each pass already backs off
+# in-process via _retry_api_call; this caps the cross-pass repetition.
+MAX_IMAGE_EMBED_ATTEMPTS = 5
+
+
+# 4xx codes that are really transient: 408 request timeout, 429 quota.
+_TRANSIENT_CLIENT_CODES = {408, 429}
+
+
+def _is_permanent_image_error(e: BaseException) -> bool:
+    """4xx (except 408/429) and local validation failures will fail the
+    same way on every pass; nothing is gained by resubmitting. Walks the
+    __cause__ chain because _retry_api_call wraps the last error."""
+    from google.genai import errors as genai_errors
+
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, InvalidImage):
+            return True
+        if isinstance(cur, genai_errors.ClientError):
+            return getattr(cur, "code", None) not in _TRANSIENT_CLIENT_CODES
+        cur = cur.__cause__
+    return False
+
+
+def _describe_image_failure(img_file: Path, e: Exception) -> str:
+    """'<file>: <error>' — without repeating the name when the error
+    (e.g. InvalidImage) already leads with it."""
+    msg = str(e)
+    return msg if msg.startswith(f"{img_file.name}:") else f"{img_file.name}: {msg}"
+
+
+def _record_image_failures(
+    conn, att_id: int, failures: list[tuple[Path, Exception]]
+) -> None:
+    """One attachment, one pass, one bookkeeping write. The attachment is
+    only marked permanent when EVERY failed image failed permanently —
+    a page that hit a 503 may still succeed next pass, so the attachment
+    must stay selectable (at the cost of re-trying the bad page too)."""
+    permanent = all(_is_permanent_image_error(e) for _, e in failures)
+    error = "; ".join(_describe_image_failure(f, e) for f, e in failures[:3])
+    status = record_image_embed_failure(
+        conn, att_id, error, permanent=permanent, max_attempts=MAX_IMAGE_EMBED_ATTEMPTS
+    )
+    outcome = "permanent" if status == EMBED_STATUS_FAILED_PERMANENT else "will retry"
+    level = logger.warning if outcome == "permanent" else logger.info
+    level(
+        f"Failed to embed {len(failures)} image(s) of attachment {att_id} ({outcome}): {error}"
+    )
 
 
 def _retry_api_call(fn, *args, max_retries=5, **kwargs):
     """Retry an API call with exponential backoff on transient errors."""
     import time as _time
 
+    last_err: Exception | None = None
     for attempt in range(max_retries):
         try:
             return fn(*args, **kwargs)
         except Exception as e:
             err = str(e)
-            if any(code in err for code in ["503", "429", "UNAVAILABLE", "rateLimitExceeded", "500"]):
+            if any(
+                code in err
+                for code in ["503", "429", "UNAVAILABLE", "rateLimitExceeded", "500"]
+            ):
+                last_err = e
                 wait = 2 ** (attempt + 1)
-                logger.warning(f"API error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s...")
+                logger.warning(
+                    f"API error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait}s..."
+                )
                 _time.sleep(wait)
             else:
                 raise
-    raise RuntimeError(f"API call failed after {max_retries} retries")
+    # Keep the underlying cause: the pipeline records this message as
+    # attachments.embed_error, and "failed after 5 retries" alone says nothing.
+    raise RuntimeError(
+        f"API call failed after {max_retries} retries: {last_err}"
+    ) from last_err
 
 
 def run_embedding_pipeline(
@@ -71,7 +137,9 @@ def run_embedding_pipeline(
     batch_size = 1000 if isinstance(embedder, BatchGeminiEmbedder) else TEXT_BATCH_SIZE
 
     # Phase 1: Embed messages
-    messages = get_messages_without_embeddings(conn, model=model, user_id=user_id, limit=limit)
+    messages = get_messages_without_embeddings(
+        conn, model=model, user_id=user_id, limit=limit
+    )
     logger.info(f"{len(messages)} messages to embed (batch_size={batch_size})")
 
     total_embedded = 0
@@ -79,7 +147,9 @@ def run_embedding_pipeline(
     for i in range(0, len(messages), batch_size):
         ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
         if not ok:
-            logger.warning(f"Budget limit ${max_budget:.2f} reached (${spent:.2f} spent). Stopping.")
+            logger.warning(
+                f"Budget limit ${max_budget:.2f} reached (${spent:.2f} spent). Stopping."
+            )
             break
 
         from gmail_search.embed.client import chunk_long_text  # noqa: F811
@@ -170,23 +240,23 @@ def run_embedding_pipeline(
     _att_where = (
         "((a.extracted_text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
         "WHERE e.attachment_id = a.id AND e.chunk_type = 'attachment_text' AND e.model = %s)) "
-        "OR (a.image_path IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
+        "OR (a.image_path IS NOT NULL AND a.embed_status IS DISTINCT FROM %s "
+        "AND NOT EXISTS (SELECT 1 FROM embeddings e "
         "WHERE e.attachment_id = a.id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s)))"
     )
-    if user_id is not None:
-        _p = (user_id, model, model) + ((limit,) if limit is not None else ())
-        all_messages = conn.execute(
-            "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
-            "WHERE m.user_id = %s AND " + _att_where + " ORDER BY m.id" + _att_lim,
-            _p,
-        ).fetchall()
-    else:
-        _p = (model, model) + ((limit,) if limit is not None else ())
-        all_messages = conn.execute(
-            "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
-            "WHERE " + _att_where + " ORDER BY m.id" + _att_lim,
-            _p,
-        ).fetchall()
+    _scope_sql, _scope_params = (
+        ("m.user_id = %s AND ", (user_id,)) if user_id is not None else ("", ())
+    )
+    _p = (
+        _scope_params
+        + (model, EMBED_STATUS_FAILED_PERMANENT, model)
+        + ((limit,) if limit is not None else ())
+    )
+    all_messages = conn.execute(
+        "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
+        "WHERE " + _scope_sql + _att_where + " ORDER BY m.id" + _att_lim,
+        _p,
+    ).fetchall()
     max_images_per_msg = att_config.get("max_images_per_message", 10)
 
     for row in tqdm(all_messages, desc="Processing attachments"):
@@ -195,14 +265,18 @@ def run_embedding_pipeline(
         attachments = get_attachments_for_message(conn, msg_id)
 
         for att in attachments:
-            if att.extracted_text and not embedding_exists(conn, msg_id, att.id, "attachment_text", model):
+            if att.extracted_text and not embedding_exists(
+                conn, msg_id, att.id, "attachment_text", model
+            ):
                 ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
                 if not ok:
                     logger.warning("Budget limit reached. Stopping.")
                     conn.close()
                     return total_embedded
 
-                text = format_attachment_text(att.filename, msg_subject, att.extracted_text)
+                text = format_attachment_text(
+                    att.filename, msg_subject, att.extracted_text
+                )
                 text = truncate_to_token_limit(text, MAX_INPUT_TOKENS)
                 vector = _retry_api_call(embedder.embed_texts_batch, [text])[0]
 
@@ -234,7 +308,7 @@ def run_embedding_pipeline(
                 )
                 total_embedded += 1
 
-            if att.image_path:
+            if att.image_path and att.embed_status != EMBED_STATUS_FAILED_PERMANENT:
                 image_path = Path(att.image_path)
                 if image_path.is_dir():
                     image_files = sorted(image_path.glob("*.png"))[:max_images_per_msg]
@@ -243,14 +317,19 @@ def run_embedding_pipeline(
                 else:
                     image_files = []
 
+                failures: list[tuple[Path, Exception]] = []
                 for img_idx, img_file in enumerate(image_files):
                     chunk_key = f"attachment_image_{img_idx}"
                     # Check both new per-image key and legacy single key
                     if embedding_exists(conn, msg_id, att.id, chunk_key, model):
                         continue
-                    if img_idx == 0 and embedding_exists(conn, msg_id, att.id, "attachment_image", model):
+                    if img_idx == 0 and embedding_exists(
+                        conn, msg_id, att.id, "attachment_image", model
+                    ):
                         continue
-                    ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
+                    ok, spent, remaining = check_budget(
+                        conn, max_budget, user_id=user_id
+                    )
                     if not ok:
                         logger.warning("Budget limit reached. Stopping.")
                         conn.close()
@@ -259,7 +338,7 @@ def run_embedding_pipeline(
                     try:
                         vector = _retry_api_call(embedder.embed_image, img_file)
                     except Exception as e:
-                        logger.warning(f"Failed to embed image {img_file}: {e}")
+                        failures.append((img_file, e))
                         continue
 
                     cost = estimate_cost(image_count=1)
@@ -288,6 +367,9 @@ def run_embedding_pipeline(
                         user_id=user_id,
                     )
                     total_embedded += 1
+
+                if failures:
+                    _record_image_failures(conn, att.id, failures)
 
     conn.close()
     logger.info(f"Embedded {total_embedded} chunks total")

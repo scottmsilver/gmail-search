@@ -95,7 +95,7 @@ Bless the baseline **after** a known-good change lands (e.g. the
 
 ## Environment notes (this repo)
 
-- Run with the repo's python: `/home/ssilver/anaconda3/bin/python -m pytest …`.
+- Run with the venv's pytest: `uv run pytest …`.
 - DB DSN + secrets: the gate reads the live `gmail-search serve` process's env
   straight from `/proc/<pid>/environ` (DSN, admin token) so you don't have to
   export them. No URL or secret is hardcoded in committed code — only a

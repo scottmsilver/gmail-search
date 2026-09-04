@@ -5,6 +5,7 @@
 - **Use small, well-named functions.** Each function should do one thing and its name should describe what it does. This makes code self-documenting and testable. Prefer `_get_cached_embedding()`, `_store_cached_embedding()`, `_call_embedding_api_with_retry()` over one big function with inline comments.
 - **Extract logic into helpers when a block has a clear purpose.** If you can describe what a code block does in one sentence, it should probably be a function with that sentence as its name.
 - **Keep functions short enough to read without scrolling.** If a function is longer than ~30 lines, look for parts to extract.
+- **Don't repeat yourself (DRY).** When two blocks differ only in a value or a branch, make one helper and pass the difference in (a parameter, a callable, a small table). This applies to production code (e.g. one query builder instead of a user-scoped and an unscoped copy of the same SQL) and to tests (shared fixtures/factories for setup, one error factory instead of one per status code). Before finishing a change, diff it for copy-pasted blocks and collapse them.
 
 ## Git
 
@@ -15,6 +16,7 @@
 
 ## Environment
 
+- **One interpreter: the project venv.** `uv sync --extra dev` creates `./.venv` with the editable package, pytest and ruff. Run tools as `uv run pytest`, `uv run ruff …`, `uv run gmail-search …`. Never install the package into anaconda or a system Python, and never point a systemd unit or script at `~/anaconda3/bin`; the `systemctl --user` units use `.venv/bin/gmail-search` and `.venv/bin/python`. Every runtime import must be declared in `pyproject.toml` (an undeclared transitive import is how `mcp` and `pandas` were missing from the venv). After a dependency change: `uv lock && uv sync --extra dev`, then restart the daemons.
 - Display :1 is i3 via CRD+VNC. Emulators use :98 via `~/scripts/start-emulator.sh`.
 - Gemini API key is in `GEMINI_API_KEY` env var (not `GOOGLE_API_KEY`).
 - The project uses a formatter that may strip unused imports. Use `# noqa` comments or inline imports for imports the formatter strips.

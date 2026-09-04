@@ -17,7 +17,7 @@ Environment=GMS_LOG_JSON=1
 # ratchet (paired with malloc_trim() after each retired-searcher close in
 # server.py). Must be set at launch; it governs arena creation.
 Environment=MALLOC_ARENA_MAX=2
-ExecStart=%h/anaconda3/bin/gmail-search serve --port 8090 --data-dir %h/development/gmail-search/data
+ExecStart=%h/development/gmail-search/.venv/bin/gmail-search serve --port 8090 --data-dir %h/development/gmail-search/data
 StandardOutput=append:%h/development/gmail-search/data/serve.log
 StandardError=append:%h/development/gmail-search/data/serve.log
 Restart=on-failure

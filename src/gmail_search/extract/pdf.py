@@ -8,6 +8,21 @@ from gmail_search.extract import ExtractResult
 
 logger = logging.getLogger(__name__)
 
+RENDER_DPI = 150
+# Longest side of a rendered page image. A 52 x 35 inch poster page at a
+# fixed 150 DPI became a 27,115 x 18,154 px (492 Mpx) PNG that the
+# embedding API rejected on every pass (issue #12).
+MAX_RENDER_SIDE_PX = 4000
+
+
+def _render_matrix(page) -> "fitz.Matrix":
+    """150 DPI, scaled down so the longest side fits MAX_RENDER_SIDE_PX."""
+    scale = RENDER_DPI / 72
+    longest_pt = max(page.rect.width, page.rect.height)
+    if longest_pt * scale > MAX_RENDER_SIDE_PX:
+        scale = MAX_RENDER_SIDE_PX / longest_pt
+    return fitz.Matrix(scale, scale)
+
 
 def extract_pdf(file_path: Path, config: dict[str, Any]) -> ExtractResult | None:
     max_pages = config.get("max_pdf_pages", 20)
@@ -43,8 +58,7 @@ def extract_pdf(file_path: Path, config: dict[str, Any]) -> ExtractResult | None
     for i in range(min(len(doc), max_pages)):
         try:
             page = doc[i]
-            mat = fitz.Matrix(150 / 72, 150 / 72)  # 150 DPI
-            pix = page.get_pixmap(matrix=mat)
+            pix = page.get_pixmap(matrix=_render_matrix(page))
             img_path = images_dir / f"page_{i + 1:04d}.png"
             pix.save(str(img_path))
             images.append(img_path)

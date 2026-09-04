@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/anaconda3/bin/gmail-search watch --interval 300
+ExecStart=%h/development/gmail-search/.venv/bin/gmail-search watch --interval 300
 WorkingDirectory=%h/development/gmail-search
 EnvironmentFile=%h/.config/gmail-search/env
 Restart=on-failure
