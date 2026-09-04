@@ -625,3 +625,76 @@ def test_session_token_file_not_written_when_registration_never_happens(monkeypa
     assert conn.events[-1]["kind"] == "error"
     assert not (tmp_path / "deep-conv-c1").exists()
     assert runtime_pi.context_window_for("openai/gpt-5") == 400_000
+
+
+# ─── failed turns still cost money (2026-09-04) ────────────────────────
+#
+# Cost accounting used to sit only on the happy path: drive_turn raised
+# before it ever called _fetch_usage, and pi_run's `except` jumped
+# straight past _report_cost. An errored turn had already burned tokens
+# but recorded no `costs` row. On 2026-09-03 that hid three failed turns
+# and the ledger came in $7.15 under the invoice for the day.
+
+_STATS = {"tokens": {"input": 100, "output": 20, "cacheRead": 5, "cacheWrite": 1}, "cost": 0.03}
+
+
+def test_eof_failure_still_records_cost(monkeypatch):
+    """A turn that dies before agent_end must still report its usage."""
+    client = _FakeClient(_happy_records()[:3], stats=_STATS)
+    _install(monkeypatch, client)
+    costs: list[dict] = []
+    _run(cost_sink=lambda **kw: costs.append(kw))
+
+    assert len(costs) == 1
+    assert costs[0]["input_tokens"] == 100
+    assert costs[0]["output_tokens"] == 20
+    assert costs[0]["cache_read_tokens"] == 5
+    assert costs[0]["usd_override"] == 0.03
+
+
+def test_idle_timeout_still_records_cost(monkeypatch):
+    """Same for the idle-timeout path, which raises even earlier."""
+    client = _FakeClient(_happy_records()[:2], stats=_STATS, hang_after=2)
+    _install(monkeypatch, client)
+    monkeypatch.setenv("GMAIL_PI_IDLE_TIMEOUT", "0.2")
+    costs: list[dict] = []
+    _run(cost_sink=lambda **kw: costs.append(kw))
+
+    assert client.aborted
+    assert [c["input_tokens"] for c in costs] == [100]
+
+
+def test_failed_turn_still_finishes_as_error(monkeypatch):
+    """Recording cost must not swallow the failure: the session still
+    finalizes as an error and emits the error event."""
+    client = _FakeClient(_happy_records()[:3], stats=_STATS)
+    conn, calls = _install(monkeypatch, client)
+    _run(cost_sink=lambda **kw: None)
+
+    assert conn.events[-1]["kind"] == "error"
+    assert conn.finalized == [{"status": "error", "final_answer": None}]
+    assert calls["unregister"] == ["s1"]
+
+
+def test_failed_turn_without_usage_records_nothing(monkeypatch):
+    """If the stats call also fails there is nothing to record, and the
+    sink must not be handed a phantom zero-token row."""
+    client = _FakeClient(_happy_records()[:3])
+
+    async def _no_stats(command, *, timeout: float):
+        raise runtime_pi.PiRpcError("stats unavailable")
+
+    client.request = _no_stats
+    _install(monkeypatch, client)
+    costs: list[dict] = []
+    _run(cost_sink=lambda **kw: costs.append(kw))
+
+    assert costs == []
+
+
+def test_pi_turn_failed_carries_usage_and_is_a_pi_rpc_error():
+    """PiTurnFailed must stay catchable by existing `except PiRpcError`
+    handlers or _run_turn's cleanup would stop firing."""
+    exc = runtime_pi.PiTurnFailed("boom", usage=None)
+    assert isinstance(exc, runtime_pi.PiRpcError)
+    assert exc.usage is None
