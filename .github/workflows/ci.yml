@@ -1,9 +1,9 @@
 name: CI
-true:
+"on":
   push:
     branches:
     - main
-  pull_request: null
+  pull_request:
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -36,5 +36,5 @@ jobs:
     - uses: astral-sh/setup-uv@v5
     - name: Install package + dev deps from the lockfile
       run: uv sync --locked --extra dev
-    - name: "pytest (fast suite \u2014 integration/perf excluded via pyproject addopts)"
+    - name: pytest (fast suite - integration/perf excluded via pyproject addopts)
       run: uv run pytest -q
