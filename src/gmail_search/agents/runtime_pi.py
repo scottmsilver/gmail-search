@@ -460,6 +460,23 @@ class TurnOutcome:
     usage: pp.UsageStats | None = None
 
 
+class PiTurnFailed(PiRpcError):
+    """A turn that spent tokens and then failed.
+
+    Cost accounting used to sit only on the happy path: `drive_turn`
+    raised before it ever fetched usage, so an errored turn recorded no
+    `costs` row at all even though the model had already run. On
+    2026-09-03 that hid three failed turns, and the ledger came in $7.15
+    under the invoice for the day. Subclasses PiRpcError so existing
+    handlers keep working; `usage` is None only when the stats call
+    itself also failed.
+    """
+
+    def __init__(self, message: str, usage: pp.UsageStats | None = None):
+        super().__init__(message)
+        self.usage = usage
+
+
 class _TurnState:
     def __init__(self) -> None:
         self.final_text = ""
@@ -501,20 +518,27 @@ async def drive_turn(
     started = time.monotonic()
     state = _TurnState()
     await client.send({"type": "prompt", "message": question})
-    while True:
-        remaining = hard_timeout - (time.monotonic() - started)
-        if remaining <= 0:
-            raise PiRpcError(f"hard timeout after {hard_timeout:.0f}s")
-        try:
-            rec = await client.read_record(min(idle_timeout, remaining))
-        except asyncio.TimeoutError as exc:
-            raise PiRpcError(f"idle timeout: no event for {idle_timeout:.0f}s") from exc
-        if rec is None:
-            raise PiRpcError("pi exited before agent_end")
-        if rec.get("type") == "agent_end":
-            break
-        await _handle_record(rec, state, on_tool_event)
-    _raise_if_no_answer(state)
+    try:
+        while True:
+            remaining = hard_timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise PiRpcError(f"hard timeout after {hard_timeout:.0f}s")
+            try:
+                rec = await client.read_record(min(idle_timeout, remaining))
+            except asyncio.TimeoutError as exc:
+                raise PiRpcError(f"idle timeout: no event for {idle_timeout:.0f}s") from exc
+            if rec is None:
+                raise PiRpcError("pi exited before agent_end")
+            if rec.get("type") == "agent_end":
+                break
+            await _handle_record(rec, state, on_tool_event)
+        _raise_if_no_answer(state)
+    except PiRpcError as exc:
+        # The turn burned tokens before it failed. Ask for usage while
+        # the client is still alive (`_run_turn` aborts it only after
+        # this propagates) and carry it out on the exception so the
+        # caller can still record the cost.
+        raise PiTurnFailed(str(exc), usage=await _fetch_usage(client)) from exc
     usage = await _fetch_usage(client)
     return TurnOutcome(final_text=state.final_text, local_tool_calls=state.local_tool_calls, usage=usage)
 
@@ -761,6 +785,9 @@ async def pi_run(
                 side_calls=side_calls,
             )
         except Exception as exc:  # noqa: BLE001
+            # A failed turn still costs money; PiTurnFailed carries the
+            # usage drive_turn collected on its way out.
+            _report_cost(cost_sink, resolved_model, getattr(exc, "usage", None))
             _finish_error(conn, session_id, exc)
         finally:
             if token_path is not None:
