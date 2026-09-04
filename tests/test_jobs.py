@@ -13,7 +13,7 @@ def test_argv_match_via_console_script():
 
     # `which gmail-search` path — this is how spawn_detached invokes it
     # by default (see gmail_search_command()).
-    argv = ["/home/user/anaconda3/bin/gmail-search", "summarize", "--concurrency", "12", "--loop"]
+    argv = ["/home/user/development/gmail-search/.venv/bin/gmail-search", "summarize", "--concurrency", "12", "--loop"]
     assert argv_matches_job(argv, "summarize")
     assert not argv_matches_job(argv, "update")
     assert not argv_matches_job(argv, "watch")

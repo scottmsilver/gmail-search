@@ -12,8 +12,10 @@ if [ "${SKIP_HOOKS:-}" = "1" ]; then
   exit 0
 fi
 
-RUFF="${GMS_RUFF:-ruff}"
-PY="${GMS_PYTHON:-python}"
+# Default to the project venv (same interpreter as the daemons and `uv run`).
+ROOT="$(git rev-parse --show-toplevel)"
+RUFF="${GMS_RUFF:-$ROOT/.venv/bin/ruff}"
+PY="${GMS_PYTHON:-$ROOT/.venv/bin/python}"
 
 echo "[pre-push] ruff check…"
 if ! "$RUFF" check src/ tests/; then

@@ -17,8 +17,11 @@ if [ "${SKIP_HOOKS:-}" = "1" ]; then
   exit 0
 fi
 
-RUFF="${GMS_RUFF:-ruff}"
-PY="${GMS_PYTHON:-python}"
+# Default to the project venv so the gate runs the same interpreter as the
+# daemons and `uv run pytest`, not whatever python/ruff is first on PATH.
+ROOT="$(git rev-parse --show-toplevel)"
+RUFF="${GMS_RUFF:-$ROOT/.venv/bin/ruff}"
+PY="${GMS_PYTHON:-$ROOT/.venv/bin/python}"
 # Quick, high-signal subset (~7s). Override with GMS_PRECOMMIT_TESTS=".. .."
 SMOKE="${GMS_PRECOMMIT_TESTS:-tests/test_agent_tools.py tests/test_sql_endpoint_security.py}"
 

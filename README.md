@@ -145,7 +145,7 @@ All tools are batch-first (fan out many queries in one call) and isolate per-ite
 ```bash
 # Streamable-HTTP MCP server. Port via GMAIL_MCP_TOOLS_PORT (default 7878),
 # endpoint at /mcp. Reads the same DB/config as `serve`.
-python -m gmail_search.agents.mcp_tools_server
+uv run python -m gmail_search.agents.mcp_tools_server
 ```
 
 It connects to the same Postgres corpus as the web app — run the ingest pipeline first (steps above) so there's something to query.
@@ -375,7 +375,7 @@ scripts/
                        and restarts serve after consecutive failures
 ```
 
-The MCP server (`python -m gmail_search.agents.mcp_tools_server`, port 7878) is
+The MCP server (`uv run python -m gmail_search.agents.mcp_tools_server`, port 7878) is
 the only surface intended for public exposure; the reference deployment fronts
 it with a cloudflared tunnel while `serve` (FastAPI) and the web app stay
 localhost-only.
@@ -412,7 +412,7 @@ localhost-only.
 Per-user commands (`update`, `sync`, `watch`, `extract`, `embed`, `reindex`, `summarize`, `propositionize`, `refetch-attachments`) take `--email` to pick the mailbox and default to `GMS_BOOTSTRAP_EMAIL`. Every command takes `--data-dir` and `--config`.
 
 The MCP server is started separately (it's a module, not a `gmail-search`
-subcommand): `python -m gmail_search.agents.mcp_tools_server` — see
+subcommand): `uv run python -m gmail_search.agents.mcp_tools_server` — see
 [Connect Claude (MCP)](#connect-claude-mcp).
 
 ## Configuration

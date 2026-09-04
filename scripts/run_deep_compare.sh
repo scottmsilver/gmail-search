@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 echo "[stack] starting MCP tools server -> :7878"
 GMAIL_MCP_TOOLS_HOST=0.0.0.0 GMAIL_MCP_TOOLS_PORT=7878 \
-  python -m gmail_search.agents.mcp_tools_server \
+  uv run python -m gmail_search.agents.mcp_tools_server \
   > "$MCP_LOG" 2>&1 &
 echo $! > "$MCP_PID_FILE"
 
@@ -54,4 +54,4 @@ if [ -f "$REPO_ROOT/deploy/claudebox/.env" ]; then
 fi
 
 echo "[stack] running comparison"
-python scripts/run_deep_compare.py "$@"
+uv run python scripts/run_deep_compare.py "$@"
