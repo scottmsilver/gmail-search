@@ -167,6 +167,16 @@ CREATE TABLE IF NOT EXISTS costs (
 -- here; old rows default to 0.
 ALTER TABLE costs ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;
 
+-- Provider-side context cache accounting. `input_tokens` counts FRESH
+-- prompt tokens only; cache reads are billed at a separate, much lower
+-- rate (gemini-3.7-flash: $0.075/M cached vs $0.75/M fresh), so a ledger
+-- that folds them together cannot reproduce the invoice. The pi runtime
+-- has always reported the split (pi_protocol.UsageStats.cache_read_tokens);
+-- until 2026-09-04 it was dropped before reaching this table. Disjoint
+-- from input_tokens: total prompt = input_tokens + cached_input_tokens.
+ALTER TABLE costs ADD COLUMN IF NOT EXISTS cached_input_tokens BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE costs ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT

@@ -214,3 +214,124 @@ def test_gemini_3_7_flash_pricing_is_not_the_default():
     from gmail_search.agents.cost import estimate_agent_cost_usd
 
     assert estimate_agent_cost_usd("gemini-3.7-flash", 1_000_000, 0) == 0.75
+
+
+# ─── context-cache accounting (added 2026-09-04) ───────────────────────
+#
+# The pi runtime always reported cache_read_tokens, but service.py dropped
+# it before record_agent_cost, so the ledger stored neither the split nor
+# anything that could reproduce the invoice. These pin the semantics:
+# input_tokens is FRESH only, cache reads are disjoint and bill ~10x lower.
+
+
+def test_estimate_prices_cached_tokens_at_the_cached_rate():
+    """Cached input is billed at `cached_input`, not `input`. Reproduces a
+    real turn from 2026-09-03: 759,360 fresh + 3,483,568 cached + 26,845
+    output on gemini-3.7-flash billed $0.93146."""
+    usd = estimate_agent_cost_usd("gemini-3.7-flash", 759_360, 26_845, 3_483_568)
+    assert round(usd, 5) == 0.93146
+
+
+def test_estimate_cached_tokens_are_disjoint_from_input():
+    """Passing tokens as cached must cost strictly less than passing the
+    same tokens as fresh — the whole point of recording the split."""
+    fresh_only = estimate_agent_cost_usd("gemini-3.7-flash", 1_000_000, 0)
+    as_cached = estimate_agent_cost_usd("gemini-3.7-flash", 0, 0, 1_000_000)
+    assert fresh_only == 0.75
+    assert as_cached == 0.075
+    assert estimate_agent_cost_usd("gemini-3.7-flash", 1_000_000, 0, 1_000_000) == 0.825
+
+
+def test_estimate_falls_back_to_input_rate_without_a_cached_rate():
+    """A model with no cached_input rate must overestimate (fresh rate)
+    rather than silently price cache reads at zero."""
+    assert GEMINI_PRICING["gemini-2.5-flash"].cached_input is None
+    assert estimate_agent_cost_usd("gemini-2.5-flash", 0, 0, 1_000_000) == 0.075
+
+
+def test_estimate_cached_only_call_is_not_zeroed():
+    """A turn that was entirely cache hits still costs money; the
+    zero-token quick path must not swallow it."""
+    assert estimate_agent_cost_usd("gemini-3.7-flash", 0, 0, 500_000) > 0
+
+
+def test_record_agent_cost_persists_the_cache_split(db_backend):
+    """The counts land in their own columns, disjoint from input_tokens."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        session_id = new_session_id()
+        create_session(conn, session_id=session_id, conversation_id=None, mode="deep", question="q")
+        record_agent_cost(
+            conn,
+            session_id=session_id,
+            agent_name="pi",
+            model="google/gemini-3.7-flash",
+            input_tokens=759_360,
+            output_tokens=26_845,
+            usd_override=0.93146,
+            cache_read_tokens=3_483_568,
+            cache_write_tokens=17,
+        )
+        row = conn.execute(
+            "SELECT input_tokens, output_tokens, cached_input_tokens, cache_write_tokens,"
+            " estimated_cost_usd FROM costs WHERE operation = 'deep_pi' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["input_tokens"] == 759_360
+        assert row["cached_input_tokens"] == 3_483_568
+        assert row["cache_write_tokens"] == 17
+        assert round(row["estimated_cost_usd"], 5) == 0.93146
+    finally:
+        conn.close()
+
+
+def test_record_agent_cost_defaults_cache_columns_to_zero(db_backend):
+    """Callers that never had cache counts (embed path, ADK agents) keep
+    working and read back 0, not NULL."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    try:
+        session_id = new_session_id()
+        create_session(conn, session_id=session_id, conversation_id=None, mode="deep", question="q")
+        record_agent_cost(
+            conn,
+            session_id=session_id,
+            agent_name="planner",
+            model="gemini-2.5-flash",
+            input_tokens=100,
+            output_tokens=10,
+        )
+        row = conn.execute(
+            "SELECT cached_input_tokens, cache_write_tokens FROM costs"
+            " WHERE operation = 'deep_planner' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["cached_input_tokens"] == 0
+        assert row["cache_write_tokens"] == 0
+    finally:
+        conn.close()
+
+
+def test_record_agent_cost_estimate_uses_cache_read_when_no_override(monkeypatch):
+    """Without a provider figure, the stored estimate must use the cached
+    rate for cache reads instead of ignoring them."""
+    import gmail_search.agents.cost as cost_mod
+
+    captured = {}
+
+    def _fake_record_cost(conn, **kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(cost_mod, "record_cost", _fake_record_cost)
+    usd = cost_mod.record_agent_cost(
+        None,
+        session_id="s",
+        agent_name="pi",
+        model="gemini-3.7-flash",
+        input_tokens=1_000_000,
+        output_tokens=0,
+        cache_read_tokens=1_000_000,
+    )
+    assert usd == 0.825
+    assert captured["cached_input_tokens"] == 1_000_000

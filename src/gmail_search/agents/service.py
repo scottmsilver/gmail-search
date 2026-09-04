@@ -771,6 +771,10 @@ async def _real_run(
         **extra,
     ) -> None:
         nonlocal turn_cost_usd
+        # `extra` carries the pi runtime's context-cache counts. They go
+        # to record_agent_cost (own columns + re-pricing) as well as into
+        # the transcript event below; forwarding them was the missing
+        # link that left cached tokens out of the `costs` table.
         usd = record_agent_cost(
             conn,
             session_id=session_id,
@@ -779,6 +783,8 @@ async def _real_run(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             usd_override=usd_override,
+            cache_read_tokens=int(extra.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(extra.get("cache_write_tokens") or 0),
         )
         turn_cost_usd += usd
         append_event(

@@ -574,3 +574,67 @@ def test_history_preamble_skips_non_text_blocks():
     assert "real question" in out
     # No assistant text appeared — but the preamble still has the user
     # turn, which is enough to establish topic context.
+
+
+def test_pi_cost_sink_forwards_cache_counts_to_the_ledger(monkeypatch, tmp_path):
+    """Regression, 2026-09-04: runtime_pi._report_cost has always sent
+    cache_read_tokens / cache_write_tokens, but the service closure
+    swallowed them in **extra and called record_agent_cost without them,
+    so the `costs` table stored no context-cache data and could not be
+    reconciled against the invoice. The closure must forward them."""
+    import asyncio
+
+    captured: dict = {}
+
+    def fake_record_agent_cost(conn, **kw):
+        captured.update(kw)
+        return 0.93146
+
+    monkeypatch.setattr(service, "record_agent_cost", fake_record_agent_cost, raising=False)
+    import gmail_search.agents.cost as cost_mod
+
+    monkeypatch.setattr(cost_mod, "record_agent_cost", fake_record_agent_cost)
+
+    async def fake_pi_run(*, db_path, session_id, workspace, conversation_id, question, model, cost_sink, user_id=None):
+        # Exactly the kwargs runtime_pi._report_cost emits.
+        cost_sink(
+            agent_name="pi",
+            model="google/gemini-3.7-flash",
+            input_tokens=759_360,
+            output_tokens=26_845,
+            usd_override=0.93146,
+            cache_read_tokens=3_483_568,
+            cache_write_tokens=17,
+        )
+
+    import gmail_search.agents.runtime_pi as rp
+
+    monkeypatch.setattr(rp, "pi_run", fake_pi_run)
+    monkeypatch.setattr(service, "_ensure_workspace_dir", lambda w: None)
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _p: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+    monkeypatch.setattr(service, "_persist_rich_assistant_message", lambda *a, **kw: True)
+    monkeypatch.setattr(service, "append_event", lambda *a, **kw: None, raising=False)
+
+    async def consume():
+        async for _ in service._real_run(
+            tmp_path / "x.db",
+            "sess-CACHE",
+            "q",
+            default_model="opus",
+            backend="pi",
+            conversation_id="conv-1",
+            user_id="u1",
+        ):
+            pass
+
+    asyncio.run(consume())
+
+    assert captured.get("cache_read_tokens") == 3_483_568
+    assert captured.get("cache_write_tokens") == 17
+    assert captured.get("input_tokens") == 759_360
