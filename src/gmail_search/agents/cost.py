@@ -29,10 +29,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Pricing:
-    """Per-million-token rates in USD. `cached_input` applies when the
-    request hits the provider-side context cache; we don't distinguish
-    cached vs uncached yet (ADK doesn't expose the split), so this is
-    aspirational and only `input` / `output` are consulted."""
+    """Per-million-token rates in USD.
+
+    `cached_input` is the rate for prompt tokens served from the
+    provider-side context cache — roughly a tenth of `input` on the
+    flash tier. It IS consulted now: `estimate_agent_cost_usd` takes a
+    `cached_input_tokens` argument, and the pi runtime reports the split
+    (`pi_protocol.UsageStats.cache_read_tokens`). Models with no
+    `cached_input` rate fall back to the fresh `input` rate, which
+    overestimates rather than hides the cost."""
 
     input: float
     output: float
@@ -74,14 +79,31 @@ def _match_pricing(model: str) -> Pricing:
     return GEMINI_PRICING["default"]
 
 
-def estimate_agent_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_agent_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+) -> float:
     """Per-call USD estimate. Returns 0.0 on zero tokens so a
     degenerate call that streamed nothing doesn't synthesize a cost
-    row with phantom prices."""
-    if input_tokens <= 0 and output_tokens <= 0:
+    row with phantom prices.
+
+    `input_tokens` is FRESH prompt tokens and `cached_input_tokens` is
+    the context-cache read; the two are disjoint, matching what the pi
+    runtime reports. Verified against a real turn on 2026-09-03:
+    759,360 fresh + 3,483,568 cached + 26,845 output on
+    gemini-3.7-flash gives $0.93146, the figure the provider billed.
+    """
+    if input_tokens <= 0 and output_tokens <= 0 and cached_input_tokens <= 0:
         return 0.0
     p = _match_pricing(model)
-    return (input_tokens / 1_000_000) * p.input + (output_tokens / 1_000_000) * p.output
+    cached_rate = p.cached_input if p.cached_input is not None else p.input
+    return (
+        (input_tokens / 1_000_000) * p.input
+        + (cached_input_tokens / 1_000_000) * cached_rate
+        + (output_tokens / 1_000_000) * p.output
+    )
 
 
 def record_agent_cost(
@@ -93,6 +115,8 @@ def record_agent_cost(
     input_tokens: int,
     output_tokens: int,
     usd_override: float | None = None,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> float:
     """Append one `deep_<agent_name>` row to the `costs` table and
     return the estimated USD amount. Reuses the shared `record_cost`
@@ -108,8 +132,19 @@ def record_agent_cost(
     `usd_override`, when given, is a provider-reported figure (pi's
     `get_session_stats.cost`) and replaces the pricing-table estimate,
     which only knows Gemini rates.
+
+    `cache_read_tokens` / `cache_write_tokens` are the provider-cache
+    counts, disjoint from `input_tokens`. They are stored in their own
+    columns AND fed to the estimate, so a row can be re-priced later
+    without re-running the agent. Before 2026-09-04 the pi runtime sent
+    these and they were dropped here, which made the ledger impossible
+    to reconcile against the invoice.
     """
-    usd = usd_override if usd_override is not None else estimate_agent_cost_usd(model, input_tokens, output_tokens)
+    usd = (
+        usd_override
+        if usd_override is not None
+        else estimate_agent_cost_usd(model, input_tokens, output_tokens, cache_read_tokens)
+    )
     # session_id is threaded through `message_id` — the column is
     # TEXT + required, and a session id is as good an anchor as any
     # for deep-mode rows. Prefix with `deep:` to make it unambiguous
@@ -121,6 +156,8 @@ def record_agent_cost(
         input_tokens=input_tokens,
         image_count=0,
         output_tokens=output_tokens,
+        cached_input_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
         estimated_cost_usd=usd,
         message_id=f"deep:{session_id}",
     )

@@ -23,6 +23,8 @@ def record_cost(
     message_id: str,
     output_tokens: int = 0,
     *,
+    cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
     user_id: Optional[str] = None,
 ) -> None:
     """Append one row to the per-user `costs` table.
@@ -32,12 +34,19 @@ def record_cost(
     tokens to record. Deep-analysis agents pass the real count so
     analytics can split input vs output without overloading the
     `image_count` column (which means "images processed" elsewhere).
+
+    `cached_input_tokens` / `cache_write_tokens` likewise default to 0.
+    They are DISJOINT from `input_tokens`, which counts fresh prompt
+    tokens only: total prompt = input_tokens + cached_input_tokens. The
+    split matters because a cache read bills at roughly a tenth of the
+    fresh rate, so a ledger without it cannot reproduce the invoice.
     """
     uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
         """INSERT INTO costs (timestamp, operation, model, input_tokens,
-           image_count, output_tokens, estimated_cost_usd, message_id, user_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+           image_count, output_tokens, cached_input_tokens, cache_write_tokens,
+           estimated_cost_usd, message_id, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
         (
             datetime.now(timezone.utc).isoformat(),
             operation,
@@ -45,6 +54,8 @@ def record_cost(
             input_tokens,
             image_count,
             output_tokens,
+            cached_input_tokens,
+            cache_write_tokens,
             estimated_cost_usd,
             message_id,
             uid,

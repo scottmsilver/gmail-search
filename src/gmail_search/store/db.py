@@ -143,7 +143,10 @@ TABLE_DOCS: dict[str, str] = {
     "costs": (
         "Per-API-call cost log for embeddings + summarization.\n"
         "- id, timestamp, operation, model, input_tokens, image_count, output_tokens,\n"
-        "  estimated_cost_usd, message_id."
+        "  cached_input_tokens, cache_write_tokens, estimated_cost_usd, message_id.\n"
+        "- input_tokens is FRESH prompt tokens; cached_input_tokens is the\n"
+        "  provider-cache read (billed ~10x cheaper). They are disjoint, so\n"
+        "  total prompt tokens = input_tokens + cached_input_tokens."
     ),
     "term_aliases": (
         "Spell correction + personal-abbreviation expansion dictionary.\n"
