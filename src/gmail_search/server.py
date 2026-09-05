@@ -107,6 +107,7 @@ _SQL_FORBIDDEN = re.compile(
     r"DELETE|DROP|CREATE|REPLACE|TRUNCATE|ALTER|BEGIN|COMMIT|ROLLBACK|"
     r"SAVEPOINT|RELEASE|LOAD_EXTENSION|READFILE|WRITEFILE|EDIT|COPY|"
     r"GRANT|REVOKE|SET|RESET|SHOW|LISTEN|NOTIFY|DISCARD|LOCK|CLUSTER|"
+    r"SET_CONFIG|CURRENT_SETTING|"
     r"FTS3_TOKENIZER|SQLITE_COMPILEOPTION_GET|SQLITE_COMPILEOPTION_USED|"
     r"SQLITE_SOURCE_ID|SQLITE_VERSION|SQLITE_LOG)\b",
     re.IGNORECASE,
@@ -183,20 +184,30 @@ def _open_readonly_connection(*, user_id: str | None = None):
         timeout_ms = int(SQL_TIMEOUT_SEC * 1000)
         cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
         if user_id is not None:
-            # Drop privileges to the reader role for the duration of
-            # this transaction. The reader has SELECT only on
-            # LLM-facing tables and is NOT BYPASSRLS, so the policy
-            # checks below take effect. After ROLLBACK the connection
-            # is back to the gmail_search role for whatever runs next.
-            cur.execute("SET LOCAL ROLE gmail_search_reader")
             # `set_config(setting, value, is_local)` is the only form
             # that accepts a parameterized value — `SET LOCAL …` is
             # parsed as raw SQL and rejects %s. is_local=true scopes
-            # the setting to this transaction only.
+            # the setting to this transaction only, so it survives the
+            # role switch below.
+            #
+            # This runs *before* dropping to gmail_search_reader, and
+            # deliberately so: gmail_search_reader has EXECUTE on
+            # set_config() revoked (pg_schema.sql) so the LLM's own SQL
+            # can't call it to reassign app.user_id to another tenant.
+            # Setting it here, while still the superuser role, is the
+            # one legitimate caller.
             cur.execute(
                 "SELECT set_config('app.user_id', %s, true)",
                 (user_id,),
             )
+            # Now drop privileges to the reader role for the rest of
+            # this transaction. The reader has SELECT only on
+            # LLM-facing tables and is NOT BYPASSRLS, so the RLS policy
+            # checks (which call current_setting('app.user_id', ...)
+            # under this same role) take effect. After ROLLBACK the
+            # connection is back to the gmail_search role for whatever
+            # runs next.
+            cur.execute("SET LOCAL ROLE gmail_search_reader")
     return conn
 
 

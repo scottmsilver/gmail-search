@@ -42,6 +42,12 @@ def test_rejects_forbidden_keywords():
         "SELECT writefile('/tmp/x', 'pwn')",
         "SELECT 1; COPY messages FROM '/tmp/evil'",
         "WITH x AS (SELECT 1) GRANT ALL ON messages TO public",
+        # RLS bypass: reassigning app.user_id inside the LLM's own
+        # query would switch which tenant's rows the RLS policies
+        # resolve to (SEC-01).
+        "SELECT set_config('app.user_id', 'victim', true), * FROM messages",
+        "WITH bypass AS (SELECT set_config('app.user_id', 'victim', true)) SELECT * FROM messages",
+        "SELECT current_setting('app.user_id')",
     ]
     for q in cases:
         err = _validate_sql(q)

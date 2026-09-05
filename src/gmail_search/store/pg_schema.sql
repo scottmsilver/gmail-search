@@ -758,6 +758,22 @@ GRANT SELECT ON
     topics
 TO gmail_search_reader;
 
+-- Defense-in-depth: `set_config('app.user_id', <victim>, true)` in the LLM's
+-- own query text would let it flip which tenant's rows the RLS policies
+-- below resolve to, inside the same read-only transaction. The /api/sql
+-- keyword gate blocks `set_config` (and `current_setting`) in submitted SQL
+-- too, but a role-level REVOKE holds even if that regex gate is ever
+-- bypassed or misses a spelling. This is safe to revoke because the
+-- server's own `set_config('app.user_id', ...)` call (server.py,
+-- _open_readonly_connection) runs *before* dropping to this role.
+--
+-- current_setting() is deliberately NOT revoked here: the RLS policies
+-- below call `current_setting('app.user_id', true)` in their USING/WITH
+-- CHECK clauses, and those run under gmail_search_reader for every read —
+-- revoking it would break RLS entirely for this role, not just the
+-- attack it's meant to stop.
+REVOKE EXECUTE ON FUNCTION set_config(text, text, boolean) FROM PUBLIC, gmail_search_reader;
+
 -- Per-user RLS for the tables that have a `user_id` column directly.
 DO $$
 DECLARE
