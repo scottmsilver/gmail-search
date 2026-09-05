@@ -224,15 +224,18 @@ const SearchInner = () => {
 
   return (
     <div className="flex h-full w-full flex-col bg-background">
-      <div className="mx-auto w-full max-w-4xl px-6 pb-3 pt-6">
+      <div className="mx-auto w-full max-w-4xl px-4 pb-3 pt-4 sm:px-6 sm:pt-6">
+        {/* Wraps below sm: the icon + input keep row 1, and the sort /
+            topics controls drop to row 2. Kept on one row they push
+            the "topics" button clean off a 390px viewport. */}
         <form
           onSubmit={(e) => {
             e.preventDefault();
             submit(query, sort);
           }}
-          className="flex items-center gap-2 rounded-2xl border bg-card px-4 py-2.5 transition-colors focus-within:shadow-sm"
+          className="flex flex-wrap items-center gap-x-2 gap-y-2 rounded-2xl border bg-card px-4 py-2.5 transition-colors focus-within:shadow-sm sm:flex-nowrap"
         >
-          <span className="text-muted-foreground">
+          <span className="shrink-0 text-muted-foreground">
             <SearchIcon />
           </span>
           <input
@@ -242,40 +245,42 @@ const SearchInner = () => {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search your archive…"
             autoFocus
-            className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
-          <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 text-[11px]">
-            {(["relevance", "recent"] as Sort[]).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => {
-                  setSort(s);
-                  if (lastQueryRef.current) submit(query, s);
-                }}
-                className={
-                  s === sort
-                    ? "rounded-full bg-background px-2.5 py-0.5 font-medium text-foreground shadow-sm"
-                    : "rounded-full px-2.5 py-0.5 text-muted-foreground hover:text-foreground"
-                }
-              >
-                {s}
-              </button>
-            ))}
+          <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
+            <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 text-[11px]">
+              {(["relevance", "recent"] as Sort[]).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => {
+                    setSort(s);
+                    if (lastQueryRef.current) submit(query, s);
+                  }}
+                  className={
+                    s === sort
+                      ? "rounded-full bg-background px-2.5 py-0.5 font-medium text-foreground shadow-sm"
+                      : "rounded-full px-2.5 py-0.5 text-muted-foreground hover:text-foreground"
+                  }
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowTopics((v) => !v)}
+              aria-label="Toggle topics"
+              title={showTopics ? "Hide topics" : "Show topics"}
+              className={
+                showTopics
+                  ? "shrink-0 rounded-full bg-secondary px-2.5 py-1 text-[11px] font-medium text-foreground"
+                  : "shrink-0 rounded-full px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+              }
+            >
+              topics
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setShowTopics((v) => !v)}
-            aria-label="Toggle topics"
-            title={showTopics ? "Hide topics" : "Show topics"}
-            className={
-              showTopics
-                ? "rounded-full bg-secondary px-2.5 py-1 text-[11px] font-medium text-foreground"
-                : "rounded-full px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
-            }
-          >
-            topics
-          </button>
         </form>
         <div className="mt-2">
           <CorpusStatus latencyMs={latencyMs} />

@@ -45,8 +45,8 @@ const WORKING_ICON = (
 const TextPart = ({ text }: { text: string }) => <MarkdownText text={text} />;
 
 const UserMessage = () => (
-  <MessagePrimitive.Root className="flex justify-end my-4 px-6 md:px-8">
-    <div className="max-w-[70%] bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2 whitespace-pre-wrap">
+  <MessagePrimitive.Root className="flex justify-end my-4 px-4 sm:px-6 md:px-8">
+    <div className="max-w-[85%] sm:max-w-[70%] bg-blue-600 text-white rounded-2xl rounded-br-md px-4 py-2 whitespace-pre-wrap">
       <MessagePrimitive.Parts components={{ Text: ({ text }) => <>{text}</> }} />
     </div>
   </MessagePrimitive.Root>
@@ -99,7 +99,7 @@ const TurnCostPart = ({ data }: { data: TurnCostData }) => (
 const HiddenPart = () => null;
 
 const AssistantMessage = () => (
-  <MessagePrimitive.Root className="my-4 px-6 md:px-8">
+  <MessagePrimitive.Root className="my-4 px-4 sm:px-6 md:px-8">
     <AssistantWork />
     <MessagePrimitive.Parts
       components={{
@@ -127,13 +127,20 @@ const AssistantMessage = () => (
 );
 
 const Composer = () => (
-  <ComposerPrimitive.Root className="px-6 md:px-8 pb-3 pt-1 bg-white">
+  <ComposerPrimitive.Root className="px-4 sm:px-6 md:px-8 pb-3 pt-1 bg-white">
     <CorpusStatus />
-    <div className="mt-1 flex items-center gap-2 rounded-2xl border border-neutral-200 bg-neutral-50 focus-within:border-neutral-400 focus-within:bg-white transition-colors pl-2 pr-3 py-1.5">
-      <ModelPicker />
+    {/* Below sm the model-picker label ("3.1 Flash Lite · high ▾") eats
+        ~140px of a 390px viewport and squeezes the input to two cramped
+        lines, so it wraps onto its own row underneath. `order-*` puts
+        the input first on that wrapped layout and restores the DOM
+        order (picker · input · send) from sm up. */}
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl border border-neutral-200 bg-neutral-50 focus-within:border-neutral-400 focus-within:bg-white transition-colors px-3 py-1.5 sm:flex-nowrap sm:pl-2 sm:pr-3">
+      <div className="order-last w-full sm:order-none sm:w-auto">
+        <ModelPicker />
+      </div>
       <ComposerPrimitive.Input
         placeholder="Ask about your email…"
-        className="flex-1 bg-transparent focus:outline-none resize-none placeholder:text-neutral-400 text-sm leading-6"
+        className="order-first min-w-0 flex-1 bg-transparent focus:outline-none resize-none placeholder:text-neutral-400 text-sm leading-6 sm:order-none"
         rows={1}
         autoFocus
       />

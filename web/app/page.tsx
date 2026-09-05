@@ -167,6 +167,15 @@ const useSidebarOpen = () =>
     () => getServerChatSettings().sidebarOpen,
   );
 
+// Matches Tailwind's `sm` breakpoint, where ConversationSidebar stops
+// being an overlay and becomes a static column.
+const SM_BREAKPOINT = "(min-width: 640px)";
+
+const closeSidebarOnMobile = () => {
+  if (typeof window === "undefined") return;
+  if (!window.matchMedia(SM_BREAKPOINT).matches) setChatSettings({ sidebarOpen: false });
+};
+
 const ConversationSidebarHost = ({
   activeId,
   onNew,
@@ -176,16 +185,30 @@ const ConversationSidebarHost = ({
 }) => {
   const open = useSidebarOpen();
   if (!open) return null;
-  return <ConversationSidebar activeId={activeId} onNew={onNew} />;
+  return (
+    <>
+      {/* Tap-to-dismiss scrim, mobile only — the sidebar covers most of
+          a phone screen there, so it needs a way out that isn't the
+          hamburger hidden underneath it. */}
+      <div
+        aria-hidden
+        onClick={() => setChatSettings({ sidebarOpen: false })}
+        className="fixed inset-0 z-20 bg-black/30 sm:hidden"
+      />
+      <ConversationSidebar activeId={activeId} onNew={onNew} onSelect={closeSidebarOnMobile} />
+    </>
+  );
 };
 
+// z-40 keeps the toggle above the mobile sidebar overlay (z-30) and its
+// scrim (z-20), so it can always close what it opened.
 const SidebarToggle = () => {
   const open = useSidebarOpen();
   return (
     <button
       type="button"
       onClick={() => setChatSettings({ sidebarOpen: !open })}
-      className="absolute top-3 left-3 z-20 w-11 h-11 flex items-center justify-center rounded-md transition-colors theme-hover"
+      className="absolute top-3 left-3 z-40 w-11 h-11 flex items-center justify-center rounded-md transition-colors theme-hover"
       style={{ color: "var(--fg-secondary)" }}
       title={open ? "Hide conversations" : "Show conversations"}
       aria-label={open ? "Hide conversations" : "Show conversations"}

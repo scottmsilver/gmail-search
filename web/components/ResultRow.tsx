@@ -277,11 +277,24 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
       : "empty";
   const hasAttachment = thread.matches.some((m) => m.attachment_filename);
 
-  // Single-row grid:
-  //   sender-names · subject · date
-  // plus a row 2 below that holds the summary + (optional) debug
-  // footer, spanning all three columns. The avatar-initials circle
-  // was removed — it added colour but no information.
+  // Two grid shapes, one per breakpoint.
+  //
+  //   ≥sm — one header row: sender-names · subject · date, then the
+  //         summary spanning all three columns beneath it.
+  //   <sm — Gmail-mobile stacking: sender + date share row 1, the
+  //         subject gets row 2 to itself, summary row 3. A 200px
+  //         names column plus a date column leaves ~80px for the
+  //         subject at 390px wide, which middle-truncates every
+  //         subject to noise ("Ins…ce"), so the subject needs its
+  //         own line rather than a narrower column.
+  //
+  // Placement is explicit (row-start/col-start) rather than relying
+  // on auto-flow: the DOM order is names → subject → date, which
+  // auto-placement would render in the wrong order once the subject
+  // spans two columns.
+  //
+  // The avatar-initials circle was removed — it added colour but no
+  // information.
   // We can't use <button> as the outer because summaries now render
   // markdown, which embeds <a> elements — nesting an <a> inside a
   // <button> is invalid HTML (and some browsers swallow the click).
@@ -298,10 +311,10 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
           handleActivate();
         }
       }}
-      className="group grid w-full cursor-pointer grid-cols-[200px_1fr_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 border-b px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[200px_minmax(0,1fr)_auto]"
     >
-      {/* Names (row 1, col 1) */}
-      <div className="min-w-0 truncate pt-0.5">
+      {/* Names — row 1 col 1 at every width. */}
+      <div className="col-start-1 row-start-1 min-w-0 truncate pt-0.5">
         {thread.user_replied && <SenderChevron />}
         <span className="font-medium text-foreground">{shortPeople(thread.participants)}</span>
         {thread.message_count > 1 && (
@@ -309,11 +322,12 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
         )}
       </div>
 
-      {/* Subject (row 1, col 2) — middle-ellipsised so Gmail's
-          "Re: Fwd: Fwd: Re: real subject [EXT] [EXT] [EXT]" threads
-          keep the meaningful middle visible instead of getting cut
-          off on the right like end-truncate did. */}
-      <div className="flex min-w-0 items-center gap-1 font-medium text-foreground">
+      {/* Subject — its own full-width row on mobile, the middle
+          column on ≥sm. Middle-ellipsised so Gmail's "Re: Fwd: Fwd:
+          Re: real subject [EXT] [EXT] [EXT]" threads keep the
+          meaningful middle visible instead of getting cut off on the
+          right like end-truncate did. */}
+      <div className="col-span-2 col-start-1 row-start-2 flex min-w-0 items-center gap-1 font-medium text-foreground sm:col-span-1 sm:col-start-2 sm:row-start-1">
         {hasAttachment && <PaperclipIcon />}
         <MiddleTruncate text={thread.subject} className="min-w-0 flex-1" />
         {/* Open in Gmail — new tab. Shift-click for popup window. */}
@@ -324,13 +338,13 @@ export const ResultRow = ({ thread, onOpen }: Props) => {
         />
       </div>
 
-      {/* Date (row 1, col 4) */}
-      <div className="shrink-0 pt-1 text-xs text-muted-foreground">{formatSmartDate(thread.date_last)}</div>
+      {/* Date — pinned to the right of the header row at every width. */}
+      <div className="col-start-2 row-start-1 shrink-0 pt-1 text-xs text-muted-foreground sm:col-start-3">
+        {formatSmartDate(thread.date_last)}
+      </div>
 
-      {/* Summary + debug footer (row 2, spans names+subject+date) */}
-      {/* Summary row (row 2, spanning all three columns now that
-          the avatar column is gone). */}
-      <div className="col-start-1 col-span-3 min-w-0">
+      {/* Summary + debug footer — last row, spanning every column. */}
+      <div className="col-span-2 col-start-1 row-start-3 min-w-0 sm:col-span-3 sm:row-start-2">
         {preview && (
           <div className="whitespace-normal break-words text-muted-foreground">
             {previewSource === "summary" ? (

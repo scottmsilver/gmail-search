@@ -14,9 +14,13 @@ type Conversation = {
 type Props = {
   activeId: string | null;
   onNew: () => void;
+  // Fired whenever the user picks a conversation or starts a new one.
+  // On mobile the host uses it to dismiss the overlay; on desktop the
+  // sidebar is a permanent column and the host ignores it.
+  onSelect?: () => void;
 };
 
-export const ConversationSidebar = ({ activeId, onNew }: Props) => {
+export const ConversationSidebar = ({ activeId, onNew, onSelect }: Props) => {
   const [items, setItems] = useState<Conversation[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -52,11 +56,17 @@ export const ConversationSidebar = ({ activeId, onNew }: Props) => {
   };
 
   return (
-    <aside className="w-64 flex-shrink-0 border-r border-neutral-200 bg-neutral-50 flex flex-col">
+    // Below sm this is an overlay pinned under the top nav (h-10): as an
+    // in-flow 256px column it left the chat pane ~130px wide on a phone.
+    // From sm up it goes back to being a static column in the flex row.
+    <aside className="fixed bottom-0 left-0 top-10 z-30 w-64 flex-shrink-0 border-r border-neutral-200 bg-neutral-50 flex flex-col sm:static sm:top-auto sm:bottom-auto sm:z-auto">
       <div className="p-3 border-b border-neutral-200">
         <button
           type="button"
-          onClick={onNew}
+          onClick={() => {
+            onNew();
+            onSelect?.();
+          }}
           className="w-full rounded-lg bg-neutral-900 text-white text-sm py-2 hover:bg-neutral-700 transition-colors"
         >
           + New chat
@@ -80,6 +90,7 @@ export const ConversationSidebar = ({ activeId, onNew }: Props) => {
             >
               <Link
                 href={`/?c=${c.id}`}
+                onClick={onSelect}
                 className="flex-1 min-w-0 text-sm truncate text-neutral-800"
                 title={c.title}
               >

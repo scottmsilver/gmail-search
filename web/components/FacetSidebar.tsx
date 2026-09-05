@@ -14,7 +14,10 @@ export const FacetSidebar = ({ facets, totalCount, activeTopic, onSelectTopic }:
   if (facets.length === 0 && totalCount === 0) return null;
 
   return (
-    <aside className="hidden w-56 shrink-0 overflow-y-auto border-r bg-background md:block">
+    // Rendered only while SearchView's "topics" toggle is on, so it
+    // stays visible on mobile too — just narrower. Hiding it below md
+    // (as it used to) left the toggle doing nothing on a phone.
+    <aside className="w-36 shrink-0 overflow-y-auto border-r bg-background sm:w-56">
       <div className="px-4 pb-2 pt-4 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         Topics
       </div>
