@@ -726,7 +726,7 @@ async def _real_run(
     import asyncio
     import time as _time
 
-    from gmail_search.agents.analyst import ANALYST_INSTRUCTION, build_analyst_agent, instruction_with_skills
+    from gmail_search.agents.analyst import analyst_instruction, build_analyst_agent, instruction_with_skills
     from gmail_search.agents.cost import record_agent_cost
     from gmail_search.agents.critic import build_critic_agent
     from gmail_search.agents.orchestration import Orchestrator
@@ -1194,7 +1194,7 @@ async def _real_run(
     # session's artifacts. Instruction gets skill-matched text
     # appended if a SKILL.md matches the question.
     def _analyst_factory(evidence_records):
-        instr = instruction_with_skills(ANALYST_INSTRUCTION, question=question)
+        instr = instruction_with_skills(analyst_instruction(), question=question)
         return build_analyst_agent(
             evidence_records=evidence_records,
             db_dsn=None,

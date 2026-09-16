@@ -259,6 +259,7 @@ async def open_runtime(config):
         await _finish(asyncio.to_thread(broker.drain_cleanup,consent))
         browser_app=create_invited_app(identities=identities,consent=consent,broker=broker,
             provision_account=provision_account,runs=runs,conversations=conversations,
-            artifacts=artifacts,mail=BrowserMail(gateway,attachment_reader=attachment_reader),startup_prepared=True)
+            artifacts=artifacts,mail=BrowserMail(gateway,attachment_reader=attachment_reader,
+                attachment_source=source),startup_prepared=True)
         gate.require_ready()
         yield Runtime(browser_app,gateway_app)

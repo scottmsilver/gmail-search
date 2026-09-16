@@ -44,6 +44,7 @@ from gmail_search.agents.tools import get_thread_batch as _get_thread_batch_impl
 from gmail_search.agents.tools import query_emails_batch as _query_emails_batch_impl
 from gmail_search.agents.tools import search_emails_batch as _search_emails_batch_impl
 from gmail_search.agents.tools import sql_query_batch as _sql_query_batch_impl
+from gmail_search.store.schema_profile import selected_bm25_key
 from gmail_search.trace import (  # noqa: F401  (used in tool wrappers + _log_tool_call; keep against import-stripper)
     current_trace_id,
     new_trace_id,
@@ -1106,43 +1107,54 @@ THREAD_BATCH_DESC = (
     f"{SESSION_PARAM_NOTE}"
 )
 
-SQL_QUERY_BATCH_DESC = (
-    "Run many read-only SELECTs concurrently in ONE call against the "
-    "messages DB (Postgres + ParadeDB). `queries` is a list (1-100). "
-    "Each query is independently gated: SELECT/WITH only, no DDL/DML, "
-    "500-row + 10s per-query timeout. Returns "
-    "`{results: [{query, result}, ...]}` aligned with input; per-query "
-    "errors land in that entry's `result` as `{error: ...}` — the "
-    "batch as a whole still succeeds.\n\n"
-    "Even a single query goes through this tool — pass a one-item "
-    "list. Use multi-item batches for multi-angle investigations: "
-    "different senders, keywords, time windows, year-buckets, ticket "
-    "numbers. Same wall clock for 1 query or 20.\n\n"
-    "Call `describe_schema` first if unsure about column names. "
-    "Common gotchas: `from_addr` (not `sender`), `body_text` (not "
-    "`body`), `id` (not `message_id`), no `snippet` column.\n\n"
-    "REQUIRED — BM25 for free-text. The server REJECTS `LIKE`/`ILIKE` "
-    "on these columns (forces seq scan, ~50x slower):\n"
-    "  messages: subject, body_text, from_addr, to_addr\n"
-    "  attachments: filename, extracted_text\n"
-    "Use the `@@@` operator with `messages.search_id` or `attachments.id` instead. Tantivy "
-    "syntax: `field:term`, combinable with AND / OR / NOT and parens. "
-    "Translation table:\n"
-    "  WHERE subject ILIKE '%credit%'\n"
-    "    →  WHERE search_id @@@ 'subject:credit'\n"
-    "  WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'\n"
-    "    →  WHERE search_id @@@ 'from_addr:delta AND subject:cancel'\n"
-    "  Domain terms keep their TLD as ONE token: "
-    "`from_addr:landmarkswest.com` matches, `from_addr:landmarkswest` "
-    "returns 0 rows.\n"
-    "  WHERE body_text LIKE '%refund issued%'  (phrase)\n"
-    "    →  WHERE search_id @@@ 'body_text:\"refund issued\"'\n"
-    "Add `ORDER BY paradedb.score(search_id) DESC` for relevance. Escape "
-    "hatch: any query containing `@@@` skips the LIKE check, so a "
-    "BM25 prefilter + LIKE refinement is allowed (use only when BM25 "
-    "truly cannot express the predicate). Cells > 8000 chars are "
-    f"clipped. {SESSION_PARAM_NOTE}"
-)
+# Not registered on the app (see `register_tools` below) — the MCP surface
+# exposes `query_emails_batch`, not a raw SQL tool. Kept profile-correct anyway
+# so it cannot ship stale guidance the day someone does register it.
+#
+# A function, not a constant, so the key resolves when the description is
+# asked for rather than at import. Resolving at import would let a process
+# that configures GMS_SCHEMA_PROFILE after this module loads hand the model a
+# key that disagrees with `server.py`, and would turn an invalid profile into
+# an import-time traceback instead of a clean startup error.
+def sql_query_batch_desc() -> str:
+    _MESSAGE_BM25_KEY = selected_bm25_key()
+    return (
+        "Run many read-only SELECTs concurrently in ONE call against the "
+        "messages DB (Postgres + ParadeDB). `queries` is a list (1-100). "
+        "Each query is independently gated: SELECT/WITH only, no DDL/DML, "
+        "500-row + 10s per-query timeout. Returns "
+        "`{results: [{query, result}, ...]}` aligned with input; per-query "
+        "errors land in that entry's `result` as `{error: ...}` — the "
+        "batch as a whole still succeeds.\n\n"
+        "Even a single query goes through this tool — pass a one-item "
+        "list. Use multi-item batches for multi-angle investigations: "
+        "different senders, keywords, time windows, year-buckets, ticket "
+        "numbers. Same wall clock for 1 query or 20.\n\n"
+        "Call `describe_schema` first if unsure about column names. "
+        "Common gotchas: `from_addr` (not `sender`), `body_text` (not "
+        "`body`), `id` (not `message_id`), no `snippet` column.\n\n"
+        "REQUIRED — BM25 for free-text. The server REJECTS `LIKE`/`ILIKE` "
+        "on these columns (forces seq scan, ~50x slower):\n"
+        "  messages: subject, body_text, from_addr, to_addr\n"
+        "  attachments: filename, extracted_text\n"
+        f"Use the `@@@` operator with `messages.{_MESSAGE_BM25_KEY}` or `attachments.id` instead. Tantivy "
+        "syntax: `field:term`, combinable with AND / OR / NOT and parens. "
+        "Translation table:\n"
+        "  WHERE subject ILIKE '%credit%'\n"
+        f"    →  WHERE {_MESSAGE_BM25_KEY} @@@ 'subject:credit'\n"
+        "  WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'\n"
+        f"    →  WHERE {_MESSAGE_BM25_KEY} @@@ 'from_addr:delta AND subject:cancel'\n"
+        "  Domain terms keep their TLD as ONE token: "
+        "`from_addr:landmarkswest.com` matches, `from_addr:landmarkswest` "
+        "returns 0 rows.\n"
+        "  WHERE body_text LIKE '%refund issued%'  (phrase)\n"
+        f"    →  WHERE {_MESSAGE_BM25_KEY} @@@ 'body_text:\"refund issued\"'\n"
+        f"Add `ORDER BY paradedb.score({_MESSAGE_BM25_KEY}) DESC` for relevance. Escape "
+        "hatch: any query containing `@@@` skips the LIKE check, so a "
+        "BM25 prefilter + LIKE refinement is allowed (use only when BM25 "
+        "truly cannot express the predicate). Cells > 8000 chars are "
+        f"clipped. {SESSION_PARAM_NOTE}"
+    )
 
 FIND_FACTS_DESC = (
     "ENUMERATE every instance of an entity/attribute across the whole "

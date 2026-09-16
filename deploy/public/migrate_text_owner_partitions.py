@@ -7,7 +7,10 @@ No numeric message prerequisite, heap copy or BM25 rebuild is performed.
 """
 import argparse
 import os
+from pathlib import Path
 import re
+import struct
+import time
 
 import psycopg
 from psycopg import sql
@@ -175,12 +178,190 @@ def _ident(schema, name):
     return sql.Identifier(schema, name)
 
 
+# ── Which database an apply may touch ────────────────────────────────────────
+#
+# Declared, never inferred. The default is the disposable fixture and nothing
+# else; production is a separate, separately guarded path rather than a deleted
+# check, because "the check was in the way" is how a rehearsal script ends up
+# rewriting a live mailbox.
+#
+# Production mode relaxes exactly one thing — which database — and nothing else.
+# Every preflight, ACL, bound, collation, lock and ancestry check still runs.
+
+TARGET_ENV = 'GMS_MIGRATION_TARGET'
+CONFIRM_ENV = 'GMS_MIGRATION_CONFIRM'
+BACKUP_ENV = 'GMS_MIGRATION_BACKUP'
+
+_FIXTURE_HOST = '127.0.0.1'
+_FIXTURE_PORT = 55440
+_FIXTURE_PREFIX = 'gms_owner_partitions_test_'
+
+
+def _is_disposable_fixture(conn):
+    """The rehearsal database: loopback, the fixture port, the fixture name."""
+    return (conn.info.host == _FIXTURE_HOST and conn.info.hostaddr == _FIXTURE_HOST
+            and conn.info.port == _FIXTURE_PORT
+            and conn.info.dbname.startswith(_FIXTURE_PREFIX))
+
+
+MARKER_PREFIX = 'gms-migration-target:'
+
+
+def _cluster_confirmation(conn):
+    """The token an operator must supply to apply to production.
+
+    `<database>:<system identifier>:<nonce>`, all three read off the target.
+
+    The nonce is the part that does the work, and it is here because the first
+    two are **not enough**. `system_identifier` is issued at `initdb` and then
+    copied verbatim by every *physical* copy — `pg_basebackup`, streaming
+    replication, PITR, a filesystem or VM snapshot. That is exactly why
+    `pg_rewind` uses it to prove two clusters share ancestry. Database names and
+    OIDs survive a physical restore too. So production and a restore of
+    production have a byte-identical `<database>:<system identifier>`, and an
+    operator with both open — the normal state of affairs when you have just
+    taken the backup this tool insists on — could read the token off the restore
+    and apply it to production. Measured on this project's own cold backup:
+    live and backup both report 7630921061527392295.
+
+    The nonce has to be written into the target in a separate statement:
+
+        COMMENT ON DATABASE <db> IS 'gms-migration-target:<32+ hex chars>';
+
+    A copy taken before that write does not carry it, so a stale restore cannot
+    satisfy a token minted for production. This is not a cryptographic control
+    and does not defend against a copy taken *after* the write: generate the
+    nonce fresh for each migration and set it immediately before the apply.
+    """
+    return '{}:{}:{}'.format(*_target_identity(conn))
+
+
+def _target_identity(conn):
+    """(database, system identifier, marker nonce) read off the target."""
+    row = conn.execute("""SELECT current_database(), system_identifier::text,
+        shobj_description((SELECT oid FROM pg_database WHERE datname=current_database()),
+                          'pg_database')
+        FROM pg_control_system()""").fetchone()
+    comment = row[2] or ''
+    if not comment.startswith(MARKER_PREFIX):
+        raise ValueError(
+            'Production apply requires the target database to carry a migration marker: '
+            f"COMMENT ON DATABASE {row[0]} IS '{MARKER_PREFIX}<32+ hex chars>'")
+    nonce = comment[len(MARKER_PREFIX):].strip()
+    if len(nonce) < 32 or not all(char in '0123456789abcdefABCDEF' for char in nonce):
+        raise ValueError('Migration marker nonce must be at least 32 hex characters')
+    return row[0], row[1], nonce
+
+
+def _require_production_target(conn):
+    """Every condition, each with its own refusal. No condition is optional."""
+    if not _local_connection(conn):
+        raise ValueError('Production apply requires a loopback or local-socket connection')
+    database, system_identifier, nonce = _target_identity(conn)
+    supplied = os.environ.get(CONFIRM_ENV, '')
+    if supplied != f'{database}:{system_identifier}:{nonce}':
+        raise ValueError(
+            f'Production apply requires {CONFIRM_ENV} to match this cluster; '
+            f'read it from the target and pass it verbatim')
+    _require_declared_backup(system_identifier)
+
+
+# The runbook takes the backup immediately before the window, so a receipt older
+# than this is a leftover from a previous attempt rather than the backup that is
+# about to be relied on.
+BACKUP_MAX_AGE_SECONDS = 48 * 3600
+
+
+def _backup_system_identifier(backup):
+    """The cluster a data-directory copy came from, or None if it is not one.
+
+    `system_identifier` is a little-endian uint64 at offset 0 of
+    `global/pg_control` (it is the first field of `ControlFileData`). Verified
+    against this project's own cold backup, which reports the same
+    7630921061527392295 as `pg_controldata` and as the live cluster.
+    """
+    control = backup / 'global' / 'pg_control'
+    if not control.is_file():
+        return None
+    with control.open('rb') as handle:
+        raw = handle.read(8)
+    return str(struct.unpack('<Q', raw)[0]) if len(raw) == 8 else None
+
+
+def _require_declared_backup(system_identifier):
+    """Verify the backup where that is possible, and say so where it is not.
+
+    A cold copy of the data directory — the procedure this project rehearsed —
+    carries its cluster identity in `global/pg_control`, so for that shape this
+    genuinely checks that the backup is of *this* cluster and not of a different
+    one or a previous incarnation of it. Anything else is only a receipt: the
+    check falls back to "exists, non-empty, recent", which is a prompt to go and
+    take a backup rather than evidence that one restores.
+    """
+    backup = Path(os.environ.get(BACKUP_ENV, '') or '')
+    if not backup.name or not backup.exists():
+        raise ValueError(
+            f'Production apply requires {BACKUP_ENV} to name an existing verified backup')
+
+    backup_identifier = _backup_system_identifier(backup)
+    if backup_identifier is not None and backup_identifier != system_identifier:
+        raise ValueError(
+            f'{BACKUP_ENV} is a backup of cluster {backup_identifier}, not of this '
+            f'cluster ({system_identifier}); a backup of a different cluster restores nothing')
+
+    stamp = backup / 'global' / 'pg_control' if backup_identifier is not None else backup
+    if backup_identifier is None:
+        empty = not any(backup.iterdir()) if backup.is_dir() else backup.stat().st_size == 0
+        if empty:
+            raise ValueError(
+                f'{BACKUP_ENV} names an empty path; a backup that holds nothing is not one')
+    age = time.time() - stamp.stat().st_mtime
+    if age > BACKUP_MAX_AGE_SECONDS:
+        raise ValueError(
+            f'{BACKUP_ENV} is {age / 3600:.0f}h old, past the {BACKUP_MAX_AGE_SECONDS // 3600}h '
+            'bound; take the backup immediately before the window, not from a previous attempt')
+
+
+def _local_connection(conn):
+    """Refuses a DSN that plainly names a remote host. That is all it proves.
+
+    A Unix socket reports no hostaddr; anything else must be loopback. Be clear
+    about the limit: an `ssh -L`, socat or pgbouncer on 127.0.0.1 makes a remote
+    cluster look local, and a forwarded socket is indistinguishable from a real
+    one. So this catches `host=prod.example.com` typed by mistake and nothing
+    subtler. The confirmation nonce is what binds the target; this is a cheap
+    first filter, not the control.
+
+    Fail-closed notes for whoever edits this next. psycopg resolves hostnames
+    itself and fills `hostaddr` with the address actually connected to, so a
+    hostname DSN can never reach the socket branch or claim loopback falsely.
+    IPv6 loopback spellings (`::1`, `::ffff:127.0.0.1`) are *rejected* rather
+    than accepted, because psycopg leaves `hostaddr` empty for them — that is a
+    gap on the safe side. Do not "fix" it by loosening the check.
+    """
+    hostaddr = conn.info.hostaddr
+    if not hostaddr:
+        return (conn.info.host or '').startswith('/')
+    return hostaddr in ('127.0.0.1', '::1')
+
+
+def _require_apply_target(conn):
+    declared = os.environ.get(TARGET_ENV, 'disposable')
+    if declared == 'disposable':
+        if not _is_disposable_fixture(conn):
+            raise ValueError('Apply accepts disposable owner-partition fixture databases only')
+        return
+    if declared == 'production':
+        _require_production_target(conn)
+        return
+    raise ValueError(f'{TARGET_ENV}={declared!r} is not a known apply target')
+
+
 def _require(conn, *, apply=False):
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise ValueError('Requires idle connection')
-    if apply and (conn.info.host != '127.0.0.1' or conn.info.hostaddr != '127.0.0.1' or conn.info.port != 55440
-                  or not conn.info.dbname.startswith('gms_owner_partitions_test_')):
-        raise ValueError('Apply accepts disposable owner-partition fixture databases only')
+    if apply:
+        _require_apply_target(conn)
 
 
 def _acl(conn, oid):

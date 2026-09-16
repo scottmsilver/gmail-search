@@ -343,7 +343,11 @@ def test_no_concurrent_manager_or_unsafe_state_directory(setup, tmp_path):
     with pytest.raises(BlockingIOError):
         module.Manager(manager.state_dir, backend, controller_uid=1234)
     unsafe = tmp_path / 'unsafe'
-    unsafe.mkdir(mode=0o755)
+    unsafe.mkdir()
+    # chmod, not mkdir(mode=...): mkdir's mode is masked by the ambient umask,
+    # so under `umask 0077` this directory came out 0700 — safe — and the test
+    # failed for the environment rather than for the code.
+    unsafe.chmod(0o755)
     with pytest.raises(RuntimeError, match='Unsafe'):
         module.Manager(unsafe, backend, controller_uid=1234)
     symlink = tmp_path / 'alias'

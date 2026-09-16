@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -344,6 +345,27 @@ def require_user(request: Request) -> Optional[User]:
     )
 
 
+# Generated ids are `u_` + `secrets.token_urlsafe(12)`, so base64url plus the
+# prefix; the set below also admits an email, which other paths use.
+_USER_ID_RE = re.compile(r"[A-Za-z0-9._@-]{1,128}")
+
+
+def _checked_user_id(user_id: str) -> str:
+    """Constrain a forwarded owner id to the shape ids actually have.
+
+    The service-token path returns `X-User-Id` to its caller verbatim, and the
+    value reaches places that build text rather than parameters — notably the
+    LLM schema preamble in `server.py`, which splices the owner into SQL
+    examples the model is told to copy. A quote there produces examples that
+    break the very `WHERE user_id = '...'` scoping the preamble exists to
+    enforce. Holding the service token is already high trust, so this is depth
+    rather than the boundary, but the cost is one regex.
+    """
+    if not _USER_ID_RE.fullmatch(user_id or ""):
+        raise AuthError("X-User-Id is not a well-formed owner id")
+    return user_id
+
+
 def require_user_id(request: Request) -> str:
     """FastAPI dependency: returns the user_id every per-user query
     should scope on. Three resolution paths:
@@ -371,7 +393,7 @@ def require_user_id(request: Request) -> str:
         if expected and raw_auth.lower().startswith(_BEARER_PREFIX):
             presented = raw_auth[len(_BEARER_PREFIX) :].strip()
             if hmac.compare_digest(presented, expected):
-                return forwarded_uid
+                return _checked_user_id(forwarded_uid)
         # X-User-Id without a valid service token is a phishing attempt
         # — fail loud rather than silently downgrade to the cookie path.
         raise AuthError("X-User-Id requires a valid service token")

@@ -10,6 +10,7 @@ import pytest
 from gmail_search.gateway.provision_writer import provision_application_writer,verify_writer_access
 from gmail_search.gateway.writer import application_writer_role, WriterCredential, WriterRegistry
 from gmail_search.gateway.database import reader_role
+from gmail_search.gateway.partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 as NUMERIC
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +250,7 @@ def add_reader_schema(dsn):
 
 def test_admission_provisioner_validates_canonical_identity_before_installing_credentials(writer_database, monkeypatch):
     # Partition DDL is exercised by test_partitioned_admission on ParadeDB.
-    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner: None)
+    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner, *, profile: None)
     from gmail_search.auth.identity_store import Account,VerifiedGoogleIdentity
     from gmail_search.gateway.admission_provision import AdmissionProvisioner
     dsn,(alice,_)=writer_database
@@ -257,7 +258,7 @@ def test_admission_provisioner_validates_canonical_identity_before_installing_cr
     config=conninfo_to_dict(dsn);config.pop('user',None);config.pop('password',None)
     installed=[]
     provision=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**config),
-                                   install_credentials=lambda *credentials:installed.append(credentials))
+                                   install_credentials=lambda *credentials:installed.append(credentials),partition_profile=NUMERIC)
     account=Account(alice,alice+'@example.test',1)
     verified=VerifiedGoogleIdentity(account.email,'google-'+alice,True)
     assert provision(account,verified) is True
@@ -271,7 +272,7 @@ def test_admission_provisioner_validates_canonical_identity_before_installing_cr
 
 def test_legacy_subject_requires_explicit_audited_binding_not_email_claim(writer_database, monkeypatch):
     # Partition DDL is exercised by test_partitioned_admission on ParadeDB.
-    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner: None)
+    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner, *, profile: None)
     from gmail_search.auth.identity_store import Account,VerifiedGoogleIdentity
     from gmail_search.gateway.admission_provision import AdmissionProvisioner,bind_existing_subject
     dsn,(alice,bob)=writer_database
@@ -279,7 +280,7 @@ def test_legacy_subject_requires_explicit_audited_binding_not_email_claim(writer
     with psycopg.connect(dsn,autocommit=True) as conn:
         conn.execute('UPDATE public.users SET google_sub=NULL WHERE id=%s',(alice,))
     cfg=conninfo_to_dict(dsn);cfg.pop('user',None);cfg.pop('password',None)
-    provision=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=lambda *a:None)
+    provision=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=lambda *a:None,partition_profile=NUMERIC)
     account=Account(alice,alice+'@example.test',1);claims=VerifiedGoogleIdentity(account.email,'google-'+alice,True)
     with pytest.raises(ValueError):provision(account,claims)
     with psycopg.connect(dsn) as conn:
@@ -290,7 +291,7 @@ def test_legacy_subject_requires_explicit_audited_binding_not_email_claim(writer
 
 def test_admission_vault_failure_never_reports_success(writer_database, monkeypatch):
     # Partition DDL is exercised by test_partitioned_admission on ParadeDB.
-    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner: None)
+    monkeypatch.setattr('gmail_search.gateway.admission_provision.provision_owner_partitions', lambda conn, owner, *, profile: None)
     from gmail_search.auth.identity_store import Account,VerifiedGoogleIdentity
     from gmail_search.gateway.admission_provision import AdmissionProvisioner
     dsn,(alice,_)=writer_database
@@ -298,11 +299,11 @@ def test_admission_vault_failure_never_reports_success(writer_database, monkeypa
     cfg=conninfo_to_dict(dsn);cfg.pop('user',None);cfg.pop('password',None)
     def unavailable(*credentials):
         raise RuntimeError('vault unavailable')
-    provision=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=unavailable)
+    provision=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=unavailable,partition_profile=NUMERIC)
     with pytest.raises(RuntimeError,match='vault unavailable'):
         provision(Account(alice,alice+'@example.test',1),VerifiedGoogleIdentity(alice+'@example.test','google-'+alice,True))
     installed=[]
-    retry=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=lambda *a:installed.append(a))
+    retry=AdmissionProvisioner(lambda:psycopg.connect(dsn),runtime_dsn=make_conninfo(**cfg),install_credentials=lambda *a:installed.append(a),partition_profile=NUMERIC)
     assert retry(Account(alice,alice+'@example.test',1),VerifiedGoogleIdentity(alice+'@example.test','google-'+alice,True))
     registry=WriterRegistry({alice:installed[0][1]},is_active=lambda _:True)
     with registry.connection(alice) as conn:

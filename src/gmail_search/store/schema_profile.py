@@ -41,6 +41,8 @@ NUMERIC_KEY_V1 = SchemaProfile(name="numeric-key-v1", message_bm25_key="search_i
 PROFILES = {profile.name: profile for profile in (TEXT_KEY_V1, TEXT_PARTITIONED_V1, NUMERIC_KEY_V1)}
 DEFAULT_PROFILE = TEXT_KEY_V1
 SELECTION_ENV = "GMS_SCHEMA_PROFILE"
+# Bootstrap paths that legitimately connect before the schema exists.
+SKIP_CHECK_ENV = "GMS_SKIP_SCHEMA_PROFILE_CHECK"
 
 _verified: set[tuple[str, str]] = set()
 _lock = threading.Lock()
@@ -60,14 +62,7 @@ def selected_profile() -> SchemaProfile:
         ) from None
 
 
-def bm25_key(conn, table: str = "messages") -> str:
-    """The BM25 key field to score on for `table`, per the bound profile.
-
-    Falls back to the default only for connections that carry no profile — raw
-    psycopg handles, mostly in tests. Callers must use this rather than a local
-    literal, so readers and writers move together across a profile change.
-    """
-    profile = getattr(conn, "profile", None) or DEFAULT_PROFILE
+def _key_for(profile: SchemaProfile, table: str) -> str:
     if table == "messages":
         return profile.message_bm25_key
     if table == "attachments":
@@ -75,19 +70,60 @@ def bm25_key(conn, table: str = "messages") -> str:
     raise SchemaProfileMismatch(f"no BM25 key is defined for table {table!r}")
 
 
-def observed_shape(conn) -> tuple[str, bool]:
-    """Read the catalog's actual shape: (bm25 key field, partitioned)."""
+def bm25_key(conn, table: str = "messages") -> str:
+    """The BM25 key field to score on for `table`, per the bound profile.
+
+    Falls back to the default only for connections that carry no profile — raw
+    psycopg handles, mostly in tests. Callers must use this rather than a local
+    literal, so readers and writers move together across a profile change.
+    """
+    return _key_for(getattr(conn, "profile", None) or DEFAULT_PROFILE, table)
+
+
+def selected_bm25_key(table: str = "messages") -> str:
+    """The BM25 key for text that has no connection to read it from.
+
+    The SQL examples handed to the model are the case this exists for: they are
+    documentation, not executable paths, but an example naming a column the
+    database does not have produces generated SQL that fails. Rendering them
+    from the same trusted selection the connection binding verifies means the
+    examples cannot drift from the schema the process actually talks to.
+    """
+    return _key_for(selected_profile(), table)
+
+
+def observed_shape(conn) -> tuple[str | None, bool]:
+    """Read the catalog's actual shape: (bm25 key field, partitioned).
+
+    The key is `None` when `messages` has no BM25 index — including when there
+    is no `messages` table at all. That case must not read as "keyed on id":
+    defaulting there would let an empty or half-installed database satisfy the
+    TEXT profile, which is the silent-wrong-answer this module exists to stop.
+    """
     row = conn.execute(
-        """SELECT (SELECT c.reloptions::text FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid
+        """SELECT (SELECT c.reloptions FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid
                    JOIN pg_am am ON am.oid=c.relam
                    WHERE i.indrelid=to_regclass('messages') AND am.amname='bm25' LIMIT 1),
                   (SELECT c.relkind FROM pg_class c WHERE c.oid=to_regclass('messages'))"""
     ).fetchone()
     reloptions, relkind = (row[0], row[1]) if row else (None, None)
-    key = "id"
-    if reloptions and "key_field=" in reloptions:
-        key = reloptions.split("key_field=", 1)[1].strip("{}\"' ").split(",")[0].strip("\"' ")
-    return key, relkind == "p"
+    partitioned = relkind == "p"
+    if not reloptions:
+        # No BM25 index on `messages`. Reading this as "keyed on id" is what let
+        # an empty database satisfy the TEXT profile, so it is reported as
+        # absent. Note pg_search *requires* the option — creating a bm25 index
+        # without it fails with "index should have a `WITH (key_field='...')`
+        # option" (measured, 0.23.0) — so a bm25 index with no reloptions at all
+        # cannot exist, and this branch really does mean "no index".
+        return None, partitioned
+    # `reloptions` is a text[] of `name=value`; read the element rather than
+    # searching the joined text, so a value that happens to contain the literal
+    # `key_field=` cannot be picked up instead.
+    for option in reloptions:
+        name, _, value = option.partition("=")
+        if name.strip() == "key_field":
+            return value.strip().strip("\"'"), partitioned
+    return None, partitioned
 
 
 def verify(conn, profile: SchemaProfile, *, cache_key: str | None = None) -> None:
@@ -103,6 +139,13 @@ def verify(conn, profile: SchemaProfile, *, cache_key: str | None = None) -> Non
             if token in _verified:
                 return
     key, partitioned = observed_shape(conn)
+    if key is None:
+        raise SchemaProfileMismatch(
+            f"selected profile {profile.name!r} expects "
+            f"key_field={profile.message_bm25_key!r}, but `messages` has no BM25 index "
+            "(the schema is absent or half-installed). Run init_db, or set "
+            f"{SKIP_CHECK_ENV}=1 for a bootstrap path that legitimately runs before it."
+        )
     if key != profile.message_bm25_key or partitioned != profile.partitioned:
         raise SchemaProfileMismatch(
             f"selected profile {profile.name!r} expects "

@@ -298,11 +298,15 @@ src/gmail_search/
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
   store/
     db.py           — psycopg connection (DB_DSN), schema apply, TABLE_DOCS
+    schema_profile.py — Which mailbox shape this process talks to; bound to
+                       every connection and verified against the catalog
     models.py       — Dataclasses
     queries.py      — CRUD + FTS (phrase + individual + dual-query)
     cost.py         — Per-operation cost tracking with budget enforcement
     pg_schema.sql   — Authoritative schema (idempotent); pg_migration_*.sql
-                       are one-off historical migrations
+                       are one-off historical migrations. Blocks fenced
+                       `-- >>> profile-only: <name>` install only for the
+                       schema profiles that name them
   extract/
     __init__.py     — Dispatcher: mime_type → extractor
     pdf.py          — pymupdf text + page rendering (150 DPI PNG)
@@ -443,7 +447,7 @@ download:
   max_messages: 50000
 ```
 
-Connection strings and secrets are environment variables, not config: `DB_DSN` (Postgres), the broker trio (`SILVER_OAUTH_BROKER_URL`, `SILVER_OAUTH_BEARER`, `GMS_BOOTSTRAP_EMAIL`), `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `LLM_BACKEND`, and the multi-tenant and MCP knobs described in their sections. The systemd units read them from `~/.config/gmail-search/multi-tenant.env`.
+Connection strings and secrets are environment variables, not config: `DB_DSN` (Postgres), `GMS_SCHEMA_PROFILE` (which mailbox shape this process expects — `text-key-v1` by default, which is the live shape; a database that disagrees is refused at connect, and `GMS_SKIP_SCHEMA_PROFILE_CHECK=1` exempts bootstrap paths), the broker trio (`SILVER_OAUTH_BROKER_URL`, `SILVER_OAUTH_BEARER`, `GMS_BOOTSTRAP_EMAIL`), `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `LLM_BACKEND`, and the multi-tenant and MCP knobs described in their sections. The systemd units read them from `~/.config/gmail-search/multi-tenant.env`.
 
 ### Key settings
 

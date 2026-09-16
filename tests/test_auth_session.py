@@ -526,3 +526,35 @@ def test_upsert_user_no_synthetic_google_sub(db_backend, monkeypatch):
         conn.close()
     assert row is not None
     assert row["google_sub"] is None
+
+
+# ── forwarded owner-id shape ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("user_id", [
+    "u_8zEhtZoG34ltYmML",          # the shape `_new_user_id` actually mints
+    "someone@example.test",        # an email, which other paths use
+    "u_aB3-_x9Z",
+])
+def test_well_formed_forwarded_owner_ids_are_accepted(user_id):
+    from gmail_search.auth.session import _checked_user_id
+
+    assert _checked_user_id(user_id) == user_id
+
+
+@pytest.mark.parametrize("user_id", [
+    "alice' OR '1'='1",            # closes the quote in server.py's SQL examples
+    "alice';--",
+    "alice\nbob",                 # a newline splits the preamble's example lines
+    "",
+    "x" * 129,
+])
+def test_malformed_forwarded_owner_ids_are_refused(user_id):
+    """The service-token path hands this value straight back to its caller, and
+    it reaches text that is built rather than parameterised — notably the LLM
+    schema preamble, which splices the owner into `WHERE user_id = '...'`
+    examples the model is instructed to copy. A quote there breaks the scoping
+    the preamble exists to enforce."""
+    from gmail_search.auth.session import AuthError, _checked_user_id
+
+    with pytest.raises(AuthError, match="well-formed owner id"):
+        _checked_user_id(user_id)

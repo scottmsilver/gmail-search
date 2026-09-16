@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # from the orchestration code so prompt edits are just a string
 # change — no imports, no functions. Mirrors the phrasing we use in
 # web/lib/systemPrompt.ts but scoped to the code-execution path.
-ANALYST_INSTRUCTION = """\
+_ANALYST_INSTRUCTION_TEMPLATE = """\
 You are the Analyst sub-agent. You have access to a Python sandbox
 (via the `run_code` tool) pre-seeded with an `evidence` DataFrame
 and a read-only `db` psycopg connection to Postgres (tables:
@@ -46,7 +46,7 @@ and a read-only `db` psycopg connection to Postgres (tables:
 `topics`, `message_topics`, `contact_frequency`, `embeddings`,
 `term_aliases`).
 
-PERF: BM25 search (`messages.search_id @@@ 'field:term'`) is fast, but per-row text
+PERF: BM25 search (`messages.{bm25_key} @@@ 'field:term'`) is fast, but per-row text
 processing over `body_text` (`regexp_replace`/`~*`/`substring`) across a
 broad match set is slow. Prefer the precomputed `message_summaries.summary`
 over re-deriving text from raw `body_text`; if you must touch `body_text`,
@@ -125,6 +125,17 @@ Final output: a short natural-language summary of what you found,
 with explicit references to the artifact filenames or ids you
 produced. Do NOT dump raw DataFrames inline — point to a saved CSV.
 """
+
+
+def analyst_instruction() -> str:
+    """The Analyst instruction, keyed to the schema shape this process talks to.
+
+    The template names the message BM25 key, and an example naming a column the
+    database does not have is how the sub-agent gets handed SQL that cannot run.
+    """
+    from gmail_search.store.schema_profile import selected_bm25_key
+
+    return _ANALYST_INSTRUCTION_TEMPLATE.replace("{bm25_key}", selected_bm25_key())
 
 
 def _truncate(s: str, cap: int) -> str:
@@ -252,7 +263,7 @@ def build_analyst_agent(
     return Agent(
         name="analyst",
         model=model_name,
-        instruction=_as_constant_instruction(instruction or ANALYST_INSTRUCTION),
+        instruction=_as_constant_instruction(instruction or analyst_instruction()),
         tools=[run_code],
     )
 

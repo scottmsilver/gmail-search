@@ -117,13 +117,30 @@ def churn_reports():
 
 @pytest.mark.parametrize('mode',['observed','unobserved'])
 @pytest.mark.parametrize('profile',['message_text','message_numeric','attachment'])
-def test_pinned_generic_plan_assertion_after_owner_churn_is_reproducible(churn_reports,mode,profile):
+def test_generic_plan_after_owner_churn_no_longer_asserts(churn_reports,mode,profile):
+    """This test used to pin the crash. It now pins its absence.
+
+    Until the patched engine, these two steps reproduced
+    `assertion failed: item_pointer_is_valid(ctid)` under a generic plan — the
+    upstream pg_search defect rooted out in
+    docs/qualification/retained-reader-root-cause.md. The test asserted that
+    error *as the expected result*, which was right while it was the behaviour
+    of the engine we ran.
+
+    We now run the patched build, so the generic plan returns rows. Asserting
+    that is the regression guard: if the patch is ever lost — a rebuilt image
+    that pulls the floating tag, a rollback to stock 0.23.0 — the assertion
+    comes back and this fails, naming the reason.
+    """
     evidence=churn_reports[mode]['profiles'][profile]
     clean=evidence['clean']['fresh_backend']
     for step in ('after_vacuum','read_retry'):
         value=evidence['post_reindex_churn']['stages'][step]
-        assert value['force_generic_plan']==value['fresh_generic_backend']=={
-            'sqlstate':'XX000','error':'assertion failed: item_pointer_is_valid(ctid)'}
+        for plan in ('force_generic_plan','fresh_generic_backend'):
+            assert isinstance(value[plan],list), (
+                f'{plan} at {step} is not rows but {value[plan]!r} — if this is the '
+                'item_pointer_is_valid assertion, the engine has lost the ctid patch')
+        assert value['force_generic_plan']==value['fresh_generic_backend']
         assert value['force_custom_plan']==value['fresh_backend']==clean
     if mode=='observed':
         for step in ('after_insert','after_delete'):

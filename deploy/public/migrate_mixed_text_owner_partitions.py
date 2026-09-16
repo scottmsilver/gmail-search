@@ -8,10 +8,18 @@ against its live rows. Phase two requires the patched pg_search build; an
 unpatched engine asserts on a stale ctid once a retained leaf is reindexed and
 searched (docs/qualification/retained-reader-root-cause.md).
 
-Synthetic rehearsal only: no production DSN override and no credential
-publication. The injected fence inspects an already durable external fence;
-releasing that inspection must never re-enable writers/services. Administrators
-remain trusted.
+Where it may run is declared, never inferred: the default target is the
+disposable rehearsal fixture, and production is a separate target with its own
+conditions (`migrate_text_owner_partitions._require_apply_target` —
+`GMS_MIGRATION_TARGET`, a cluster confirmation read off the target, a named
+verified backup, and a local connection). Production relaxes *which database*
+and nothing else; every preflight, ACL, bound, lock and ancestry check still
+runs, and the pinned `(database, oid, system_identifier)` is re-checked on
+every fresh connection.
+
+No credential publication. The injected fence inspects an already durable
+external fence; releasing that inspection must never re-enable writers or
+services. Administrators remain trusted.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass

@@ -38,16 +38,29 @@ This is the track that decides whether "multi-user safe" is a claim we can make.
   anything; the only residue worth doing is bounding the unbounded wait in
   `test_inflight_owner_revocation_closes_connection`, which turns any early
   failure into a hang.
-- **A2. Finish the caller inventory.** Three of ten items done. Remaining: the
-  SQL examples handed to the model still name `search_id`; the owner-qualified
-  call sites; and the **TEXT installer** — fresh installs currently build the
-  numeric shape while live is TEXT, a divergence the profile binding now states
-  out loud instead of hiding.
-- **A3. Give the migration scripts a production mode.** They refuse any DSN that
-  is not port 55440 on a disposable database — deliberately. Production needs an
-  explicit, separately guarded path, not a deleted check.
+- **A2. Finish the caller inventory. Done 2026-09-16** except the gateway
+  composition rows. Landed: the **TEXT installer** (`pg_schema.sql` fences
+  profile-only DDL, `_read_pg_schema()` selects, `_init_db_pg` applies that same
+  text — fresh installs now match live); the model-facing SQL examples in
+  `db.py`, `server.py`, `analyst.py` and `mcp_tools_server.py` render from
+  `selected_bm25_key()`; and admission now **requires** an explicit partition
+  profile instead of silently defaulting to NUMERIC.
+  Two further defects surfaced while doing it and are fixed:
+  `observed_shape()` reported an empty database as the TEXT shape, so a database
+  with no `messages` table passed verification; and a worker-manager test was
+  umask-dependent, failing under `umask 0077` for the environment rather than
+  the code.
+- **A3. Production mode for the migration scripts. Done 2026-09-16.**
+  `GMS_MIGRATION_TARGET` declares where an apply may run, defaulting to the
+  rehearsal fixture. `production` additionally requires a local connection,
+  `GMS_MIGRATION_CONFIRM` matching `<database>:<system identifier>` read off the
+  target cluster, and `GMS_MIGRATION_BACKUP` naming an existing verified backup.
+  It relaxes *which database* and nothing else. The confirmation token cannot be
+  written into a runbook in advance and cannot be replayed against another
+  cluster, so a copy-pasted command fails closed.
 
-Unattended. Depends on nothing. **Start here.**
+Track A is otherwise clear. What remains is the gateway composition rows of the
+inventory, which are Track C work rather than Track A.
 
 ### Track B — Migrate the live schema
 
@@ -127,6 +140,15 @@ gateway is not on the live read path today.
 
 ## What I would do next
 
-A2 and A3 — finish the caller inventory and give the migration scripts a
-production mode. A1 is withdrawn: the failure that made it urgent was my test
-cluster, not the code.
+A2 and A3 are done. **B1** — take a fresh verified backup — is now the next
+unattended step, and B2/B3 need your go-ahead for a window.
+
+Before B2, one correction to carry forward: the "1189 passed, 0 failed" figure
+recorded on 2026-09-16 does not reproduce. A bounded per-file sweep on the same
+patched cluster with trust auth finds pre-existing failures, at least one of
+which is a real defect committed in `0a7e3c9` —
+`tests/test_browser_mail.py` passes `attachment_source=` to a `BrowserMail`
+constructor that does not accept it. See
+[gate zero](../../qualification/gate-zero-preexisting-failures-2026-09-16.md)
+for the corrected accounting. It does not block the migration; it does mean the
+suite is not the clean baseline that document claimed.

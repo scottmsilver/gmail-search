@@ -13,6 +13,7 @@ from gmail_search.auth import require_user_id
 from gmail_search.search.engine import SearchEngine
 from gmail_search.store.cost import check_budget, get_total_spend
 from gmail_search.store.db import _pg_dsn, get_connection
+from gmail_search.store.schema_profile import selected_bm25_key
 from gmail_search.store.queries import (
     extract_attachment_on_demand,
     get_attachments_for_message,
@@ -252,7 +253,8 @@ def _bm25_required_error(column: str) -> str:
     tool call after this error should be a correct BM25 query — no
     re-prompting needed."""
     table = "attachments" if column in ("filename", "extracted_text") else "messages"
-    key = "id" if table == "attachments" else "search_id"
+    key = selected_bm25_key(table)
+    messages_key = selected_bm25_key("messages")
     return (
         f"`{column} LIKE/ILIKE '%...%'` is rejected — it forces a seq scan on "
         f"the {table} table. Use the ParadeDB BM25 index instead "
@@ -260,9 +262,9 @@ def _bm25_required_error(column: str) -> str:
         f"  WHERE {column} ILIKE '%foo%'\n"
         f"    →  WHERE {key} @@@ '{column}:foo'\n"
         f"  WHERE from_addr LIKE '%delta%' AND subject LIKE '%credit%'\n"
-        f"    →  WHERE search_id @@@ 'from_addr:delta AND subject:credit'\n"
+        f"    →  WHERE {messages_key} @@@ 'from_addr:delta AND subject:credit'\n"
         f"  WHERE body_text LIKE '%refund issued%'  (multi-word phrase)\n"
-        f"    →  WHERE search_id @@@ 'body_text:\"refund issued\"'\n"
+        f"    →  WHERE {messages_key} @@@ 'body_text:\"refund issued\"'\n"
         f"Add `ORDER BY paradedb.score({key}) DESC` for relevance ranking. "
         f"Escape hatch: include `@@@` anywhere (e.g. a `{key} @@@ '...'` "
         f"prefilter) and the LIKE check is skipped — use that only when "
@@ -2625,10 +2627,11 @@ def create_app(
             "  -- correct (joins keep the scope):\n"
             "  SELECT m.subject FROM messages m\n"
             "    JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id\n"
-            "   WHERE m.user_id = '" + user_id + "' AND m.search_id @@@ 'subject:invoice';\n\n"
+            "   WHERE m.user_id = '" + user_id + "' AND m."
+            + selected_bm25_key() + " @@@ 'subject:invoice';\n\n"
             "---\n\n"
             "## Performance (write FAST SQL)\n\n"
-            "BM25 search (`search_id @@@ 'field:term'` on messages) is fast even across the whole\n"
+            "BM25 search (`" + selected_bm25_key() + " @@@ 'field:term'` on messages) is fast even across the whole\n"
             "mailbox. What's slow is **per-row text processing over `body_text`**\n"
             "(`regexp_replace`, `~*`, `substring`, `split_part`) — bodies are large\n"
             "HTML, and a broad match is tens of thousands of rows, so this blows the\n"

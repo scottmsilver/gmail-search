@@ -11,6 +11,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from .database import ReaderCredential
+from .partition_profiles import require_profile
 from .partitions import provision_owner_partitions
 from .provision import provision_reader
 from .provision_writer import provision_application_writer
@@ -34,9 +35,21 @@ def bind_existing_subject(conn, owner_id, identity):
 
 
 class AdmissionProvisioner:
-    def __init__(self, administrator_connection, *, runtime_dsn, install_credentials):
+    """Admits one account: partitions, roles and credentials, in one commit.
+
+    `partition_profile` has no default on purpose. It decides the message key
+    and index definition every partition this service creates is built with, and
+    a caller that forgot to pass it used to get the NUMERIC shape silently —
+    while the live database is TEXT. Admission is the one place that choice must
+    be stated out loud, because a partition provisioned in the wrong shape is
+    not something a later reader can work around.
+    """
+
+    def __init__(self, administrator_connection, *, runtime_dsn, install_credentials,
+                 partition_profile):
         self._connect = administrator_connection
         self._install = install_credentials
+        self._partition_profile = require_profile(partition_profile)
         try:
             self._runtime = conninfo_to_dict(runtime_dsn)
         except Exception:
@@ -69,7 +82,7 @@ class AdmissionProvisioner:
                             raise ValueError('Canonical identity binding rejected')
                         # Account, all searchable partitions, and role rotation commit
                         # together before any credentials become available to runtime.
-                        provision_owner_partitions(conn, account.owner_id)
+                        provision_owner_partitions(conn, account.owner_id, profile=self._partition_profile)
                         reader_password, writer_password = secrets.token_urlsafe(48), secrets.token_urlsafe(48)
                         reader = provision_reader(conn, account.owner_id, reader_password)
                         writer = provision_application_writer(conn, account.owner_id, writer_password)

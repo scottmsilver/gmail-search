@@ -7,12 +7,69 @@ is blocked; see the [preserved evidence](qualification/retained-reader-maintenan
 
 ## Fixed scope
 
-Every opened administrator connection must identify both its configured host and
-actual peer as `127.0.0.1:55440`, with a database name beginning
-`gms_owner_partitions_test_`. It also requires PostgreSQL16/pg_search0.23.0 and a
-direct database-owning superuser without role members. There is no live override.
-Database name/OID and cluster system identifier are pinned when capturing the
-plan and checked on every new connection.
+Where an apply may run is **declared, never inferred**, and the default is the
+rehearsal fixture. It also requires PostgreSQL16/pg_search0.23.0 and a direct
+database-owning superuser without role members. Database name/OID and cluster
+system identifier are pinned when capturing the plan and checked on every new
+connection.
+
+| `GMS_MIGRATION_TARGET` | Additional conditions |
+| --- | --- |
+| unset / `disposable` (default) | Configured host and actual peer both `127.0.0.1:55440`, database name beginning `gms_owner_partitions_test_` |
+| `production` | A marker written into the target; `GMS_MIGRATION_CONFIRM` equal to `<database>:<system identifier>:<marker nonce>` read off the target; `GMS_MIGRATION_BACKUP` naming a non-empty backup; a connection that does not plainly name a remote host |
+
+Production relaxes *which database* and nothing else — every preflight, ACL,
+bound, collation, lock and ancestry check still runs, and the pinned database
+identity is still re-checked on every fresh connection.
+
+### The marker, and why the obvious token was not enough
+
+The first design used `<database>:<system identifier>` on the reasoning that a
+system identifier is unique per cluster. **That reasoning was wrong.**
+`system_identifier` is issued at `initdb` and then copied *verbatim* by every
+physical copy — `pg_basebackup`, streaming replication, PITR, a filesystem or VM
+snapshot. That is exactly why `pg_rewind` uses it to prove two clusters share
+ancestry. Database names and OIDs survive a physical restore too.
+
+Measured on this project's own data, 2026-09-16:
+
+| | `system_identifier` |
+| --- | ---: |
+| Live cluster | `7630921061527392295` |
+| `data/pg-backup-16.13-20260916` (a cold copy of it) | `7630921061527392295` |
+
+So production and a restore of production present a **byte-identical** token —
+and holding both at once is the normal state immediately after taking the backup
+this tool insists on. An operator with two tunnels up could read the token off
+the restore and apply it to production.
+
+The marker closes that. Immediately before the apply, and *after* the backup:
+
+```sql
+COMMENT ON DATABASE <db> IS 'gms-migration-target:<32+ hex chars>';
+```
+
+A copy taken before that write does not carry it, so a stale restore cannot
+satisfy a token minted for production. Generate the nonce fresh each time. This
+is not a cryptographic control and does not defend against a copy taken *after*
+the marker is written; it defends against the mistake, which is the threat.
+
+### What the locality check does and does not prove
+
+It refuses a DSN that plainly names a remote host. That is all. An `ssh -L`,
+socat or pgbouncer on `127.0.0.1` makes a remote cluster look local, and a
+forwarded Unix socket is indistinguishable from a real one. It catches
+`host=prod.example.com` typed by mistake and nothing subtler — the marker is the
+control. Note also that IPv6 loopback spellings are *rejected* rather than
+accepted, which is a gap on the safe side; do not close it by loosening the check.
+
+Likewise `GMS_MIGRATION_BACKUP` checks that a path exists and is non-empty. It
+is a prompt to go and take a backup, not evidence that one restores.
+
+This replaces the earlier "there is no live override", which was true and was
+also why the tool could not perform the migration it exists for. The guard was
+not deleted; a second, narrower one was added beside it
+(`tests/test_migration_apply_target.py`, 14 tests).
 
 The source is the same frozen legacy TEXT schema accepted by the
 [single-owner mechanism](gateway-text-owner-partition-migration.md). The trusted

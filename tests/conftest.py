@@ -123,12 +123,11 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
 
     monkeypatch.setenv("DB_BACKEND", "postgres")
     monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(schema_name))
-    # Declare the shape `pg_schema.sql` actually installs. A fresh install adds
-    # `search_id` and keys BM25 on it (the NUMERIC profile); live has neither and
-    # keys on `id`. `store/schema_profile.py` verifies the declared shape at
-    # connect and must never guess, so the divergence is stated here rather than
-    # silently tolerated. Closing it is the TEXT installer the caller inventory
-    # still owes.
+    # The suite as a whole runs on the NUMERIC shape: the gateway search-reader
+    # fixtures and `migrate_owner_partitions.py` are written against it. Since
+    # the profile fences landed this is a *choice* rather than the only thing
+    # `pg_schema.sql` can install — a test that wants the live TEXT shape sets
+    # the variable itself and gets it (see `test_fresh_install_matches_profile`).
     monkeypatch.setenv("GMS_SCHEMA_PROFILE", "numeric-key-v1")
 
     # Multi-tenant Phase 2/3: every per-user table requires a non-NULL

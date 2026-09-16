@@ -9,6 +9,7 @@ import pytest
 from gmail_search.auth.identity_store import Account, VerifiedGoogleIdentity
 from gmail_search.gateway.admission_provision import AdmissionProvisioner
 from gmail_search.gateway.database import reader_role
+from gmail_search.gateway.partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 as NUMERIC
 from gmail_search.gateway.writer import application_writer_role
 from gmail_search.gateway.schema import ANALYTICAL_SCHEMA
 from gmail_search.gateway.provision_writer import _COLUMNS, _SEQUENCES
@@ -67,7 +68,7 @@ def admission(dsn, owner, installer):
     config = conninfo_to_dict(dsn)
     config.pop('user',None)
     config.pop('password',None)
-    provision = AdmissionProvisioner(lambda: psycopg.connect(dsn), runtime_dsn=make_conninfo(**config), install_credentials=installer)
+    provision = AdmissionProvisioner(lambda: psycopg.connect(dsn), runtime_dsn=make_conninfo(**config), install_credentials=installer, partition_profile=NUMERIC)
     account = Account(owner, owner+'@example.test',1)
     identity = VerifiedGoogleIdentity(account.email, 'google-'+owner, True)
     return lambda: provision(account,identity)
