@@ -20,3 +20,20 @@
 - Display :1 is i3 via CRD+VNC. Emulators use :98 via `~/scripts/start-emulator.sh`.
 - Gemini API key is in `GEMINI_API_KEY` env var (not `GOOGLE_API_KEY`).
 - The project uses a formatter that may strip unused imports. Use `# noqa` comments or inline imports for imports the formatter strips.
+
+## Tests you are waiting on
+
+When you notice you are *bound by tests* — waiting on a suite, re-running it,
+or pacing your work around it — stop and make it efficient before continuing.
+A slow suite silently taxes every later decision, and a hanging one can burn
+hours (it has).
+
+- Share expensive setup. `init_db` builds BM25 indexes; per-test setup made one
+  file take 241s that a module-scoped fixture brought to 2s. If you share a
+  connection, commit the seed and roll back between tests so one test's error
+  cannot poison the next.
+- Never run a suite that can hang without a bound. Wrap it in `timeout`, or run
+  per-file so one wedge cannot swallow the run. `$?` after a pipe is the pipe's
+  status, not the command's — capture it properly or the timeout goes unnoticed.
+- Prefer the targeted file over the sweep while iterating; run the sweep to
+  check for regressions, against a recorded baseline you can diff.
