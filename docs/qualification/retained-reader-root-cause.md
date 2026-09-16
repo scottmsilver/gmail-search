@@ -101,6 +101,28 @@ definition in `gateway/partitions.py` — but together they establish the causal
 path beyond doubt. Both settings were reverted; the baseline was re-verified at
 6 failed / 7 passed afterwards.
 
+## The patch is the cause of the fix — controlled 2026-09-16
+
+The original evidence left one cell untested and filled it by reading source.
+That inference is now a measurement. All four rows use the same reproducer, the
+same cluster configuration (trust auth, port 55440, `--shm-size=1g`) and the
+same Dockerfile:
+
+| Engine | Reproducer | `item_pointer_is_valid` assertions |
+| --- | --- | ---: |
+| PG 16.13 + pg_search 0.23.0 | 6 failed, 7 passed | present |
+| PG 16.15 + pg_search 0.25.9 | 6 failed | present |
+| **PG 16.15 + pg_search 0.23.0, unpatched** | **6 failed, 7 passed** | **6** |
+| **PG 16.15 + pg_search 0.23.0, patched** | **13 passed** | **0** |
+
+The last two rows differ only by the two-line change in `fetch_tuple`. The
+control image is `paradedb-control:0.23.0-unpatched`, built from the same
+Dockerfile with the patch reverted (verified absent in the source before
+building). PostgreSQL 16.15 alone does not fix it; the patch does.
+
+This matters because the patched engine now serves the live database, and
+"the patch fixed it" was previously an argument rather than an observation.
+
 ## Upstream status
 
 Current `main` still computes `blockno` before testing the guard. A related but

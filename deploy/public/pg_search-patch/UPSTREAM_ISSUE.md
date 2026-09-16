@@ -78,7 +78,7 @@ Reproduced identically on:
 - pg_search **0.23.0**, PostgreSQL 16.13 (`paradedb/paradedb:latest-pg16`, built 2026-04-16)
 - pg_search **0.25.9**, PostgreSQL 16.15 (`paradedb/paradedb:latest-pg16`, built 2026-09-11)
 
-The ordering is unchanged on `main` as of `85d6ca06`.
+The ordering is unchanged on `main` (verified against raw.githubusercontent.com: v0.23.0 line 323, v0.25.9 line 502, main line 521 — identical bodies).
 
 ## Conditions
 
@@ -112,6 +112,22 @@ rebuild the conditions from scratch in plain SQL did not trip it, so some part o
 the history that produces a zero-offset ctid is not yet captured. I am happy to
 share the full reproducer, or to run any instrumented build against the setup
 that does fail reliably.
+
+## You already use the safe form elsewhere
+
+`main` has a newer sibling in the same file, `exec_if_visible`, which derives the
+block number without the asserting accessor:
+
+```rust
+let blockno = (ctid >> 16) as pg_sys::BlockNumber;
+if blockno >= self.nblocks {
+    self.invisible_tuple_count += 1;
+    return None;
+}
+```
+
+That path cannot panic on an invalid ctid. `fetch_tuple` simply never got the
+same treatment, and it is the one the heap-filter path calls.
 
 ## Suggested fix
 
