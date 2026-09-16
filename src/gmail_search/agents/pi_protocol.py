@@ -158,6 +158,8 @@ def build_pi_argv(
     builtin_tools: bool = True,
     mcp_config_path: str | None = None,
     tmpdir: str | None = None,
+    runtime_env: dict[str, str] | None = None,
+    skill_paths: list[str] | None = None,
 ) -> list[str]:
     """argv for one turn. Secrets are NOT here — the service token and
     provider key live in the container's own environment.
@@ -183,6 +185,7 @@ def build_pi_argv(
         "-i",
         "-e",
         f"GMS_SESSION_ID={session_id}",
+        *[part for key, value in (runtime_env or {}).items() for part in ("-e", f"{key}={value}")],
         *_tmpdir_flags(tmpdir),
         "-w",
         f"/workspaces/{workspace}",
@@ -194,6 +197,7 @@ def build_pi_argv(
         *_builtin_tools_flags(builtin_tools),
         "-e",
         extension_path,
+        *[part for path in (skill_paths or []) for part in ("--skill", path)],
         *_mcp_config_flags(mcp_config_path),
         *_session_flags(session_path),
         "--model",

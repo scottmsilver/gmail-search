@@ -1,0 +1,9 @@
+tunnel: cb9237c8-2a7e-4ebc-be6c-50404f430862
+credentials-file: /home/ssilver/.cloudflared/cb9237c8-2a7e-4ebc-be6c-50404f430862.json
+ingress:
+  - hostname: gms.oursilverfamily.com
+    service: http://127.0.0.1:3001
+    originRequest:
+      connectTimeout: 10s
+      httpHostHeader: gms.oursilverfamily.com
+  - service: http_status:404

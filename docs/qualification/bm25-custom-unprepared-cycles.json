@@ -1,0 +1,4234 @@
+{
+  "synthetic_only": true,
+  "profiles": {
+    "message_text": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391939,
+          3391939,
+          3391942,
+          3391942,
+          8192,
+          3391946,
+          3391946,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "57d2d30d",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8539ae28",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8539ae28",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.01612234697677195,
+        "cluster_wal_bytes": 35552
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8539ae28",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.02025426202453673,
+        "cluster_wal_bytes": 41584
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391956,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8539ae28",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391977,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391949,
+          3391949,
+          3391952,
+          3391952,
+          16384,
+          3391956,
+          3391978,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1866b0b4",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "custom_unprepared_cycles": {
+        "baseline": {
+          "rows": [
+            {
+              "owner_id": "alice",
+              "id": "owner3",
+              "message_id": "owner3",
+              "score": 1.5697745
+            },
+            {
+              "owner_id": "alice",
+              "id": "owner1",
+              "message_id": "owner1",
+              "score": 1.1926777
+            },
+            {
+              "owner_id": "alice",
+              "id": "owner2",
+              "message_id": "owner2",
+              "score": 1.0674466
+            }
+          ],
+          "direct": [
+            [
+              "alice",
+              "owner3",
+              "owner3",
+              1.5697745
+            ],
+            [
+              "alice",
+              "owner1",
+              "owner1",
+              1.1926777
+            ],
+            [
+              "alice",
+              "owner2",
+              "owner2",
+              1.0674466
+            ]
+          ],
+          "seconds": 0.012952121905982494
+        },
+        "cycles": [
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "cycle0",
+                  "message_id": "cycle0",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  "cycle0",
+                  "cycle0",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.018829183070920408
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.02168581390287727
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.01915911794640124
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.014940991066396236
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.025427874061279
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02168650703970343
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "cycle1",
+                  "message_id": "cycle1",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  "cycle1",
+                  "cycle1",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.02244588697794825
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.016692217090167105
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.023515728069469333
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.019455436035059392
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.030889822985045612
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02288842899724841
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "cycle2",
+                  "message_id": "cycle2",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  "cycle2",
+                  "cycle2",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.014965389971621335
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.016144989989697933
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.015449288999661803
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.016003402997739613
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.015036446042358875
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": "owner3",
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner1",
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": "owner2",
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  "owner3",
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  "owner1",
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  "owner2",
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02213015698362142
+            }
+          }
+        ]
+      }
+    },
+    "message_numeric": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391987,
+          3391987,
+          3391990,
+          3391990,
+          8192,
+          3391994,
+          3391994,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "2a93a58c",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8d808d74",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8d808d74",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.016681218054145575,
+        "cluster_wal_bytes": 38072
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8d808d74",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.014611006947234273,
+        "cluster_wal_bytes": 38504
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392004,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "8d808d74",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392025,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3391997,
+          3391997,
+          3392000,
+          3392000,
+          16384,
+          3392004,
+          3392026,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "617352f9",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "custom_unprepared_cycles": {
+        "baseline": {
+          "rows": [
+            {
+              "owner_id": "alice",
+              "id": 3,
+              "message_id": "owner3",
+              "score": 1.5697745
+            },
+            {
+              "owner_id": "alice",
+              "id": 1,
+              "message_id": "owner1",
+              "score": 1.1926777
+            },
+            {
+              "owner_id": "alice",
+              "id": 2,
+              "message_id": "owner2",
+              "score": 1.0674466
+            }
+          ],
+          "direct": [
+            [
+              "alice",
+              3,
+              "owner3",
+              1.5697745
+            ],
+            [
+              "alice",
+              1,
+              "owner1",
+              1.1926777
+            ],
+            [
+              "alice",
+              2,
+              "owner2",
+              1.0674466
+            ]
+          ],
+          "seconds": 0.00853830308187753
+        },
+        "cycles": [
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 900,
+                  "message_id": "cycle0",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  900,
+                  "cycle0",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.016224974999204278
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.015739406924694777
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.027423407998867333
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02135730697773397
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.021663969033397734
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02331633190624416
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 901,
+                  "message_id": "cycle1",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  901,
+                  "cycle1",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.01971983106341213
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.020945798023603857
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.022057538968510926
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.024927082005888224
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.016330179991200566
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.01493687299080193
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 902,
+                  "message_id": "cycle2",
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  902,
+                  "cycle2",
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.01675676100421697
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.016752969939261675
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.020160657004453242
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.022758099948987365
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.020187797024846077
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": "owner3",
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": "owner1",
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": "owner2",
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  "owner3",
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  "owner1",
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  "owner2",
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.018284581950865686
+            }
+          }
+        ]
+      }
+    },
+    "attachment": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392035,
+          3392035,
+          3392038,
+          3392038,
+          8192,
+          3392042,
+          3392042,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "3747f036",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7b59f51f",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7b59f51f",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.02795782301109284,
+        "cluster_wal_bytes": 35344
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7b59f51f",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.018728922004811466,
+        "cluster_wal_bytes": 38144
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392052,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7b59f51f",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392073,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3392045,
+          3392045,
+          3392048,
+          3392048,
+          16384,
+          3392052,
+          3392074,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "04017fa9",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "custom_unprepared_cycles": {
+        "baseline": {
+          "rows": [
+            {
+              "owner_id": "alice",
+              "id": 3,
+              "message_id": null,
+              "score": 1.5697745
+            },
+            {
+              "owner_id": "alice",
+              "id": 1,
+              "message_id": null,
+              "score": 1.1926777
+            },
+            {
+              "owner_id": "alice",
+              "id": 2,
+              "message_id": null,
+              "score": 1.0674466
+            }
+          ],
+          "direct": [
+            [
+              "alice",
+              3,
+              null,
+              1.5697745
+            ],
+            [
+              "alice",
+              1,
+              null,
+              1.1926777
+            ],
+            [
+              "alice",
+              2,
+              null,
+              1.0674466
+            ]
+          ],
+          "seconds": 0.008049274096265435
+        },
+        "cycles": [
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 900,
+                  "message_id": null,
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  900,
+                  null,
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.01770850899629295
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.018514010007493198
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02759300300385803
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.02611208299640566
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.020055933040566742
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.018101291032508016
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 901,
+                  "message_id": null,
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  901,
+                  null,
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.02531028096564114
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.02400560909882188
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.023154355003498495
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.016415346995927393
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.016320709022693336
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.022945421980693936
+            }
+          },
+          {
+            "insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5179627
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3282974
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 0.91214794
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 902,
+                  "message_id": null,
+                  "score": 0.7411202
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5179627
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3282974
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  0.91214794
+                ],
+                [
+                  "alice",
+                  902,
+                  null,
+                  0.7411202
+                ]
+              ],
+              "seconds": 0.01996418193448335
+            },
+            "delete": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.8312013
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.4694518
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.3185544
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.8312013
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.4694518
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.3185544
+                ]
+              ],
+              "seconds": 0.026009013992734253
+            },
+            "vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.017182643990963697
+            },
+            "foreign_insert": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.016753065981902182
+            },
+            "foreign_update": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.01556047098711133
+            },
+            "foreign_delete_vacuum": {
+              "rows": [
+                {
+                  "owner_id": "alice",
+                  "id": 3,
+                  "message_id": null,
+                  "score": 1.5697745
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 1,
+                  "message_id": null,
+                  "score": 1.1926777
+                },
+                {
+                  "owner_id": "alice",
+                  "id": 2,
+                  "message_id": null,
+                  "score": 1.0674466
+                }
+              ],
+              "direct": [
+                [
+                  "alice",
+                  3,
+                  null,
+                  1.5697745
+                ],
+                [
+                  "alice",
+                  1,
+                  null,
+                  1.1926777
+                ],
+                [
+                  "alice",
+                  2,
+                  null,
+                  1.0674466
+                ]
+              ],
+              "seconds": 0.017405346035957336
+            }
+          }
+        ]
+      }
+    }
+  },
+  "object_fields": [
+    "heap_oid",
+    "heap_relfilenode",
+    "toast_oid",
+    "toast_relfilenode",
+    "heap_bytes",
+    "bm25_oid",
+    "bm25_relfilenode",
+    "bm25_main_bytes"
+  ],
+  "version": [
+    "PostgreSQL 16.13 (Debian 16.13-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "0.23.0"
+  ]
+}

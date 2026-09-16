@@ -1,3 +1,4 @@
+import os
 import uuid
 
 import pytest
@@ -30,23 +31,24 @@ def test_config(tmp_path, data_dir):
 # `options=-csearch_path=...` query param so every connection opened by
 # `get_connection()` automatically lands in that schema. Teardown drops
 # the schema with CASCADE. If the server isn't reachable on
-# 127.0.0.1:5544 the whole fixture skips (i.e. any test using it is
+# the explicit GMS_TEST_PG_DSN is unset the fixture skips (i.e. any test using it is
 # skipped) so `pytest` still exits cleanly on dev machines that haven't
 # brought up the paradedb container.
 
-_PG_BASE_DSN = "postgresql://gmail_search:gmail_search@127.0.0.1:5544/gmail_search"
+_PG_BASE_DSN = os.environ.get("GMS_TEST_PG_DSN", "")
 
 
 def _pg_server_reachable() -> bool:
     """Cheap TCP probe so we skip PG tests cleanly on dev machines
     that haven't started the docker compose stack. Full psycopg dial
     would also work but prints a scary traceback on skip."""
-    import socket
-
+    if not _PG_BASE_DSN:
+        return False
+    import psycopg
     try:
-        with socket.create_connection(("127.0.0.1", 5544), timeout=0.5):
+        with psycopg.connect(_PG_BASE_DSN, connect_timeout=2):
             return True
-    except OSError:
+    except psycopg.OperationalError:
         return False
 
 
@@ -85,7 +87,11 @@ def _pg_dsn_for_schema(schema_name: str) -> str:
     # thread_summary to 25 GB / 68M dead tuples. 60s self-terminates any such
     # zombie. (The database-level default is a looser 10min for app code.)
     # %20 = space between -c options, %3D = '='.
-    return f"{_PG_BASE_DSN}?options=-csearch_path%3D{schema_name}" f"%20-cidle_in_transaction_session_timeout%3D60000"
+    from psycopg.conninfo import make_conninfo
+    return make_conninfo(
+        _PG_BASE_DSN,
+        options=f"-csearch_path={schema_name},public -cidle_in_transaction_session_timeout=60000",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +123,13 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
 
     monkeypatch.setenv("DB_BACKEND", "postgres")
     monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(schema_name))
+    # Declare the shape `pg_schema.sql` actually installs. A fresh install adds
+    # `search_id` and keys BM25 on it (the NUMERIC profile); live has neither and
+    # keys on `id`. `store/schema_profile.py` verifies the declared shape at
+    # connect and must never guess, so the divergence is stated here rather than
+    # silently tolerated. Closing it is the TEXT installer the caller inventory
+    # still owes.
+    monkeypatch.setenv("GMS_SCHEMA_PROFILE", "numeric-key-v1")
 
     # Multi-tenant Phase 2/3: every per-user table requires a non-NULL
     # user_id and `resolve_write_user_id` looks up `users` by email.
@@ -174,7 +187,7 @@ def db_backend(_isolated_pg_schema, tmp_path):
     `_isolated_pg_schema`); teardown drops it.
     """
     if _isolated_pg_schema is None:
-        pytest.skip("Postgres not reachable at 127.0.0.1:5544 — run `docker compose up pg` to enable")
+        pytest.skip("Set GMS_TEST_PG_DSN to a disposable PostgreSQL instance to enable database tests")
 
     # db_path is ignored, but we still pass one for API compatibility
     # with the existing (db_path) call sites.

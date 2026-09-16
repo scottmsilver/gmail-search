@@ -1,0 +1,18 @@
+[Unit]
+Description=Private gateway transport to the dedicated Gmail Search worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Install as a user unit under the trusted public API service identity.
+# worker-host must resolve only to the separately enrolled dedicated worker.
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -p 22 -o BatchMode=yes -o IdentitiesOnly=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%h/.config/gmail-search/worker-known-hosts -o IdentityFile=%h/.config/gmail-search/worker-tunnel-key -o IdentityAgent=none -o ProxyCommand=none -o ProxyJump=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=2 -o ConnectTimeout=5 -R 127.0.0.1:18081:127.0.0.1:8092 gmail-gateway-tunnel@worker-host
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+LimitCORE=0
+
+[Install]
+WantedBy=default.target

@@ -42,14 +42,6 @@ Retrieval tool signatures (use these EXACT arg names):
                order_by: str = "date_desc", limit: int = 20)
     Metadata filter. `sender` is a substring match on From:
     (e.g. "@dartmouth.edu").
-  sql_query(query: str)
-    Read-only SELECT for aggregations (COUNT, GROUP BY) and
-    cross-field queries. Main tables: messages(id, thread_id,
-    from_addr, to_addr, subject, body_text, date, labels),
-    attachments(id, message_id, filename, mime_type, extracted_text),
-    message_summaries(message_id, summary, model, created_at),
-    thread_summary(thread_id, subject, participants,
-    message_count, date_first, date_last).
   get_thread(thread_id: str)
     Full thread bodies. Call AFTER search/query when snippets
     aren't enough.
@@ -58,10 +50,9 @@ Rules:
 - Keep retrieval to 1-3 steps; the Retriever can re-plan if the
   first round is thin.
 - Keep analysis to 0-3 steps; 0 is the RIGHT answer when the question
-  is purely factual and a search/SQL result answers it directly.
-- For COUNT / AGGREGATION questions (e.g. "how many X") prefer
-  `sql_query` over `query_emails` — it returns the number, not a
-  list you have to len().
+  is purely factual and a search result answers it directly.
+- Arbitrary SQL and direct database connections are unavailable. Plan only
+  the documented retrieval tools; do not infer exact totals from partial results.
 - NEVER invent argument names. Use ONLY the names in the
   signatures above.
 - The plan is advisory for downstream agents, not binding. They
@@ -75,28 +66,21 @@ BUDGET AWARENESS (important for large questions):
   clipped.
 - The Analyst has a FULL PYTHON SANDBOX with:
   * pandas `evidence` DataFrame pre-seeded
-  * read-only psycopg `db` connection to Postgres
   * writable `/work/` filesystem (tmpfs, 64MB scratch)
   * `save_artifact(name, obj)` to persist plots/CSVs/text as
     addressable artifacts the Writer can cite as `[art:N]`
 - When the question touches potentially LARGE data (thousands of
   messages, long date ranges, full-body analysis), plan a
   STAGED approach:
-  1. retrieval step: run a targeted `sql_query` that writes the
-     raw rows to the Analyst's expectation. Keep the SELECT narrow
-     (only the columns needed) so the row count × char-per-row
-     stays small.
-  2. analysis step: use the sandbox to (a) materialise the full
-     result via `db.execute(...)` + `pd.read_sql` or equivalent,
-     (b) compute the answer incrementally (`for chunk in
-     pd.read_sql(..., chunksize=1000)`), (c) save intermediate
-     CSVs to `/work/` if needed, (d) `print` ONLY a compact
-     summary (counts, key statistics, top-N) for the Writer.
+  1. retrieval step: use structured search/query tools with narrow filters.
+  2. analysis step: compute on the retrieved evidence, save intermediate
+     CSVs to `/work/` if needed, and print a compact summary
+     (counts, key statistics, top-N) for the Writer.
 - The point: the Analyst can read/chunk/summarise gigabytes
   locally and only the `print()` output plus artifact_ids flow
   back upstream. Use this when the question would otherwise
   drown the Writer in raw rows.
-- For small questions (a few threads, a clear SELECT), the
+- For small questions (a few threads, a clear search result), the
   naive single-prompt flow is faster and cheaper. Pick deliberately.
 
 - Output ONLY the JSON object. No prose, no markdown fences.

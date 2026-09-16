@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { AssistantChatTransport, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 
+import { useAuth } from "@/components/AuthContext";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { SyncProgressCard } from "@/components/SyncProgressCard";
 import { ThemeEffect } from "@/components/ThemeEffect";
@@ -18,6 +19,10 @@ import {
   setChatSettings,
   subscribeChatSettings,
 } from "@/lib/chatSettings";
+
+import { stopAgentRun, type AgentRun } from "@/lib/agentRunControl";
+
+import { workerChatHistory } from "@/lib/workerChatHistory";
 
 const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "";
 
@@ -39,6 +44,11 @@ const newConversationId = () =>
     .join("");
 
 export default function Page() {
+  const { publicMode, fullWorkerMode } = useAuth();
+  const fullWorkerModeRef = useRef(fullWorkerMode);
+  fullWorkerModeRef.current = fullWorkerMode;
+  const publicModeRef = useRef(publicMode);
+  publicModeRef.current = publicMode;
   const router = useRouter();
   const params = useSearchParams();
   const urlC = params.get("c");
@@ -69,23 +79,62 @@ export default function Page() {
     () =>
       new AssistantChatTransport({
         api: "/api/chat",
+        prepareSendMessagesRequest: options => ({body: {
+          ...options.body, id: options.id, trigger: options.trigger, messageId: options.messageId,
+          messages: fullWorkerModeRef.current ? workerChatHistory(options.messages) : options.messages,
+          metadata: options.requestMetadata,
+        }}),
         body: () => {
           const s = getChatSettings();
           return {
-            model: s.model,
-            thinkingLevel: s.thinkingLevel,
-            battle: s.battleMode,
-            deep: s.deepMode,
-            deep_backend: s.deepBackend,
+            model: publicModeRef.current ? undefined : s.model,
+            battle: publicModeRef.current ? false : s.battleMode,
+            deep_backend: publicModeRef.current ? "pi" : s.deepBackend,
             conversation_id: conversationIdRef.current,
           };
         },
       }),
     [],
   );
-  const runtime = useChatRuntime({ transport });
+  const [activeRuns, setActiveRuns] = useState<Record<string, AgentRun>>({});
+  const activeRun = conversationId ? activeRuns[conversationId] ?? null : null;
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
+  const runtime = useChatRuntime({ transport,
+    onData: part => {
+      if (part.type === "data-agent-run-finished") {
+        const runId = (part.data as {runId?: unknown})?.runId;
+        setActiveRuns(current => Object.fromEntries(
+          Object.entries(current).filter(([,run]) => run.runId !== runId)));
+        return;
+      }
+      if (part.type !== "data-agent-run") return;
+      const data = part.data as Partial<AgentRun>;
+      if (typeof data.runId === "string" && typeof data.conversationId === "string") {
+        const run = {runId: data.runId, conversationId: data.conversationId};
+        setActiveRuns(current => ({...current, [run.conversationId]: run}));
+        setStopError(null);
+      }
+    },
+  });
   const runtimeRef = useRef(runtime);
   runtimeRef.current = runtime;
+
+  const stopWorker = async () => {
+    if (!activeRun || stopping) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      await stopAgentRun(activeRun);
+      if (activeRun.conversationId === conversationIdRef.current) runtimeRef.current.thread.cancelRun();
+      setActiveRuns(current => Object.fromEntries(
+        Object.entries(current).filter(([,run]) => run.runId !== activeRun.runId)));
+    } catch {
+      setStopError("Stopping is not confirmed. Please retry Stop.");
+    } finally {
+      setStopping(false);
+    }
+  };
 
   // Load persisted messages when switching conversations.
   const loadedId = useRef<string | null>(null);
@@ -150,7 +199,8 @@ export default function Page() {
         <div className="flex-1 min-h-0">
           <AssistantRuntimeProvider runtime={runtime}>
             <ThreadDrawerProvider>
-              <Thread />
+              <Thread onStop={activeRun?.conversationId === conversationId ? stopWorker : undefined}
+                stopping={stopping} stopError={stopError} />
               <DrawerHost />
             </ThreadDrawerProvider>
           </AssistantRuntimeProvider>

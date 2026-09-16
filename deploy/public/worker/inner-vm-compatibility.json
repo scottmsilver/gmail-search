@@ -1,0 +1,44 @@
+{
+  "status": "synthetic-only passed",
+  "runtime_image_sha256": "0546f3aad681b012a1b44b90ac6f18188a6e25419220806e6a7a6ed4245bb32a",
+  "vmm": {
+    "vcpus": 1,
+    "host_memory_max": 1073741824,
+    "swap_max": 0,
+    "host_pids_max": 128,
+    "cpu_max": "100000 100000",
+    "uid": 65534,
+    "seccomp": 2,
+    "network_interfaces": 0,
+    "root_drive_readonly": true,
+    "runtime_drive_readonly": true,
+    "workspace": "guest tmpfs /tmp, size256MiB"
+  },
+  "transport": "guest loopback HTTP to AF_VSOCK CID2 ports8000/8001 to bounded fixed-route outer relay and synthetic provider",
+  "results": [
+    {
+      "runtime": "pi",
+      "returncode": 0,
+      "file": "42",
+      "completion": true,
+      "artifact_status": 201,
+      "artifact_receipt": {
+        "id": "201abf08014348eca17367ef95de7894",
+        "size": 2,
+        "sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049"
+      }
+    },
+    {
+      "runtime": "claude",
+      "returncode": 0,
+      "file": "42",
+      "completion": true,
+      "artifact_status": 201,
+      "artifact_receipt": {
+        "id": "c1c2a661858d4a769bf1ce38fad068c9",
+        "size": 2,
+        "sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049"
+      }
+    }
+  ]
+}

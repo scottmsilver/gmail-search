@@ -29,6 +29,8 @@ export type AuthUser = {
 
 export type AuthContextValue = {
   multiTenant: boolean;
+  publicMode?: boolean;
+  fullWorkerMode?: boolean;
   user: AuthUser | null;
   signOut: () => Promise<void>;
 };

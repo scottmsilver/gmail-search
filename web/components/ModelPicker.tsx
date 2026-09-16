@@ -1,12 +1,11 @@
 "use client";
 
+import { useAuth } from "./AuthContext";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import {
   availableModelsFor,
-  THINKING_LEVELS,
   type DeepBackend,
-  type ThinkingLevel,
 } from "@/lib/config";
 import {
   getChatSettings,
@@ -22,13 +21,9 @@ const useChatSettings = (): ChatSettings =>
   useSyncExternalStore(subscribeChatSettings, getChatSettings, getServerChatSettings);
 
 const SHORT_NAME: Record<string, string> = {
-  "gemini-3.1-pro-preview": "3.1 Pro",
-  "gemini-3.1-flash-lite-preview": "3.1 Flash Lite",
-  "gemini-3-pro-preview": "3 Pro",
-  "gemini-3-flash-preview": "3 Flash",
-  "gemini-2.5-pro": "2.5 Pro",
-  "gemini-2.5-flash": "2.5 Flash",
-  "gemini-2.5-flash-lite": "2.5 Flash Lite",
+  "openrouter/meta/muse-spark-1.3": "Muse Spark 1.3 (OpenRouter)",
+  "google/gemini-3.8-flash": "Gemini 3.8 Flash (Google)",
+  "anthropic/claude-opus-5": "Claude Opus 5 (Anthropic)",
   sonnet: "Sonnet",
   opus: "Opus",
   haiku: "Haiku",
@@ -38,6 +33,7 @@ const SHORT_NAME: Record<string, string> = {
 const shortModel = (m: string) => SHORT_NAME[m] ?? m;
 
 export const ModelPicker = () => {
+  const { publicMode } = useAuth();
   const settings = useChatSettings();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -59,13 +55,14 @@ export const ModelPicker = () => {
     };
   }, [open]);
 
+  if (publicMode) return <span className="text-xs text-muted-foreground" title="Gemini searches your Gmail archive with retrieval tools. Shell execution and model battles are unavailable.">Gemini · Gmail retrieval only</span>;
+
   const battleOn = settings.battleMode;
-  const deepOn = settings.deepMode;
   const deepBackend = settings.deepBackend;
   const modelOptions = availableModelsFor(deepBackend);
   const triggerLabel = battleOn
-    ? "⚔ battle mode"
-    : `${shortModel(settings.model)} · ${settings.thinkingLevel}`;
+    ? "⚔ deep analysis battle"
+    : `${deepBackend} · ${shortModel(settings.model)}`;
 
   const switchDeepBackend = (next: DeepBackend) => {
     const nextModels = availableModelsFor(next);
@@ -82,7 +79,7 @@ export const ModelPicker = () => {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="text-[11px] text-neutral-400 hover:text-neutral-700 font-mono px-1.5 py-0.5 rounded hover:bg-neutral-100 transition-colors whitespace-nowrap"
-        title="Change model / thinking / battle"
+        title="Change analysis backend, model, or battle mode"
       >
         {triggerLabel} <span className="ml-0.5 opacity-60">▾</span>
       </button>
@@ -107,69 +104,13 @@ export const ModelPicker = () => {
             </select>
           </div>
 
-          <div className={battleOn ? "opacity-40 pointer-events-none" : ""}>
-            <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
-              Thinking
-            </div>
-            <div className="flex items-center gap-0.5 rounded-full bg-neutral-100 p-0.5">
-              {THINKING_LEVELS.map((level) => (
-                <button
-                  key={level}
-                  type="button"
-                  disabled={battleOn}
-                  onClick={() => setChatSettings({ thinkingLevel: level as ThinkingLevel })}
-                  className={
-                    level === settings.thinkingLevel
-                      ? "flex-1 px-2 py-0.5 rounded-full bg-white text-neutral-900 font-medium shadow-sm"
-                      : "flex-1 px-2 py-0.5 rounded-full text-neutral-500 hover:text-neutral-800"
-                  }
-                >
-                  {level}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
-              Deep analysis
-            </div>
-            <button
-              type="button"
-              onClick={() => setChatSettings({ deepMode: !deepOn })}
-              className={
-                deepOn
-                  ? "w-full rounded bg-purple-700 text-white px-2 py-1 font-medium hover:bg-purple-600"
-                  : "w-full rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
-              }
-              title={
-                deepOn
-                  ? "Next message runs the multi-agent pipeline (planner → retriever → analyst → writer → critic). Slower + spends real $."
-                  : "Use the single-agent chat path (fast, cheap)."
-              }
-            >
-              🔬 {deepOn ? "on — multi-agent with Python sandbox" : "off — single agent"}
-            </button>
-          </div>
-
-          {deepOn && (
+          {(
             <div>
               <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
                 Deep backend
               </div>
               <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => switchDeepBackend("adk")}
-                  className={
-                    deepBackend === "adk"
-                      ? "flex-1 rounded bg-neutral-700 text-white px-2 py-1 font-medium hover:bg-neutral-600"
-                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
-                  }
-                  title="ADK pipeline: Gemini planner → retriever → analyst → writer → critic. Python sandbox."
-                >
-                  ADK
-                </button>
+
                 <button
                   type="button"
                   onClick={() => switchDeepBackend("claude_code")}
@@ -182,18 +123,7 @@ export const ModelPicker = () => {
                 >
                   Claude Code
                 </button>
-                <button
-                  type="button"
-                  onClick={() => switchDeepBackend("claude_native")}
-                  className={
-                    deepBackend === "claude_native"
-                      ? "flex-1 rounded bg-purple-700 text-white px-2 py-1 font-medium hover:bg-purple-600"
-                      : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
-                  }
-                  title="Claude Native: single Claude agent with all MCP tools, no orchestrator. Faster, cheaper."
-                >
-                  Claude Native
-                </button>
+
                 <button
                   type="button"
                   onClick={() => switchDeepBackend("pi")}
@@ -202,7 +132,7 @@ export const ModelPicker = () => {
                       ? "flex-1 rounded bg-teal-700 text-white px-2 py-1 font-medium hover:bg-teal-600"
                       : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
                   }
-                  title="Pi harness: single agent in the pi-sandbox container, billed per token via the provider set in GMAIL_PI_MODEL. Model picker does not apply."
+                  title="Pi: single agent using the selected model."
                 >
                   Pi
                 </button>
@@ -212,7 +142,7 @@ export const ModelPicker = () => {
 
           <div>
             <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
-              Battle mode
+              Deep analysis battle
             </div>
             <button
               type="button"
@@ -223,7 +153,7 @@ export const ModelPicker = () => {
                   : "w-full rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
               }
             >
-              ⚔ {battleOn ? "on — two random variants per question" : "off — single model"}
+              ⚔ {battleOn ? "on — two independent deep analyses" : "off — one deep analysis"}
             </button>
           </div>
 

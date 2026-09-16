@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 // Initial-sync progress for the signed-in user. Cookie-forwarded so
 // FastAPI's `require_user_id` resolves the session user.
 import { NextRequest, NextResponse } from "next/server";
@@ -7,7 +8,7 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const cookie = req.headers.get("cookie") ?? "";
   const upstream = await fetch(`${pythonApiUrl()}/api/users/me/sync-status`, {
     cache: "no-store",
@@ -19,3 +20,5 @@ export async function GET(req: NextRequest) {
     headers: { "Content-Type": upstream.headers.get("content-type") ?? "application/json" },
   });
 }
+
+export const GET = publicRoute(handleGET);

@@ -1,0 +1,27 @@
+{
+  "format": "sha256-tree-v1",
+  "qualified_image_sha256": "478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc",
+  "provenance": "Fingerprints derived from a fresh extraction of the SHA256-verified qualified public image; independently matched the retained image staging tree. Covers content, membership, paths, file types, executable modes and internal symlink targets. Ownership and write permissions are enforced separately by the builder.",
+  "trees": {
+    "bin": {
+      "sha256": "2802f46cfeca807c562afc998cb3183cbc59390b55b76eff2e5dcb79f148b88b",
+      "entries": 3
+    },
+    "lib": {
+      "sha256": "f832850d8df0dbc6818c0a8018f47cc3431c57a7133e7a5c2becedbd975234a5",
+      "entries": 13825
+    },
+    "node_modules": {
+      "sha256": "9b5c4846f52fb8c5541a841fb1883f3e1cdc47c35b29912b62812d1c4efc0c18",
+      "entries": 41984
+    },
+    "package.json": {
+      "sha256": "a2d139f0539ea785c26d7e224740c1c3fbeef5623f5ae60b6b6e8201530e6041",
+      "entries": 1
+    },
+    "package-lock.json": {
+      "sha256": "0d4508d9309aa1686153481f98cbd4355a2ad045aa850d86ba89b1280c3d7038",
+      "entries": 1
+    }
+  }
+}

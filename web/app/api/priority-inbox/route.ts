@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { pythonApiUrl } from "@/lib/config";
@@ -5,7 +6,7 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const url = new URL(`${pythonApiUrl()}/api/priority-inbox`);
   for (const [k, v] of req.nextUrl.searchParams.entries()) {
     url.searchParams.set(k, v);
@@ -23,3 +24,5 @@ export async function GET(req: NextRequest) {
     },
   });
 }
+
+export const GET = publicRoute(handleGET);

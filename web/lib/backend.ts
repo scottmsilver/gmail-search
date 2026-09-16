@@ -175,6 +175,7 @@ export type ThreadMessage = {
   to_addr: string;
   subject: string;
   body_text: string;
+  body_text_truncated?: boolean;
   // Raw HTML body (may be empty). Thread drawer falls back to this
   // when body_text is blank — a LOT of transactional / marketing
   // email is HTML-only and stores nothing in the text/plain part.
@@ -186,6 +187,7 @@ export type ThreadMessage = {
 
 export type ThreadDetail = {
   thread_id: string;
+  complete?: boolean;
   messages: ThreadMessage[];
 };
 

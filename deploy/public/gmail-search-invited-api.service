@@ -1,0 +1,30 @@
+[Unit]
+Description=Gmail Search invited API and private worker gateway
+After=network-online.target
+Wants=network-online.target
+Conflicts=gmail-search-public-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/gmail-search/invited-current
+Environment=PYTHONPATH=%h/.local/share/gmail-search/invited-current/api/src
+Environment=GMS_INVITED_CONFIG=%h/.config/gmail-search/invited-runtime.json
+Environment=WEB_CONCURRENCY=1 OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=2
+EnvironmentFile=%h/.config/gmail-search/invited-auth.env
+ExecStart=%h/.local/share/gmail-search/invited-current/venv/bin/python -m gmail_search.invited_server
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+LimitNOFILE=4096
+TasksMax=1024
+CPUQuota=400%
+MemoryMax=16G
+TimeoutStopSec=240
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

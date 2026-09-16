@@ -126,7 +126,9 @@ const AssistantMessage = () => (
   </MessagePrimitive.Root>
 );
 
-const Composer = () => (
+type StopControls = {onStop?: () => Promise<void>; stopping?: boolean; stopError?: string | null};
+
+const Composer = ({onStop, stopping, stopError}: StopControls) => (
   <ComposerPrimitive.Root className="px-4 sm:px-6 md:px-8 pb-3 pt-1 bg-white">
     <CorpusStatus />
     {/* Below sm the model-picker label ("3.1 Flash Lite · high ▾") eats
@@ -155,7 +157,7 @@ const Composer = () => (
           {SEND_ICON}
         </ComposerPrimitive.Send>
       </ThreadPrimitive.If>
-      <ThreadPrimitive.If running>
+      {!onStop && <ThreadPrimitive.If running>
         <ComposerPrimitive.Cancel
           aria-label="Stop"
           title="Stop generating"
@@ -163,12 +165,18 @@ const Composer = () => (
         >
           {WORKING_ICON}
         </ComposerPrimitive.Cancel>
-      </ThreadPrimitive.If>
+      </ThreadPrimitive.If>}
+      {onStop && <button type="button" onClick={() => void onStop()} disabled={stopping}
+        aria-label={stopping ? "Stopping" : "Stop"} title={stopping ? "Waiting for worker to stop" : "Stop generating"}
+        className="self-end w-7 h-7 flex items-center justify-center disabled:opacity-40">
+        {WORKING_ICON}
+      </button>}
     </div>
+    {stopError && <p role="alert" className="text-sm text-red-700 mt-2">{stopError}</p>}
   </ComposerPrimitive.Root>
 );
 
-export const Thread = () => (
+export const Thread = (controls: StopControls = {}) => (
   <ThreadPrimitive.Root className="flex flex-col h-full w-full max-w-5xl mx-auto bg-white">
     <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
       <ThreadPrimitive.Empty>
@@ -180,6 +188,6 @@ export const Thread = () => (
       <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
     </ThreadPrimitive.Viewport>
 
-    <Composer />
+    <Composer {...controls} />
   </ThreadPrimitive.Root>
 );

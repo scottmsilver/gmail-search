@@ -1,0 +1,184 @@
+{
+  "profile": "synthetic-only actual SSH/private-Unix/nested Firecracker attachment parser",
+  "image_sha256": "89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068",
+  "checks": {
+    "actual_ssh_stop": true,
+    "service_result_and_stop": {
+      "text": "SYNTHETIC ATTACHMENT 42\n",
+      "pages": 1,
+      "dimensions": [
+        417,
+        417
+      ],
+      "stop_ack": true,
+      "inventory_empty": true,
+      "calls": [
+        {
+          "op": "start",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "poll",
+          "status": "done",
+          "code": "ok"
+        },
+        {
+          "op": "stop",
+          "status": "stopped",
+          "code": "ok"
+        }
+      ]
+    },
+    "midrun_capability_revocation": {
+      "observed_live_vmm": true,
+      "output_suppressed": true,
+      "stop_ack": true,
+      "inventory_empty": true,
+      "calls": [
+        {
+          "op": "start",
+          "status": "running",
+          "code": "ok"
+        },
+        {
+          "op": "stop",
+          "status": "stopped",
+          "code": "ok"
+        }
+      ]
+    },
+    "stop_tombstone_and_context_binding": true,
+    "traffic_loss_and_frozen_manager": {
+      "no_polls": true,
+      "manager_sigstopped": true,
+      "independent_supervisor_reaped": true,
+      "inventory_empty": true,
+      "checked_after_seconds": 4.23
+    },
+    "ssh_command_denied": {
+      "exit": 1,
+      "stdout_bytes": 0,
+      "stderr": "Could not chdir to home directory /nonexistent: No such file or directory\n"
+    },
+    "ssh_sudo_denied": {
+      "exit": 1,
+      "stdout_bytes": 0,
+      "stderr": "Could not chdir to home directory /nonexistent: No such file or directory\n"
+    },
+    "ssh_pty_denied": {
+      "exit": 255,
+      "stderr": "PTY allocation request failed on channel 0\r\n"
+    },
+    "ssh_sftp_denied": {
+      "exit": 1,
+      "stdout_bytes": 0,
+      "stderr": ""
+    },
+    "ssh_forwarding_denied": {
+      "exit": 255,
+      "stderr": "channel 0: open failed: administratively prohibited: open failed\r\nstdio forwarding failed\r\n"
+    },
+    "final_inventory_empty": true,
+    "arbitrary_command_with_valid_frame_ignored": {
+      "exit": 0,
+      "rpc_stop_ack": true
+    },
+    "actual_restart_reconciliation": {
+      "manager_killed_with_live_vmm": true,
+      "new_manager_reaped_inventory": true,
+      "old_start_fails_closed": true,
+      "stop_ack": true
+    },
+    "actual_idempotent_start_and_renewal_replay": {
+      "same_job_one_vmm": true,
+      "fresh_request_id_retry": true,
+      "replayed_seq_rejected": true
+    },
+    "arbitrary_command_marker_absent": true
+  },
+  "worker_configuration": {
+    "effective_sshd": {
+      "maxsessions": "1",
+      "passwordauthentication": "no",
+      "kbdinteractiveauthentication": "no",
+      "permittty": "no",
+      "permituserrc": "no",
+      "allowtcpforwarding": "no",
+      "allowagentforwarding": "no",
+      "disableforwarding": "yes",
+      "allowstreamlocalforwarding": "no",
+      "forcecommand": "/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I /opt/gmail-worker/attachment_rpc_frontend.py",
+      "authorizedkeysfile": "/etc/ssh/authorized_keys/gmail-attachment-rpc",
+      "authenticationmethods": "publickey",
+      "permittunnel": "no",
+      "permituserenvironment": "no"
+    },
+    "installed_code_sha256": {
+      "attachment_rpc.py": "66bbfa8a1e7268d7cfbff2b883e355fe9063b4b2f69607a47b4a6cd745b8d7a4",
+      "attachment_manager.py": "8042db0d5e022f86cfbb1c12b504837108bfd3eb72480f9e64d0829bd9ebf473",
+      "attachment_rpc_frontend.py": "9a039a0eab18169b90e7124e77c501769556e3587cfc67ed217376da78676cdb",
+      "attachment_backend.py": "09db9adf142c73e1665fbcebe2e4b45710755bcc7b87e3cc7cb2564fc6a91109",
+      "firecracker_backend.py": "079115ff1420ec6f57b11c4a704ee0c0aeea8b639780bb4c3c06a148422f448c"
+    },
+    "permissions": {
+      "/var/lib/gmail-attachment-rpc": "0o700",
+      "/var/lib/gmail-attachment-rpc/jobs.sqlite": "0o600",
+      "/run/gmail-attachment-rpc": "0o750",
+      "/run/gmail-attachment-rpc/manager.sock": "0o660"
+    },
+    "frontend_uid": 999,
+    "frontend_gids": [
+      994
+    ],
+    "manager_stopped": true,
+    "inventory_empty": true,
+    "socket_removed": true
+  },
+  "service_private_key_location": "mailhost private assets only; never copied to outer or inner VM",
+  "remaining_constraints": [
+    "Synthetic-execution-worker hostname and root-only guard remain mandatory.",
+    "No production services/routes or mailbox ingestion enabled.",
+    "Installed code, images, root state and SSH account restrictions remain trusted administrator configuration.",
+    "Host capability reauthorization is required before every renewing poll.",
+    "Tombstone quota has no automatic eviction.",
+    "SSHD frontend process admission needs deployment-specific global limits; manager handles are bounded to four.",
+    "Production worker operational admission, recovery and deployment review remain outstanding."
+  ],
+  "outer_powered_off": true
+}

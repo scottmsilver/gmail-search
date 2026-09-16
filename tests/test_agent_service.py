@@ -12,6 +12,7 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 
 from gmail_search.agents import service
@@ -328,9 +329,10 @@ def test_real_run_claude_native_routes_to_native_run(monkeypatch, tmp_path):
     assert call["has_cost_sink"] is True
 
 
-def test_real_run_pi_backend_routes_to_pi_run(monkeypatch, tmp_path):
+@pytest.mark.parametrize("selected_model", [None, "openrouter/meta/muse-spark-1.3"])
+def test_real_run_pi_backend_routes_to_pi_run(monkeypatch, tmp_path, selected_model):
     """backend="pi" must ensure the workspace, call pi_run with the
-    turn's kwargs (model=None so runtime_pi picks GMAIL_PI_MODEL),
+    turn's selected model (or None for the configured default),
     skip the claudebox credential preflight, and never build the
     orchestrator."""
     import asyncio
@@ -387,7 +389,7 @@ def test_real_run_pi_backend_routes_to_pi_run(monkeypatch, tmp_path):
             tmp_path / "x.db",
             "sess-PI",
             "what happened",
-            default_model="opus",
+            default_model=selected_model,
             backend="pi",
             conversation_id="conv-9",
             user_id="u1",
@@ -403,7 +405,7 @@ def test_real_run_pi_backend_routes_to_pi_run(monkeypatch, tmp_path):
             "workspace": "deep-conv-conv-9",
             "conversation_id": "conv-9",
             "question": "what happened",
-            "model": None,
+            "model": selected_model,
             "has_cost_sink": True,
             "user_id": "u1",
         }
@@ -638,3 +640,20 @@ def test_pi_cost_sink_forwards_cache_counts_to_the_ledger(monkeypatch, tmp_path)
     assert captured.get("cache_read_tokens") == 3_483_568
     assert captured.get("cache_write_tokens") == 17
     assert captured.get("input_tokens") == 759_360
+
+
+def test_history_includes_both_deep_battle_answers():
+    import json
+
+    parts = [{"type": "data-battle", "data": {"answer_a": "First finding", "answer_b": "Second finding"}}]
+    text = service._extract_text_from_parts_json(json.dumps(parts))
+    assert "First finding" in text
+    assert "Second finding" in text
+
+
+@pytest.mark.parametrize("backend", ["adk", "claude_native"])
+def test_removed_backends_rejected_at_api_boundary(backend):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        service.AnalyzeRequest(question="q", backend=backend)

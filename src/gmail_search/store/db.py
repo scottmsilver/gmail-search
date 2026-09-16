@@ -23,7 +23,7 @@ def _read_pg_schema() -> str:
 TABLE_DOCS: dict[str, str] = {
     "messages": (
         "One row per email message. Primary content store. ~410k rows.\n"
-        "- id (TEXT PK): Gmail message ID. Use as cite_ref source via thread_id.\n"
+        "- id (TEXT, unique within user_id): Gmail message ID. Use as cite_ref source via thread_id.\n"
         "- thread_id (TEXT): Gmail thread this message belongs to.\n"
         "- from_addr (TEXT): 'Name <email>' format. For sender or domain matching, prefer BM25 (below) over LIKE.\n"
         "  BM25 keeps a domain as ONE token including its TLD: `from_addr:landmarkswest.com` matches, `from_addr:landmarkswest` does not.\n"
@@ -37,19 +37,19 @@ TABLE_DOCS: dict[str, str] = {
         "\n"
         "FAST FREE-TEXT SEARCH — use BM25, NOT `LIKE '%...%'`:\n"
         "  `messages_bm25_idx` covers (subject, body_text, from_addr, to_addr).\n"
-        "  Syntax: `WHERE id @@@ '<tantivy-query>'`. Tantivy uses `field:term`,\n"
+        "  Syntax: `WHERE search_id @@@ '<tantivy-query>'`. Tantivy uses `field:term`,\n"
         "  combinable with AND / OR / NOT and parentheses. Order by\n"
-        "  `paradedb.score(id) DESC` for relevance ranking.\n"
+        "  `paradedb.score(search_id) DESC` for relevance ranking.\n"
         "  Examples:\n"
         "    -- Sender + subject keyword:\n"
         "    SELECT id, subject FROM messages\n"
-        "    WHERE id @@@ 'from_addr:delta AND subject:cancel'\n"
-        "    ORDER BY paradedb.score(id) DESC LIMIT 50;\n"
+        "    WHERE search_id @@@ 'from_addr:delta AND subject:cancel'\n"
+        "    ORDER BY paradedb.score(search_id) DESC LIMIT 50;\n"
         "    -- Multi-field OR (any of these fields contains 'invoice'):\n"
         "    SELECT id FROM messages\n"
-        "    WHERE id @@@ 'subject:invoice OR body_text:invoice';\n"
+        "    WHERE search_id @@@ 'subject:invoice OR body_text:invoice';\n"
         "    -- Exact phrase in body_text:\n"
-        "    SELECT id FROM messages WHERE id @@@ 'body_text:\"refund issued\"';\n"
+        "    SELECT id FROM messages WHERE search_id @@@ 'body_text:\"refund issued\"';\n"
         "  `LIKE '%term%'` cannot use this index and forces a full seq scan\n"
         "  (~1s/query on 410k rows). Use LIKE only when BM25 can't express\n"
         "  the predicate (e.g. structural patterns inside `labels` JSON)."
@@ -113,6 +113,28 @@ TABLE_DOCS: dict[str, str] = {
         "- summary (TEXT): the actual summary.\n"
         "- model (TEXT): which model produced it (e.g. 'qwen2.5:7b').\n"
         "- created_at (TEXT)."
+    ),
+    "propositions": (
+        "LLM-extracted atomic facts from email. One message can produce multiple rows.\n"
+        "- id (BIGSERIAL PK): fact row ID.\n"
+        "- user_id (TEXT): mailbox owner; scope queries and joins to the active user.\n"
+        "- message_id (TEXT): source messages.id; join on message_id AND user_id.\n"
+        "- thread_id (TEXT): source thread for citation and verification.\n"
+        "- text (TEXT): self-contained extracted fact; verify against the source email.\n"
+        "- model (TEXT): stored model/version tag (embedding model plus propositionizer version).\n"
+        "- date (TEXT): source message date.\n"
+        "- created_at (TIMESTAMPTZ): extraction timestamp.\n"
+        "- embedding (BYTEA): binary vector; select explicit columns to avoid returning it.\n"
+        "Use SQL for inspection, counts, joins, and keyword search. For semantic retrieval, use find_facts.\n"
+        "BM25 index props_bm25_idx covers text: `WHERE id @@@ 'text:invoice'`.\n"
+        "Extraction coverage may be incomplete; missing facts do not imply missing emails."
+    ),
+    "prop_processed": (
+        "One marker per successfully processed message, including messages that yielded zero facts.\n"
+        "- user_id (TEXT), message_id (TEXT): composite primary key.\n"
+        "Join to messages or propositions on BOTH user_id and message_id.\n"
+        "Use for extraction coverage: a marker means processing succeeded, not that facts were found.\n"
+        "An absent marker means the message has not been successfully processed."
     ),
     "summary_failures": (
         "Messages where the summarizer currently fails. Row written on each failure,\n"
@@ -200,11 +222,6 @@ _INTERNAL_TABLES = {
     # MCP OAuth provider state (hashed token/code rows + client regs).
     # Auth infrastructure — the LLM must never query it.
     "mcp_oauth_state",
-    # Propositions (find_facts): LLM-extracted fact rows + idempotency
-    # marker. Served through the dedicated find_facts tool; the analyst
-    # reader role has no grant on them.
-    "propositions",
-    "prop_processed",
 }
 
 _SCHEMA_TABLE_RE = re.compile(
@@ -386,39 +403,23 @@ def rebuild_thread_summary(db_path: Path, *, user_id: Optional[str] = None) -> i
 
 
 def _load_message_embeddings(conn, limit=50000, *, user_id: Optional[str] = None):
-    """Load message embeddings with metadata for clustering. Per-user
-    when `user_id` is given (the normal call path); otherwise loads
-    everything across users (legacy / dev-only)."""
-
+    """Load one owner's message embeddings and metadata for clustering."""
     import numpy as np
+    from gmail_search.auth.write_user import resolve_write_user_id
 
-    # Smart sampling: UNIFORM across the whole corpus via a stable hash of
-    # message_id (not most-recent-N, which would skew the topic tree toward
-    # recent themes). Representative across all years + deterministic.
-    # k = ceil(total/limit); k=1 keeps everything for small corpora.
-    if user_id is None:
-        total = conn.execute("SELECT COUNT(*) FROM embeddings WHERE chunk_type = 'message'").fetchone()[0]
-        k = max(1, -(-total // limit))
-        rows = conn.execute(
-            """SELECT e.message_id, e.embedding, m.subject, m.from_addr
-               FROM embeddings e JOIN messages m ON e.message_id = m.id
-               WHERE e.chunk_type = 'message' AND abs(hashtext(e.message_id)) %% %s = 0
-               LIMIT %s""",
-            (k, limit),
-        ).fetchall()
-    else:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM embeddings WHERE chunk_type = 'message' AND user_id = %s",
-            (user_id,),
-        ).fetchone()[0]
-        k = max(1, -(-total // limit))
-        rows = conn.execute(
-            """SELECT e.message_id, e.embedding, m.subject, m.from_addr
-               FROM embeddings e JOIN messages m ON e.message_id = m.id
-               WHERE e.chunk_type = 'message' AND e.user_id = %s AND abs(hashtext(e.message_id)) %% %s = 0
-               LIMIT %s""",
-            (user_id, k, limit),
-        ).fetchall()
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM embeddings WHERE chunk_type = 'message' AND user_id = %s",
+        (user_id,),
+    ).fetchone()[0]
+    k = max(1, -(-total // limit))
+    rows = conn.execute(
+        """SELECT e.message_id, e.embedding, m.subject, m.from_addr
+           FROM embeddings e JOIN messages m ON e.message_id = m.id AND e.user_id = m.user_id
+           WHERE e.chunk_type = 'message' AND e.user_id = %s AND abs(hashtext(e.message_id)) %% %s = 0
+           LIMIT %s""",
+        (user_id, k, limit),
+    ).fetchall()
 
     # Build the matrix via np.frombuffer into a preallocated array.
     # `list(struct.unpack("3072f", ...))` materialized 3072 Python float
@@ -911,7 +912,7 @@ def rebuild_term_aliases(
         _params = (uid, last_eid) + ((max_embedding_id, 5000) if max_embedding_id is not None else (5000,))
         rows = conn.execute(
             "SELECT e.id AS eid, m.subject, m.body_text, m.from_addr "
-            "FROM embeddings e JOIN messages m ON e.message_id = m.id "
+            "FROM embeddings e JOIN messages m ON e.message_id = m.id AND e.user_id = m.user_id "
             "WHERE e.chunk_type = 'message' AND e.user_id = %s AND e.id > %s" + _cap_sql + " "
             "ORDER BY e.id LIMIT %s",
             _params,
@@ -1203,7 +1204,7 @@ def rebuild_spell_dictionary(
         params = (uid, last_eid) + ((max_embedding_id, 5000) if max_embedding_id is not None else (5000,))
         rows = conn.execute(
             "SELECT e.id AS eid, m.subject, m.body_text "
-            "FROM embeddings e JOIN messages m ON e.message_id = m.id "
+            "FROM embeddings e JOIN messages m ON e.message_id = m.id AND e.user_id = m.user_id "
             "WHERE e.chunk_type = 'message' AND e.user_id = %s AND e.id > %s" + cap_sql + " "
             "ORDER BY e.id LIMIT %s",
             params,
@@ -1422,6 +1423,22 @@ class JobProgress:
         return [dict(r) for r in rows]
 
 
+    @staticmethod
+    def get_for_user(db_path: Path, user_id: str) -> list[dict]:
+        """Return only jobs whose canonical ID names this tenant exactly."""
+        # IDs are <stage>:<user_id>. Legacy unowned/global rows are excluded.
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM job_progress WHERE split_part(job_id, ':', 2) = %s "
+                "AND job_id NOT LIKE '%%:%%:%%' ORDER BY updated_at DESC LIMIT 10",
+                (user_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+
 def reap_stale_jobs(conn, staleness_seconds: int = 600) -> int:
     """Mark any `running` job whose updated_at is older than the
     threshold as `stopped`.
@@ -1595,7 +1612,28 @@ def _connect_pg():
             with raw.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {ms}")
             raw.autocommit = False
-    return _PgConnWrapper(raw)
+    wrapper = _PgConnWrapper(raw)
+    _bind_schema_profile(wrapper)
+    return wrapper
+
+
+def _bind_schema_profile(wrapper) -> None:
+    """Carry the configured schema shape on the connection, verified once.
+
+    The selection comes from configuration, never from sniffing the catalog —
+    see `store/schema_profile.py`. Verification is cached per DSN per process so
+    the ~60 call sites that open and close connections freely do not each pay a
+    catalog query. Set `GMS_SKIP_SCHEMA_PROFILE_CHECK=1` for bootstrap paths
+    that run before the mailbox tables exist, such as `init_db`.
+    """
+    import os as _os
+
+    from gmail_search.store import schema_profile as _schema_profile
+
+    wrapper.profile = _schema_profile.selected_profile()
+    if _os.environ.get("GMS_SKIP_SCHEMA_PROFILE_CHECK"):
+        return
+    _schema_profile.verify(wrapper, wrapper.profile, cache_key=_pg_dsn())
 
 
 class _PgCursorWrapper:
@@ -1666,6 +1704,10 @@ class _PgConnWrapper:
 
     def cursor(self):
         return _PgCursorWrapper(self._raw.cursor())
+
+    def transaction(self):
+        """Preserve psycopg transaction/savepoint semantics for compound writes."""
+        return self._raw.transaction()
 
     def commit(self):
         self._raw.commit()

@@ -125,8 +125,8 @@ def fake_db(db_backend):
     init_db(db_path)
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO messages (id, thread_id, from_addr, to_addr, date) "
-        "VALUES ('m1', 't1', 'a@x.com', 'b@x.com', '2026-01-01T00:00:00+00:00')"
+        "INSERT INTO messages (user_id, id, thread_id, from_addr, to_addr, date) "
+        "VALUES ('u_test_bootstrap', 'm1', 't1', 'a@x.com', 'b@x.com', '2026-01-01T00:00:00+00:00')"
     )
     conn.commit()
     conn.close()
@@ -140,10 +140,10 @@ def test_readonly_connection_rejects_write_even_if_gate_bypassed(fake_db):
     """
     import psycopg
 
-    with pytest.raises(psycopg.Error):
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
         _run_sql_with_timeout(
             fake_db,
-            "INSERT INTO messages (id, thread_id, from_addr, to_addr, date) VALUES ('x','t','a','b','2026-01-01T00:00:00+00:00')",
+            "INSERT INTO messages (user_id, id, thread_id, from_addr, to_addr, date) VALUES ('u_test_bootstrap','x','t','a','b','2026-01-01T00:00:00+00:00')",
         )
 
 
@@ -153,13 +153,48 @@ def test_readonly_select_works(fake_db):
     assert out["rows"][0][0] == "m1"
 
 
+@pytest.mark.parametrize("table", ["propositions", "prop_processed"])
+def test_fact_table_reader_access_is_user_scoped(db_backend, table):
+    import psycopg
+    from psycopg import sql
+
+    from gmail_search.store.db import _pg_dsn
+
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    with psycopg.connect(_pg_dsn()) as conn:
+        # Production grants schema usage on public; tests use a private schema.
+        conn.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO gmail_search_reader").format(
+                sql.Identifier(db_backend["schema"])
+            )
+        )
+        for owner in ("facts-a", "facts-b"):
+            conn.execute("INSERT INTO users(id,email) VALUES(%s,%s)", (owner, owner + '@example.test'))
+            conn.execute("INSERT INTO messages(user_id,id,thread_id,from_addr,to_addr,date) VALUES(%s,'shared-message','thread','from@example.test','to@example.test','2026-01-01')", (owner,))
+            conn.execute(
+                "INSERT INTO propositions (user_id, message_id, text, model) VALUES (%s, %s, %s, 'test')",
+                (owner, "shared-message", f"Fact for {owner}"),
+            )
+            conn.execute(
+                "INSERT INTO prop_processed (user_id, message_id) VALUES (%s, 'shared-message')",
+                (owner,),
+            )
+
+    for owner in ("facts-a", "facts-b", "facts-empty"):
+        # Deliberately omit WHERE: database RLS must enforce the boundary.
+        result = _run_sql_with_timeout(db_path, f"SELECT user_id, message_id FROM {table}", user_id=owner)
+        expected = [] if owner == "facts-empty" else [[owner, "shared-message"]]
+        assert result["rows"] == expected
+
+
 def test_row_cap_enforced(fake_db):
     """Stuff in a few hundred rows and confirm we cap at SQL_MAX_ROWS=500."""
     conn = get_connection(fake_db)
     for i in range(700):
         conn.execute(
-            "INSERT INTO messages (id, thread_id, from_addr, to_addr, date) "
-            "VALUES (%s, %s, 'a', 'b', '2026-01-01T00:00:00+00:00')",
+            "INSERT INTO messages (user_id, id, thread_id, from_addr, to_addr, date) "
+            "VALUES ('u_test_bootstrap', %s, %s, 'a', 'b', '2026-01-01T00:00:00+00:00')",
             (f"m{i:04d}", f"t{i:04d}"),
         )
     conn.commit()

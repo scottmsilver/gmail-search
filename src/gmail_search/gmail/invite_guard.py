@@ -446,7 +446,7 @@ def should_skip_all_link_crawl(msg: Message, att_metas: list[dict]) -> tuple[boo
     return _classify_and_decide(msg)
 
 
-def skip_link_crawl_cached(conn, msg: Message, att_metas: list[dict]) -> bool:
+def skip_link_crawl_cached(conn, msg: Message, att_metas: list[dict], *, user_id: str | None = None) -> bool:
     """Cache-aware wrapper the ingest sites call BEFORE creating URL
     stubs. Returns True when ALL links for `msg` should be skipped.
 
@@ -466,7 +466,7 @@ def skip_link_crawl_cached(conn, msg: Message, att_metas: list[dict]) -> bool:
         return False
 
     try:
-        cached = get_crawl_blocked_reason(conn, message_id=msg.id)
+        cached = get_crawl_blocked_reason(conn, message_id=msg.id, user_id=user_id)
     except Exception:  # noqa: BLE001 - cache read is best-effort
         cached = None
     if cached:
@@ -474,7 +474,7 @@ def skip_link_crawl_cached(conn, msg: Message, att_metas: list[dict]) -> bool:
 
     skip, reason = should_skip_all_link_crawl(msg, att_metas)
     try:
-        set_crawl_blocked_reason(conn, message_id=msg.id, reason=reason)
+        set_crawl_blocked_reason(conn, message_id=msg.id, reason=reason, user_id=user_id)
     except Exception:  # noqa: BLE001 - persisting the verdict is best-effort
         logger.debug("invite-guard: could not persist verdict for %s", msg.id)
     return skip

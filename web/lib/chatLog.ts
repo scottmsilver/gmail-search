@@ -48,7 +48,7 @@ let dirEnsured = false;
 const ensureDir = async () => {
   if (dirEnsured) return;
   if (!existsSync(LOG_DIR)) {
-    await mkdir(LOG_DIR, { recursive: true });
+    await mkdir(LOG_DIR, { recursive: true, mode: 0o700 });
   }
   dirEnsured = true;
   void pruneOldLogs();
@@ -83,6 +83,7 @@ export type LogEvent = {
     | "error"
     | "empty_text"
     | "done"
+    | "event"
     | "battle_start"
     | "battle_done";
   data: Record<string, unknown>;
@@ -93,21 +94,21 @@ export class ChatLogger {
   readonly path: string;
   private startMs: number;
 
-  constructor(id?: string) {
+  constructor(id?: string, private readonly ownerId?: string) {
     this.id = id ?? newRequestId();
     this.path = logPathFor(this.id);
     this.startMs = Date.now();
   }
 
   async log(kind: LogEvent["kind"], data: Record<string, unknown>): Promise<void> {
-    await ensureDir();
     const event: LogEvent = {
       ts: new Date().toISOString(),
       kind,
       data: stripBinary(data) as Record<string, unknown>,
     };
     try {
-      await appendFile(this.path, JSON.stringify(event) + "\n", "utf-8");
+      await ensureDir();
+      await appendFile(this.path, JSON.stringify({ ...event, owner_id: this.ownerId }) + "\n", { encoding: "utf-8", mode: 0o600 });
     } catch (err) {
       console.error(`[chatLog ${this.id}] write failed:`, err);
     }

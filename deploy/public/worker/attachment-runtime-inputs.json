@@ -1,0 +1,17 @@
+{
+  "packages": {
+    "PyMuPDF": {
+      "version": "1.28.2",
+      "wheel": "pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl",
+      "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
+      "source": "https://files.pythonhosted.org/packages/c7/06/dace3e27af26690cb20bead80dbac42941b0841eb689b8aabbd67dde16f0/pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
+    },
+    "Pillow": {
+      "version": "12.3.0",
+      "wheel": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
+      "source": "https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+    }
+  },
+  "image_sha256": "89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068"
+}

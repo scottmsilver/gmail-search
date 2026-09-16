@@ -1,0 +1,50 @@
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "synthetic fixture text",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 1024,
+  "stream": true,
+  "system": [
+    {
+      "type": "text",
+      "text": "synthetic fixture text",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "bash",
+      "description": "synthetic fixture text",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "synthetic fixture text"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "synthetic fixture text"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    }
+  ]
+}

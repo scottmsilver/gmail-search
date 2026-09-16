@@ -4,15 +4,35 @@ columns that didn't exist."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from gmail_search.store.db import (
     _INTERNAL_TABLES,
     TABLE_DOCS,
+    _read_pg_schema,
     _schema_table_names,
     assert_table_docs_cover_schema,
     describe_schema_for_llm,
 )
+
+
+@pytest.mark.parametrize("table", ["propositions", "prop_processed"])
+def test_fact_tables_are_discoverable(table):
+    assert f"### {table}\n" in describe_schema_for_llm()
+    assert table not in _INTERNAL_TABLES
+
+
+def test_reader_grants_match_documented_tables():
+    schema = re.sub(r"--[^\n]*", "", _read_pg_schema())
+    grants = re.findall(
+        r"GRANT\s+SELECT\s+ON\s+([^;]+?)\s+TO\s+gmail_search_reader\s*;",
+        schema,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    granted = {table.strip() for grant in grants for table in grant.split(",")}
+    assert granted == set(TABLE_DOCS)
 
 
 def test_assertion_passes_today():

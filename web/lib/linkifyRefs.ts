@@ -13,7 +13,7 @@ export const ART_PREFIX = "art://";
 //   <bare hex 8-20>  — bare hex token that's only linkified if it resolves
 //                      against a known thread id (to avoid false positives)
 const BRACKET_OR_BARE =
-  /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\[\s*att:\s*(\d+)\s*\]|\[\s*art:\s*(\d+)\s*\]|\b([a-f0-9]{8,20})\b/g;
+  /\[\s*ref:\s*([a-zA-Z0-9_-]+)\s*\]|\[\s*att:\s*(\d+)\s*\]|\[\s*art:\s*([a-f0-9]{32}|\d+)\s*\]|\b([a-f0-9]{8,20})\b/g;
 
 const resolveAgainstKnown = (id: string, known: readonly string[]): string | null => {
   if (known.includes(id)) return id;

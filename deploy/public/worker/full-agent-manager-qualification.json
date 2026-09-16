@@ -1,0 +1,99 @@
+{
+  "scope": "actual loopback invited-app HTTP -> owned SSH manager -> jailed Pi eight tools -> gateway events -> worker stop -> real PG answer -> owner HTTP artifact",
+  "question": "For my mailbox, inspect schema and invoices, retrieve the matching thread, search supporting facts, inspect and download its attachment, then create a CSV report. Reference the uploaded artifact. Request 4efb5b4c",
+  "runs": [],
+  "success": true,
+  "image_sha256": "2d0c6d9e861740dbed914d6a73cd9a787fac6bc434f103c2bc00b3b2c6477bde",
+  "advertised_tools": [
+    "bash",
+    "edit",
+    "find",
+    "grep",
+    "ls",
+    "mail_describe_schema",
+    "mail_find_facts",
+    "mail_get_attachment_batch",
+    "mail_get_thread_batch",
+    "mail_publish_artifact_batch",
+    "mail_query_emails_batch",
+    "mail_search_emails_batch",
+    "mail_sql_query_batch",
+    "read",
+    "write"
+  ],
+  "typed_sequence": [
+    "mail_describe_schema",
+    "mail_sql_query_batch",
+    "mail_get_thread_batch",
+    "mail_search_emails_batch",
+    "mail_find_facts",
+    "mail_query_emails_batch",
+    "mail_get_attachment_batch",
+    "bash",
+    "mail_publish_artifact_batch"
+  ],
+  "raw_bytes": 10485760,
+  "raw_sha256": "75b4713bb07544456dc406235a92f4ab993c78bfa32bf9b63c7b23aeb28652d0",
+  "foreign_owner_denied": true,
+  "live_events": true,
+  "event_count": 21,
+  "provider_requests": 10,
+  "provider_closed": 10,
+  "worker_stop_ack": true,
+  "pg_answer_receipts": 1,
+  "elapsed_seconds": 24.877,
+  "fixture_cleanup": true,
+  "manager_exited": true,
+  "final_inventory_empty": true,
+  "source_sha256": {
+    "src/gmail_search/gateway/full_agent_rpc.py": "43d1c0bc5d836b56f82e92cdfafa3b0b0c8d0ce70d485805c546c1bb2ffa5fab",
+    "src/gmail_search/gateway/full_agent_remote.py": "00452a0f868d12e56efdb114cc15650d3c6c3b38005cd3adf69ff41e1822d32a",
+    "deploy/public/worker/full_agent_manager.py": "03a290734483e5414f4e947f820d7f89fddccaad34a9daeb9e05103921709fd8",
+    "deploy/public/worker/full_agent_rpc_server.py": "e55d665a718b3e2bda8d4d93ce6c3632d5b2abc599d96b1ca0a1f6cfa85da018",
+    "deploy/public/worker/full_agent_rpc_frontend.py": "9ac825e68e61617f7fcde6d50b9c0de5649438a1331f0978016e751204ff8cfe",
+    "deploy/public/worker/vsock_http_relay.py": "a84e5d02307dbafcfe3d2e19ea38b0ca4776600f57078dbd4a9547153d886261",
+    "src/gmail_search/invited_app.py": "f4e6bd38a037a5dc0899b97ed7d37ec7c51950711855b56ab8749a8209fd2927",
+    "src/gmail_search/gateway/browser_runs.py": "e42bff3b1414a0d5adf2bb901f57aa818f9510e8947dad606ee59d03be3c804c",
+    "src/gmail_search/gateway/browser_conversations.py": "abcc62c2e52efc7eaab3cc4f057845cd8db5bbafeb3d4464aee97611c21ce950",
+    "src/gmail_search/gateway/browser_prompt.py": "50e1e362774f6502e77de21e6786310698079351f0b08b987d739432f15d07df",
+    "src/gmail_search/auth/run_routes.py": "674dba35a5ded9d7886f6b01a27a7fde9a41b0231932be5fdb3d27a349179d93"
+  },
+  "cancellation": {
+    "scope": "actual invited HTTP cancellation during in-flight mock provider stream in jailed Pi VM",
+    "question": "For my mailbox, inspect schema and invoices, retrieve the matching thread, search supporting facts, inspect and download its attachment, then create a CSV report. Reference the uploaded artifact. Request be4028d5",
+    "runs": [],
+    "success": true,
+    "foreign_cancel_denied": true,
+    "worker_stop_ack": true,
+    "provider_requests": 1,
+    "provider_closed": 1,
+    "budget_reserved": 0,
+    "budget_spent": 204096,
+    "no_answer_persisted": true,
+    "elapsed_seconds": 15.635,
+    "fixture_cleanup": true
+  },
+  "ssh_negatives": {
+    "command": {
+      "denied": true,
+      "exit": 1,
+      "stdout_bytes": 0
+    },
+    "pty": {
+      "denied": true,
+      "exit": 255,
+      "stdout_bytes": 0
+    },
+    "sftp": {
+      "denied": true,
+      "exit": 1,
+      "stdout_bytes": 0
+    },
+    "forward": {
+      "denied": true,
+      "exit": 255,
+      "stdout_bytes": 0
+    }
+  },
+  "outer_powered_off": true
+}

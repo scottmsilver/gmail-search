@@ -35,7 +35,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from gmail_search.agents.session import save_artifact
 from gmail_search.agents.tools import describe_schema as _describe_schema_impl
@@ -824,12 +824,18 @@ async def _tool_query_emails_batch(session_id: str = "", *, filters: list[dict])
     return response
 
 
-async def _tool_get_thread_batch(session_id: str = "", *, thread_ids: list[str]) -> dict:
-    set_trace_id(new_trace_id())  # fresh trace id per tool call; propagates to /api/* + logs
+async def _tool_get_thread_batch(
+    session_id: str = "", *, thread_ids: list[str],
+    body_format: Literal["markdown", "raw"] = "markdown",
+    message_ids: list[str] | None = None,
+    body_offset: int = 0, body_limit: int = 20000,
+) -> dict:
+    set_trace_id(new_trace_id())
     ctx = _resolve_ctx(session_id)
     sid = _effective_session_id(session_id)
-    args = {"thread_ids": thread_ids}
-    response = await _get_thread_batch_impl(thread_ids, user_id=ctx.user_id)
+    args = {"thread_ids": thread_ids, "body_format": body_format,
+            "message_ids": message_ids, "body_offset": body_offset, "body_limit": body_limit}
+    response = await _get_thread_batch_impl(**args, user_id=ctx.user_id)
     _record_call(sid, "get_thread_batch", args, response)
     return response
 
@@ -1084,17 +1090,20 @@ QUERY_BATCH_DESC = (
 )
 
 THREAD_BATCH_DESC = (
-    "Fetch many threads concurrently in ONE call. `thread_ids` is a "
-    "list (1-100). Use this whenever you need ≥2 threads — never "
-    "split into multiple sequential single-thread calls. Each "
-    "thread's payload is the full message bodies + attachment "
-    "manifest (bodies clipped to 20k chars). Every attachment row has a "
-    "`fetch_status`: 'ok' means the bytes are stored; 'skipped_too_large' "
-    "or 'fetch_failed' means Gmail lists the file but we don't hold it — "
-    "the email DID carry it, so never report it as missing. Returns "
-    "`{results: [{thread_id, result}, ...]}` aligned with input. "
-    "Per-thread errors land in that entry's `result` as "
-    f"`{{error: ...}}`; the batch as a whole still succeeds. {SESSION_PARAM_NOTE}"
+    "Read selected emails in one concurrent batch. `thread_ids`: 1-100 IDs. "
+    "Default body_format='markdown' renders HTML locally into readable body_text, "
+    "retaining table rows, links and quoted correspondence. Optional message_ids "
+    "selects messages across those threads; omit to read all messages. "
+    "Each message includes cite_ref, body_format and attachments; readable mode adds body_source. "
+    "body_limit is 1-100000 characters per message (default 20000); continue "
+    "a clipped message with body_next_offset as body_offset and message_ids=[message.id]. "
+    "body_format='raw' returns original body_text and body_html, paginated separately "
+    "with body_next_offset and body_html_next_offset. Use raw for omitted markup "
+    "or link destinations. thread_message_count includes unselected messages. "
+    "Attachment fetch_status='skipped_too_large' or 'fetch_failed' means the email "
+    "carried the attachment but its bytes are unavailable, not that it was missing. "
+    "Returns {results: [{thread_id, result}, ...]}; errors are per-thread. "
+    f"{SESSION_PARAM_NOTE}"
 )
 
 SQL_QUERY_BATCH_DESC = (
@@ -1116,19 +1125,19 @@ SQL_QUERY_BATCH_DESC = (
     "on these columns (forces seq scan, ~50x slower):\n"
     "  messages: subject, body_text, from_addr, to_addr\n"
     "  attachments: filename, extracted_text\n"
-    "Use the `@@@` operator with the row PK (`id`) instead. Tantivy "
+    "Use the `@@@` operator with `messages.search_id` or `attachments.id` instead. Tantivy "
     "syntax: `field:term`, combinable with AND / OR / NOT and parens. "
     "Translation table:\n"
     "  WHERE subject ILIKE '%credit%'\n"
-    "    →  WHERE id @@@ 'subject:credit'\n"
+    "    →  WHERE search_id @@@ 'subject:credit'\n"
     "  WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'\n"
-    "    →  WHERE id @@@ 'from_addr:delta AND subject:cancel'\n"
+    "    →  WHERE search_id @@@ 'from_addr:delta AND subject:cancel'\n"
     "  Domain terms keep their TLD as ONE token: "
     "`from_addr:landmarkswest.com` matches, `from_addr:landmarkswest` "
     "returns 0 rows.\n"
     "  WHERE body_text LIKE '%refund issued%'  (phrase)\n"
-    "    →  WHERE id @@@ 'body_text:\"refund issued\"'\n"
-    "Add `ORDER BY paradedb.score(id) DESC` for relevance. Escape "
+    "    →  WHERE search_id @@@ 'body_text:\"refund issued\"'\n"
+    "Add `ORDER BY paradedb.score(search_id) DESC` for relevance. Escape "
     "hatch: any query containing `@@@` skips the LIKE check, so a "
     "BM25 prefilter + LIKE refinement is allowed (use only when BM25 "
     "truly cannot express the predicate). Cells > 8000 chars are "
@@ -1852,9 +1861,7 @@ def _make_fastmcp_app(host: str, port: int):
     app.tool(name="search_emails_batch", description=SEARCH_BATCH_DESC)(_tool_search_emails_batch)
     app.tool(name="query_emails_batch", description=QUERY_BATCH_DESC)(_tool_query_emails_batch)
     app.tool(name="get_thread_batch", description=THREAD_BATCH_DESC)(_tool_get_thread_batch)
-    app.tool(name="sql_query_batch", description=SQL_QUERY_BATCH_DESC)(_tool_sql_query_batch)
     app.tool(name="find_facts", description=FIND_FACTS_DESC)(_tool_find_facts)
-    app.tool(name="describe_schema", description=DESCRIBE_SCHEMA_DESC)(_tool_describe_schema)
     app.tool(name="get_attachment_batch", description=ATTACHMENT_BATCH_DESC)(_tool_get_attachment_batch)
     app.tool(name="publish_artifact_batch", description=PUBLISH_ARTIFACT_BATCH_DESC)(_tool_publish_artifact_batch)
 

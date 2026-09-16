@@ -1,10 +1,10 @@
 "use client";
 
 import type { ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { PassiveMarkdown } from "@/lib/markdownSecurity";
 import { ART_PREFIX, ATT_PREFIX, linkifyRefs, REF_PREFIX } from "@/lib/linkifyRefs";
 
 import { ArtifactChip } from "./ArtifactChip";
@@ -37,7 +37,7 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
   const attList = attHints ?? [];
 
   const components: Components = {
-    a: ({ href, children, ...rest }) => {
+    a: ({ href, children }) => {
       if (href?.startsWith(REF_PREFIX)) {
         return (
           <CitationChip
@@ -58,9 +58,8 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
       }
       if (href?.startsWith(ART_PREFIX)) {
         const idStr = href.slice(ART_PREFIX.length);
-        const id = parseInt(idStr, 10);
-        if (Number.isFinite(id)) {
-          return <ArtifactChip artifactId={id} />;
+        if (/^(?:[a-f0-9]{32}|[0-9]+)$/.test(idStr)) {
+          return <ArtifactChip artifactId={idStr} />;
         }
       }
       // In "inline" (summary) mode, suppress mailto autolinks — the
@@ -81,10 +80,10 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
           href={href}
           target="_blank"
           rel="noopener noreferrer"
+          referrerPolicy="no-referrer"
           className="text-blue-600 underline"
           onClick={(e) => e.stopPropagation()}
           title={href}
-          {...rest}
         >
           {displayChildren}
         </a>
@@ -101,9 +100,9 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
       : "[&_p]:m-0 [&_p]:inline";
   return (
     <div className={wrapperClass}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeUrl}>
+      <PassiveMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeUrl}>
         {linkifyRefs(text, knownIds)}
-      </ReactMarkdown>
+      </PassiveMarkdown>
     </div>
   );
 };

@@ -6,28 +6,6 @@ export const pythonApiUrl = (): string => {
   return url.replace(/\/$/, "");
 };
 
-export const geminiApiKey = (): string => {
-  const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!key) {
-    throw new Error("GEMINI_API_KEY is not set — see .env.local.example");
-  }
-  return key;
-};
-
-export const AGENT_MODEL = "gemini-3.1-flash-lite-preview";
-
-// Picker choices shown in the UI. Sourced from the live Gemini API model
-// list (v1beta). First entry is the default for new users.
-export const AVAILABLE_MODELS = [
-  "gemini-3.1-flash-lite-preview",
-  "gemini-3.1-pro-preview",
-  "gemini-3-pro-preview",
-  "gemini-3-flash-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-] as const;
-
 // Picker choices when the deep-mode backend is set to Claude Code.
 // These are the alias names accepted by the Claude Code runtime.
 export const CLAUDE_AVAILABLE_MODELS = [
@@ -37,26 +15,25 @@ export const CLAUDE_AVAILABLE_MODELS = [
   "opusplan",
 ] as const;
 
-export type DeepBackend = "adk" | "claude_code" | "claude_native" | "pi";
+export const PI_AVAILABLE_MODELS = [
+  "google/gemini-3.8-flash",
+  "openrouter/meta/muse-spark-1.3",
+  "anthropic/claude-opus-5",
+] as const;
 
-const isClaudeBackend = (backend: DeepBackend): boolean =>
-  backend === "claude_code" || backend === "claude_native";
+export const piModelForRequest = (model: unknown): string => {
+  const aliases: Record<string, string> = {
+    "openrouter/google/gemini-3.8-flash": "google/gemini-3.8-flash",
+    "openrouter/anthropic/claude-opus-5": "anthropic/claude-opus-5",
+  };
+  const selected = typeof model === "string" ? aliases[model] ?? model : "";
+  return (PI_AVAILABLE_MODELS as readonly string[]).includes(selected) ? selected : PI_AVAILABLE_MODELS[0];
+};
+
+export type DeepBackend = "claude_code" | "pi";
 
 export const availableModelsFor = (backend: DeepBackend): readonly string[] =>
-  isClaudeBackend(backend) ? CLAUDE_AVAILABLE_MODELS : AVAILABLE_MODELS;
+  backend === "pi" ? PI_AVAILABLE_MODELS : CLAUDE_AVAILABLE_MODELS;
 
-// Note: "minimal" is valid in the SDK type but rejected by some Gemini 3.x
-// models (e.g. 3.1-pro-preview responds "Thinking level MINIMAL is not
-// supported for this model"). Dropping it from the UI + battle pool so
-// we never hit that error silently. If a specific model needs it later,
-// add a per-model capability map instead of this blanket list.
+// Retained for labels on historical battles.
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high";
-export const THINKING_LEVELS: ThinkingLevel[] = ["low", "medium", "high"];
-
-export const DEFAULT_THINKING: ThinkingLevel = "high";
-
-export const isValidModel = (m: unknown): m is (typeof AVAILABLE_MODELS)[number] =>
-  typeof m === "string" && (AVAILABLE_MODELS as readonly string[]).includes(m);
-
-export const isValidThinking = (t: unknown): t is ThinkingLevel =>
-  typeof t === "string" && (THINKING_LEVELS as string[]).includes(t);

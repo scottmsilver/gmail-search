@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMessage } from "@assistant-ui/react";
-import ReactMarkdown from "react-markdown";
+import { PassiveMarkdown } from "@/lib/markdownSecurity";
 import remarkGfm from "remark-gfm";
 
 import { AttachmentInlineViewer } from "./AttachmentInlineViewer";
@@ -274,7 +274,7 @@ const ReasoningBlock = ({ part }: { part: ReasoningPart }) => (
       <span className="text-neutral-400">thoughts</span>
     </div>
     <div className="mt-1 ml-4 border-l-2 border-neutral-200 pl-3 text-[12px] leading-relaxed text-neutral-600 prose prose-sm max-w-none prose-p:my-1 prose-headings:my-1.5 prose-headings:text-neutral-700 prose-strong:text-neutral-700 prose-li:my-0 prose-ul:my-1 prose-ol:my-1">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{part.text}</ReactMarkdown>
+      <PassiveMarkdown remarkPlugins={[remarkGfm]}>{part.text}</PassiveMarkdown>
     </div>
   </div>
 );

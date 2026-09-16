@@ -1,0 +1,21 @@
+{
+  "claude_version": "2.1.272",
+  "claude_binary_sha256": "d81396a668eb76fbddb49a2a5841f1b5d7af96b4c1f6500ced92f2c988f5bcd4",
+  "node_version": "24.20.0",
+  "node_binary_sha256": "89af8424dd53e560b1933f87ba650d8bf57c83ca5a04600eefb31f416aabbae7",
+  "pi_package": "@earendil-works/pi-coding-agent",
+  "pi_version": "0.84.4",
+  "pi_tree_sha256": "69b0479e60835fe915f6ed150931414672c00b45459d25cf99fd55966671a7af",
+  "pi_tree_files": 12536,
+  "runtime_archive_sha256": "b1e798da2489f326836609e5b2bd256808686c63d4f4bdcfc6af94175ff3eb6c",
+  "python_dependencies": {
+    "httpx": "0.28.1",
+    "httpcore": "1.0.9",
+    "h11": "0.16.0",
+    "anyio": "4.13.0",
+    "certifi": "2026.4.22",
+    "idna": "3.19",
+    "sniffio": "1.3.1",
+    "typing_extensions": "4.15.0"
+  }
+}

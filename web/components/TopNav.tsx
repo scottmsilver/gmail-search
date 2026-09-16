@@ -7,10 +7,8 @@ import { AvatarMenu } from "@/components/AvatarMenu";
 import { cn } from "@/lib/utils";
 
 const TABS: Array<{ href: string; label: string }> = [
-  { href: "/", label: "Chat" },
+  { href: "/", label: "Deep analysis" },
   { href: "/search", label: "Search" },
-  { href: "/inbox", label: "Inbox" },
-  { href: "/priority", label: "Priority" },
 ];
 
 const isActive = (pathname: string, href: string): boolean => {

@@ -1,0 +1,81 @@
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        },
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        },
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        }
+      ]
+    }
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    },
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    },
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    }
+  ],
+  "tools": [
+    {
+      "name": "Bash",
+      "description": "synthetic fixture text",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "synthetic fixture text",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "synthetic fixture text",
+            "type": "number"
+          },
+          "description": {
+            "description": "synthetic fixture text",
+            "type": "string"
+          },
+          "run_in_background": {
+            "description": "synthetic fixture text",
+            "type": "boolean"
+          },
+          "dangerouslyDisableSandbox": {
+            "description": "synthetic fixture text",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "metadata": {
+    "user_id": "synthetic fixture text"
+  },
+  "max_tokens": 32000,
+  "temperature": 1,
+  "output_config": {
+    "effort": "high"
+  },
+  "stream": true
+}

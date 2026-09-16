@@ -124,25 +124,14 @@ async def test_get_thread_clips_long_bodies(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sql_query_clips_oversized_cells(monkeypatch):
-    """Long string cells get clipped to 8000 chars so a 500-row
-    SELECT body_text can't ship 10MB back to the model."""
-    from gmail_search.agents.tools import SQL_CELL_CHAR_CAP, sql_query
+async def test_sql_query_rejects_stale_calls(monkeypatch):
+    from gmail_search.agents.tools import sql_query
 
-    long_cell = "z" * (SQL_CELL_CHAR_CAP + 4000)
-    _stub_httpx_async(
-        monkeypatch,
-        {
-            "columns": ["id", "body"],
-            "rows": [["m1", long_cell], ["m2", "short"]],
-            "row_count": 2,
-            "truncated": False,
-        },
-    )
     data = await sql_query("SELECT id, body FROM messages LIMIT 2")
-    assert "truncated: original" in data["rows"][0][1]
-    assert len(data["rows"][0][1]) <= SQL_CELL_CHAR_CAP + 80
-    assert data["rows"][1][1] == "short"
+    assert data["code"] == "raw_sql_disabled"
+    assert data["status"] == 403
+    assert data["rows"] == []
+
 
 
 def _capture_get_request(monkeypatch, response_json: dict):
@@ -422,7 +411,6 @@ def test_build_retrieval_tools_assembles_expected_set():
     tools = build_retrieval_tools()
     names = sorted(t.name for t in tools)
     assert names == [
-        "describe_schema",
         "get_attachment",
         "get_attachment_batch",
         "get_thread",
@@ -431,8 +419,6 @@ def test_build_retrieval_tools_assembles_expected_set():
         "query_emails_batch",
         "search_emails",
         "search_emails_batch",
-        "sql_query",
-        "sql_query_batch",
     ]
 
 

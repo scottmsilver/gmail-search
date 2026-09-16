@@ -43,106 +43,18 @@ const loadTs = async (relPath) => {
   const m = await tsImport(join(ROOT, relPath), import.meta.url);
   return m.default ?? m;
 };
-const { sanitizeConversation } = await loadTs("lib/sanitizeConversation.ts");
-
-console.log("\nsanitizeConversation");
-
-test("drops empty assistant string content", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "hi" },
-    { role: "assistant", content: "" },
-    { role: "user", content: "still hi?" },
-  ]);
-  // After dropping the empty assistant, the two user turns merge.
-  eq(out.length, 1, "should collapse to a single merged user turn");
-  eq(out[0].role, "user");
-  eq(out[0].content, "hi\n\nstill hi?");
+const { availableModelsFor, piModelForRequest } = await loadTs("lib/config.ts");
+test("Pi offers Muse Spark through OpenRouter", () => {
+  truthy(availableModelsFor("pi").includes("openrouter/meta/muse-spark-1.3"), "Muse option");
 });
-
-test("drops empty assistant array content", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "a" },
-    { role: "assistant", content: [] },
-    { role: "user", content: "b" },
-  ]);
-  eq(out.length, 1);
-  eq(out[0].content, "a\n\nb");
+test("Pi request selection preserves Muse and falls back to configured default", () => {
+  eq(piModelForRequest("openrouter/meta/muse-spark-1.3"), "openrouter/meta/muse-spark-1.3");
+  eq(piModelForRequest("pi-default"), "google/gemini-3.8-flash");
+  eq(piModelForRequest("gemini-2.5-flash"), "google/gemini-3.8-flash");
 });
-
-test("preserves alternating user/assistant turns", () => {
-  const conv = [
-    { role: "user", content: "hi" },
-    { role: "assistant", content: "hello" },
-    { role: "user", content: "ok" },
-  ];
-  const out = sanitizeConversation(conv);
-  eq(out.length, 3);
-  eq(out[1].content, "hello");
-});
-
-test("merges two adjacent user string turns", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "first" },
-    { role: "user", content: "second" },
-  ]);
-  eq(out.length, 1);
-  eq(out[0].content, "first\n\nsecond");
-});
-
-test("merges two adjacent assistant array turns into one array", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "q" },
-    { role: "assistant", content: [{ type: "text", text: "a" }] },
-    { role: "assistant", content: [{ type: "tool-call", toolCallId: "x", toolName: "y", args: {} }] },
-  ]);
-  eq(out.length, 2);
-  eq(out[1].content, [
-    { type: "text", text: "a" },
-    { type: "tool-call", toolCallId: "x", toolName: "y", args: {} },
-  ]);
-});
-
-test("merges mixed string + array assistant turns by promoting string to part", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "q" },
-    { role: "assistant", content: "thinking..." },
-    { role: "assistant", content: [{ type: "tool-call", toolCallId: "1", toolName: "f", args: {} }] },
-  ]);
-  eq(out.length, 2);
-  // After merge: text part + tool-call part.
-  eq(out[1].content, [
-    { type: "text", text: "thinking..." },
-    { type: "tool-call", toolCallId: "1", toolName: "f", args: {} },
-  ]);
-});
-
-test("never merges through a tool-result turn", () => {
-  const out = sanitizeConversation([
-    { role: "user", content: "q" },
-    { role: "assistant", content: [{ type: "tool-call", toolCallId: "1", toolName: "f", args: {} }] },
-    { role: "tool", content: [{ type: "tool-result", toolCallId: "1", toolName: "f", output: 42 }] },
-    { role: "assistant", content: "answer" },
-  ]);
-  eq(out.length, 4);
-});
-
-test("does not merge two adjacent tool turns", () => {
-  const out = sanitizeConversation([
-    { role: "tool", content: [{ type: "tool-result", toolCallId: "1", toolName: "f", output: 1 }] },
-    { role: "tool", content: [{ type: "tool-result", toolCallId: "2", toolName: "f", output: 2 }] },
-  ]);
-  eq(out.length, 2, "tool turns are paired with the preceding assistant tool-call and must stay distinct");
-});
-
-test("empty input returns empty output", () => {
-  eq(sanitizeConversation([]), []);
-});
-
-test("only empty assistants returns empty output", () => {
-  eq(sanitizeConversation([
-    { role: "assistant", content: "" },
-    { role: "assistant", content: [] },
-  ]), []);
+test("old OpenRouter selections migrate to direct providers", () => {
+  eq(piModelForRequest("openrouter/google/gemini-3.8-flash"), "google/gemini-3.8-flash");
+  eq(piModelForRequest("openrouter/anthropic/claude-opus-5"), "anthropic/claude-opus-5");
 });
 
 // ─── safeUrl (CitableMarkdown's XSS guard) ─────────────────────────

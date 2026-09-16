@@ -1,0 +1,1645 @@
+{
+  "synthetic_only": true,
+  "profiles": {
+    "message_text": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379477,
+          3379477,
+          3379480,
+          3379480,
+          8192,
+          3379484,
+          3379484,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7f19d0b6",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5bcf036e",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5bcf036e",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.019020404084585607,
+        "cluster_wal_bytes": 35552
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5bcf036e",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.016395328915677965,
+        "cluster_wal_bytes": 41584
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379494,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5bcf036e",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379515,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379487,
+          3379487,
+          3379490,
+          3379490,
+          16384,
+          3379494,
+          3379516,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "99263ab9",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      }
+    },
+    "message_numeric": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379517,
+          3379517,
+          3379520,
+          3379520,
+          8192,
+          3379524,
+          3379524,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "944ebf47",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "a5fac151",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "a5fac151",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.019496891065500677,
+        "cluster_wal_bytes": 40152
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "a5fac151",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.029317685985006392,
+        "cluster_wal_bytes": 41480
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379534,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "a5fac151",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379555,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379527,
+          3379527,
+          3379530,
+          3379530,
+          16384,
+          3379534,
+          3379556,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "82407d92",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      }
+    },
+    "attachment": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379557,
+          3379557,
+          3379560,
+          3379560,
+          8192,
+          3379564,
+          3379564,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "534a2f2f",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "abc2ea37",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "phase1_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "abc2ea37",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ],
+          [
+            "bob",
+            200
+          ]
+        ],
+        "seconds": 0.021642109961248934,
+        "cluster_wal_bytes": 35808
+      },
+      "phase1_commit": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "abc2ea37",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "during_owner_rows": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ],
+        "seconds": 0.019681739970110357,
+        "cluster_wal_bytes": 36456
+      },
+      "phase2_rollback": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379574,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "abc2ea37",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "during_objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379595,
+          3022848
+        ],
+        "all_owner_counts": [
+          [
+            "alice",
+            4
+          ]
+        ]
+      },
+      "phase2_retry_commit": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3379567,
+          3379567,
+          3379570,
+          3379570,
+          16384,
+          3379574,
+          3379596,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7ba3e59b",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      }
+    }
+  },
+  "object_fields": [
+    "heap_oid",
+    "heap_relfilenode",
+    "toast_oid",
+    "toast_relfilenode",
+    "heap_bytes",
+    "bm25_oid",
+    "bm25_relfilenode",
+    "bm25_main_bytes"
+  ],
+  "version": [
+    "PostgreSQL 16.13 (Debian 16.13-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "0.23.0"
+  ]
+}

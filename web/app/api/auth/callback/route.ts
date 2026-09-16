@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 // Proxies /api/auth/callback. The browser arrives here from the
 // silver-oauth broker carrying ?silver_oauth=…&state=…&return=…
 // PLUS the gms_oauth_state cookie we set in /api/auth/login.
@@ -17,11 +18,11 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const search = req.nextUrl.search;
   const cookie = req.headers.get("cookie") ?? "";
   const fwdHost = req.headers.get("host") ?? "";
-  const fwdProto = req.nextUrl.protocol.replace(":", "");
+  const fwdProto = process.env.GMS_PUBLIC_ORIGIN !== undefined ? "https" : req.nextUrl.protocol.replace(":", "");
   // Same forwarding game as /api/auth/login — FastAPI uses these to
   // decide whether to flag the session cookie Secure (HTTPS only).
   const fwdHeaders: Record<string, string> = {
@@ -50,3 +51,5 @@ export async function GET(req: NextRequest) {
   if (upstreamCT) respHeaders.set("content-type", upstreamCT);
   return new NextResponse(body, { status: upstream.status, headers: respHeaders });
 }
+
+export const GET = publicRoute(handleGET);

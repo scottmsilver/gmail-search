@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "state_dir": "/REPLACE/private/invited-state",
+  "attachment_root": "/REPLACE/private/attachments",
+  "release": {
+    "store_id": "REPLACE-store-id",
+    "release_epoch": 1
+  },
+  "worker": {
+    "host": "REPLACE-worker-host",
+    "port": 22,
+    "private_key": "/REPLACE/private/worker-rpc-key",
+    "known_hosts": "/REPLACE/private/worker-known-hosts"
+  },
+  "broker": {
+    "origin": "https://auth.oursilverfamily.com",
+    "bearer": "REPLACE_WITH_INDEPENDENT_BROKER_APP_BEARER",
+    "signing_secret": "REPLACE_WITH_INDEPENDENT_GMAIL_HANDOFF_SECRET"
+  },
+  "provider": {
+    "anthropic_key": "REPLACE_WITH_ANTHROPIC_KEY",
+    "gemini_key": "REPLACE_WITH_GEMINI_KEY",
+    "input_units_per_token": 1,
+    "output_units_per_token": 1,
+    "embedding_units_per_token": 1,
+    "rerank_input_units_per_token": 1,
+    "rerank_output_units_per_token": 1,
+    "fact_model_tag": "REPLACE_WITH_QUALIFIED_FACT_MODEL_TAG"
+  },
+  "owners": [
+    {
+      "id": "EXAMPLE_CANONICAL_OWNER_ID",
+      "email": "invited@example.com",
+      "google_subject": "REPLACE_VERIFIED_GOOGLE_SUBJECT",
+      "reader_dsn": "host=/REPLACE/postgresql dbname=mail user=gms_reader_f4a361531f4bd4eb15d253f91284f36d21ec2dde password=REPLACE",
+      "search_dsn": "host=/REPLACE/postgresql dbname=mail user=gms_search_text_f4a361531f4bd4eb15d253f91284f36d21ec2dde password=REPLACE",
+      "writer_dsn": "host=/REPLACE/postgresql dbname=mail user=gms_app_writer_f4a361531f4bd4eb15d253f91284f36d21ec2dde password=REPLACE",
+      "budget_id": "00000000000000000000000000000000",
+      "index": {
+        "path": "/REPLACE/private/index",
+        "generation": "REPLACE-generation",
+        "source_id": "REPLACE-qualified-source"
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 // Proxies /api/auth/me. Forwards the session cookie inbound; relays
 // the JSON response. No Set-Cookie ever comes back from this endpoint.
 
@@ -8,7 +9,7 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const cookie = req.headers.get("cookie") ?? "";
   const upstream = await fetch(`${pythonApiUrl()}/api/auth/me`, {
     method: "GET",
@@ -21,3 +22,5 @@ export async function GET(req: NextRequest) {
     headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
   });
 }
+
+export const GET = publicRoute(handleGET);

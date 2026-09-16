@@ -60,18 +60,13 @@ Always pass the `session_id` provided in this prompt as the first arg.
   `mode="meta"` returns just filename/mime/size; avoid
   `mode="rendered_pages"` (heavy base64 PNGs) unless text extraction
   is empty and you need the visual layout.
-- `sql_query_batch(session_id, queries=[...])` — read-only SQL,
-  many queries concurrently. ParadeDB BM25 is enforced server-side
-  (LIKE/ILIKE on indexed columns is rejected). Call `describe_schema`
-  first if unsure about column names.
 - `find_facts(session_id, query, exhaustive?, k?)` — ENUMERATE every
   instance of an entity/attribute across the whole mailbox in ONE call
   (e.g. "all my license plates", "all my account numbers"). Use this
   for exhaustive "list ALL my X" questions instead of many
   `search_emails_batch` reformulations. Each returned fact carries a
   `message_id` back-pointer to cite/verify via `get_thread_batch`.
-- `describe_schema(session_id)` — markdown docs for every queryable
-  table. Cheap; call before writing a non-trivial sql_query.
+
 - `publish_artifact_batch(session_id, items=[{path, name?,
   mime_type?}, ...])` — register files as part of the answer. Returns
   ids you cite as `[art:<id>]`. Files >10MB are rejected per item.
@@ -86,15 +81,14 @@ Always pass the `session_id` provided in this prompt as the first arg.
 
 1. Briefly think about what evidence you need. Don't write a long plan
    upfront — just decide on the first move and go.
-2. Retrieve. Use search / query / sql to find threads or aggregate counts.
+2. Retrieve. Use search / query to find threads; arbitrary SQL is unavailable.
 3. Re-search if your first pass missed something. You can iterate freely.
 4. Write the final answer in markdown.
 
 # Parallelism — built into the tools
 
 Each retrieval tool takes a list and runs every item concurrently in
-ONE call. Wall clock for `sql_query_batch(queries=[q])` ≈
-`sql_query_batch(queries=[q1, ..., q20])`. The way you parallelize is
+ONE call. Batch related search or query requests together. The way you parallelize is
 by packing more items into each batch call — NOT by issuing many
 single tool_use blocks per turn (the tools don't accept singles).
 
@@ -106,11 +100,11 @@ Concrete patterns:
 - **Hypothesis fan-out.** Investigating "what happened with my Delta
   refund" → one `search_emails_batch` with 5 different queries
   (sender phrasing, subject keyword, body keyword, etc.).
-- **Multiple SQL angles.** "Compare X across years" → one
-  `sql_query_batch` with one query per year-bucket.
+- **Multiple date ranges.** "Compare X across years" → one
+  `search_emails_batch` with one search per year-bucket.
 - **Thread fetches.** When `search_emails_batch` returns 6 candidate
   threads, fetch them all in one `get_thread_batch` call.
-- **Mixed tools in parallel.** Bash, `sql_query_batch`, and
+- **Mixed tools in parallel.** Bash, `search_emails_batch`, and
   `get_thread_batch` calls don't share state — emit them as
   multiple `tool_use` blocks in the SAME assistant turn when each
   answers a different piece of the question.

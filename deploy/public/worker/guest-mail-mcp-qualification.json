@@ -1,0 +1,92 @@
+{
+  "profile": "separately pinned synthetic agent_mcp; actual native Claude typed MCP",
+  "image_sha256": "54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba",
+  "mock_provider_only": true,
+  "inference_gateway_under_test": false,
+  "runs": [
+    {
+      "runtime": "claude",
+      "owner_label": "ALICE",
+      "csv": "id,subject,body\r\nshared-message,ALICE_ONLY_SUBJECT,ALICE_ONLY_BODY\r\n",
+      "artifact_bytes": 68,
+      "real_artifact_store": true,
+      "foreign_owner_read_denied": true,
+      "separate_reader_role": true,
+      "single_owner_caps": true,
+      "caps_revoked_after_run": true,
+      "provider_requests": 6,
+      "model_cli_typed_mcp_results": true,
+      "typed_tool_sequence": [
+        "mcp__mail__describe_schema",
+        "mcp__mail__sql_query_batch",
+        "mcp__mail__get_thread_batch",
+        "Bash",
+        "mcp__mail__publish_artifact_batch"
+      ],
+      "discovered_mcp_tools": {
+        "describe_schema": "mcp__mail__describe_schema",
+        "sql_query_batch": "mcp__mail__sql_query_batch",
+        "get_thread_batch": "mcp__mail__get_thread_batch",
+        "publish_artifact_batch": "mcp__mail__publish_artifact_batch"
+      },
+      "bash_only_csv_creation": true,
+      "stop_ack": true,
+      "elapsed_seconds": 6.25,
+      "enforcement": {
+        "Uid:": "Uid:\t65534\t65534\t65534\t65534",
+        "Seccomp:": "Seccomp:\t2",
+        "NSpid:": "NSpid:\t531\t1",
+        "memory.max": "1073741824",
+        "memory.swap.max": "0",
+        "pids.max": "128",
+        "cpu.max": "100000 100000"
+      }
+    }
+  ],
+  "native_claude_typed_mcp_passed": true,
+  "images": {
+    "runtime.squashfs": "0546f3aad681b012a1b44b90ac6f18188a6e25419220806e6a7a6ed4245bb32a",
+    "attachment.squashfs": "89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068",
+    "agent-tools.squashfs": "4b981cd6a2e1eb2f28acad2d02ac6c365b4ef48b03345eb098578b9a1dd71402",
+    "agent-mcp.squashfs": "54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba"
+  },
+  "inventory_empty": true,
+  "outer_reverseforward_removed": true,
+  "runtime_sources_sha256": {
+    "guest_mail_mcp.py": "1add075a2fbf6ba84d6938ce984310ee85df181c99833f42f4af52a3d9bec92d",
+    "guest_mail_tool_cli.py": "acb9bc9a5afecc946034ddd8a15bb7c9e4d6fad2f5662f781a174a809c44d513",
+    "guest_mail_tools.py": "1fd8936709bf301235d631582c7dc41f900ca2aa8ee7dcd46ff3990a92cc9b22",
+    "guest-vsock-bridge.py": "e669dabd435b90918318c2a48cf28b153d31e84f6f38065b74048d0dbb35ee3e",
+    "guest_run_bootstrap.py": "e4f31cdcef5612380ccc7202175432c012ee509b05a4e151bf8147c8016ca939",
+    "guest-mail-mcp-smoke.py": "797b4eb4f2a5cff41b6ba4e8abeb03f9a4a8260b3554af66f50952eccfca7cd7"
+  },
+  "worker_sources_sha256": {
+    "firecracker_backend.py": "dbc6d6a3b0bb70c44d076947d2886964979ca0d37ddba50242a7bc782e98fe14",
+    "agent-mcp-backend-smoke.py": "5e88757f24497ba8c908499453e5ed6f288f83038314897a3f2006207c5d3f93",
+    "guest_run_bootstrap.py": "e4f31cdcef5612380ccc7202175432c012ee509b05a4e151bf8147c8016ca939",
+    "vsock_http_relay.py": "7654962b2dcaab87ca844be411800e14fcd6a71a2c3180eaa621b5a065be5e98"
+  },
+  "limitations": [
+    "Dedicated synthetic-execution-worker root-only guard remains required.",
+    "Native Claude typed MCP discovery and calls for describe_schema, sql_query_batch, text get_thread_batch and publish_artifact_batch were exercised; Pi typed extension and full tool parity are not claimed.",
+    "Mock provider only; inference gateway is separately qualified and was not under test here.",
+    "Three audience-separated short-lived synthetic owner capabilities were delivered once over fixed per-jail vsock8002; production bootstrap is not enabled.",
+    "No real mail, production database, provider API key or mailbox credentials entered either guest.",
+    "Host gateway, reverseforward and disposable PostgreSQL database were temporary and removed; no host live services or network configuration changed."
+  ],
+  "outer_powered_off": true,
+  "foreground_qemu_exit_code": 0,
+  "mcp_process_environment": {
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C.UTF-8"
+  },
+  "mcp_process_command": [
+    "/usr/bin/env",
+    "-i",
+    "PATH=/usr/bin:/bin",
+    "LANG=C.UTF-8",
+    "/usr/bin/python3",
+    "-I",
+    "/tmp/runtime/guest_mail_mcp.py"
+  ]
+}

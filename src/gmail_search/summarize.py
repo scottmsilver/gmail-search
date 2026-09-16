@@ -29,6 +29,7 @@ from typing import Iterable
 import httpx
 from gmail_search.llm import get_backend
 from gmail_search.llm.backend import Backend
+from gmail_search.auth.write_user import resolve_write_user_id
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -554,7 +555,7 @@ def summarize_one(
     return _clean_llm_output(raw)
 
 
-def _fetch_attachments_for(conn, message_ids: list[str]) -> dict[str, list[dict]]:
+def _fetch_attachments_for(conn, message_ids: list[str], *, user_id: str | None = None) -> dict[str, list[dict]]:
     """One batched query returning `{message_id: [{filename, extracted_text}]}`
     for every attachment with non-trivial extracted text. Pulling in one
     query instead of N is the difference between a 100ms pending-list
@@ -562,14 +563,15 @@ def _fetch_attachments_for(conn, message_ids: list[str]) -> dict[str, list[dict]
     """
     if not message_ids:
         return {}
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     placeholders = ",".join(["%s"] * len(message_ids))
     rows = conn.execute(
         f"""SELECT message_id, filename, extracted_text
             FROM attachments
-            WHERE message_id IN ({placeholders})
+            WHERE user_id = %s AND message_id IN ({placeholders})
               AND extracted_text IS NOT NULL
               AND length(extracted_text) > 80""",
-        message_ids,
+        [user_id, *message_ids],
     ).fetchall()
     out: dict[str, list[dict]] = {}
     for r in rows:
@@ -615,7 +617,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str)
         SELECT m.id, m.from_addr, m.subject, m.body_text, m.body_html, m.labels
         FROM messages m
         LEFT JOIN message_summaries s
-          ON s.message_id = m.id AND s.model = %s
+          ON s.message_id = m.id AND s.user_id = m.user_id AND s.model = %s
         LEFT JOIN summary_failures f
           ON f.message_id = m.id AND f.user_id = m.user_id
         WHERE s.message_id IS NULL
@@ -646,7 +648,7 @@ def _messages_needing_summary(conn, model: str, limit: int | None, user_id: str)
         params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     msg_ids = [r["id"] for r in rows]
-    attachments_by_msg = _fetch_attachments_for(conn, msg_ids)
+    attachments_by_msg = _fetch_attachments_for(conn, msg_ids, user_id=user_id)
     from gmail_search.extract.text import html_to_text
 
     out: list[dict] = []
@@ -698,26 +700,20 @@ def _repair_broken_markdown_links(text: str) -> str:
     return fixed
 
 
-def _store_summary(conn, message_id: str, summary: str, model: str) -> None:
-    # user_id is denormalized from the parent messages row via subquery
-    # so the summarizer's call site stays unchanged. The subquery hits
-    # the messages PK index — sub-millisecond.
+def _store_summary(conn, message_id: str, summary: str, model: str, *, user_id: str | None = None) -> None:
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
         """INSERT INTO message_summaries (message_id, summary, model, user_id)
-           VALUES (%s, %s, %s, (SELECT user_id FROM messages WHERE id = %s))
-           ON CONFLICT(message_id) DO UPDATE SET
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT(user_id, message_id) DO UPDATE SET
              summary = excluded.summary,
              model = excluded.model,
-             -- Refresh the owner from the parent message too: a pre-fix or
-             -- corrupted row may carry a stale/wrong user_id, which would
-             -- otherwise leave the summary visible under the wrong tenant.
-             user_id = excluded.user_id,
              created_at = CURRENT_TIMESTAMP""",
-        (message_id, summary, model, message_id),
+        (message_id, summary, model, user_id),
     )
 
 
-def _record_summary_failure(conn, message_id: str, model: str, error: str) -> None:
+def _record_summary_failure(conn, message_id: str, model: str, error: str, *, user_id: str | None = None) -> None:
     """Persist a summarization failure so it can be triaged later.
 
     Called from the summarizer's per-email and batch fallback paths
@@ -726,25 +722,26 @@ def _record_summary_failure(conn, message_id: str, model: str, error: str) -> No
     attempt, so the table is always "currently broken" — not an
     append-only log.
     """
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     # Cap `error` to keep pathological backend tracebacks from
     # bloating the table; a 400-char head is enough to distinguish
     # known failure modes (context overflow, parse failures, backend
     # 5xx) from new ones.
     conn.execute(
         """INSERT INTO summary_failures (message_id, model, error, attempts, user_id)
-           VALUES (%s, %s, %s, 1, (SELECT user_id FROM messages WHERE id = %s))
-           ON CONFLICT (message_id) DO UPDATE SET
+           VALUES (%s, %s, %s, 1, %s)
+           ON CONFLICT (user_id, message_id) DO UPDATE SET
              model = EXCLUDED.model,
              error = EXCLUDED.error,
-             user_id = EXCLUDED.user_id,
              attempts = summary_failures.attempts + 1,
              last_seen = NOW()""",
-        (message_id, model, (error or "unknown")[:400], message_id),
+        (message_id, model, (error or "unknown")[:400], user_id),
     )
 
 
-def _clear_summary_failure(conn, message_id: str) -> None:
-    conn.execute("DELETE FROM summary_failures WHERE message_id = %s", (message_id,))
+def _clear_summary_failure(conn, message_id: str, *, user_id: str | None = None) -> None:
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    conn.execute("DELETE FROM summary_failures WHERE message_id = %s AND user_id = %s", (message_id, user_id))
 
 
 def backfill(
@@ -784,10 +781,7 @@ def backfill(
     # Always scope to a single user. None (standalone `gmail-search
     # summarize` with no daemon context) resolves to the bootstrap user
     # via GMS_BOOTSTRAP_EMAIL, so the work-selector is never unscoped.
-    if user_id is None:
-        from gmail_search.auth.write_user import resolve_write_user_id
-
-        user_id = resolve_write_user_id(conn)
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     pending = _messages_needing_summary(conn, model, limit, user_id)
     # Release the read snapshot NOW. `pending` (and its attachment text) is
     # fully materialised into Python above, so nothing below reads from this
@@ -826,14 +820,14 @@ def backfill(
             summary = summaries_by_id.get(m["id"])
             if summary:
                 summary = _repair_broken_markdown_links(summary)
-                _store_summary(conn, m["id"], summary, model)
-                _clear_summary_failure(conn, m["id"])
+                _store_summary(conn, m["id"], summary, model, user_id=user_id)
+                _clear_summary_failure(conn, m["id"], user_id=user_id)
                 done += 1
                 if _auto_mail_summary(m["labels"], m["from_addr"]) is not None:
                     auto_classified += 1
             else:
                 err = errs.get(m["id"]) or "missing_from_output"
-                _record_summary_failure(conn, m["id"], model, err)
+                _record_summary_failure(conn, m["id"], model, err, user_id=user_id)
                 failed += 1
         conn.commit()
         processed = done + failed
@@ -974,34 +968,35 @@ def _log_progress(processed: int, total: int, start: float) -> None:
 # most recent row per message_id, full stop.
 
 
-def get_summary(conn, message_id: str, model: str | None = None) -> str | None:
+def get_summary(conn, message_id: str, model: str | None = None, *, user_id: str | None = None) -> str | None:
     """Return the most recent summary for a message, regardless of
     which model/prompt produced it. Pass `model` only when you need
     a specific key (e.g. the backfill worker checking done-ness).
     """
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     if model is not None:
         row = conn.execute(
-            "SELECT summary FROM message_summaries WHERE message_id = %s AND model = %s",
-            (message_id, model),
+            "SELECT summary FROM message_summaries WHERE user_id = %s AND message_id = %s AND model = %s",
+            (user_id, message_id, model),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT summary FROM message_summaries WHERE message_id = %s ORDER BY created_at DESC LIMIT 1",
-            (message_id,),
+            "SELECT summary FROM message_summaries WHERE user_id = %s AND message_id = %s ORDER BY created_at DESC LIMIT 1",
+            (user_id, message_id),
         ).fetchone()
     return row["summary"] if row else None
 
 
-def get_summaries_bulk(conn, message_ids: Iterable[str], model: str | None = None) -> dict[str, str]:
+def get_summaries_bulk(conn, message_ids: Iterable[str], model: str | None = None, *, user_id: str | None = None) -> dict[str, str]:
     """Like `get_summary` but bulk. When `model is None`, returns the
     freshest summary per message regardless of version — the default
     for UI reads.
     """
-    rows = get_summaries_bulk_meta(conn, message_ids, model=model)
+    rows = get_summaries_bulk_meta(conn, message_ids, model=model, user_id=user_id)
     return {mid: meta["summary"] for mid, meta in rows.items()}
 
 
-def get_summaries_bulk_meta(conn, message_ids: Iterable[str], model: str | None = None) -> dict[str, dict]:
+def get_summaries_bulk_meta(conn, message_ids: Iterable[str], model: str | None = None, *, user_id: str | None = None) -> dict[str, dict]:
     """Same lookup as `get_summaries_bulk` but returns
     `{summary, model, created_at}` per message — useful for the
     search UI's debug panel so you can tell at a glance which prompt
@@ -1011,24 +1006,25 @@ def get_summaries_bulk_meta(conn, message_ids: Iterable[str], model: str | None 
     ids = list(message_ids)
     if not ids:
         return {}
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     placeholders = ",".join(["%s"] * len(ids))
     if model is not None:
         rows = conn.execute(
             f"""SELECT message_id, summary, model, created_at
                 FROM message_summaries
-                WHERE message_id IN ({placeholders}) AND model = %s""",
-            [*ids, model],
+                WHERE user_id = %s AND message_id IN ({placeholders}) AND model = %s""",
+            [user_id, *ids, model],
         ).fetchall()
     else:
         rows = conn.execute(
             f"""SELECT message_id, summary, model, created_at
                 FROM message_summaries ms
-                WHERE message_id IN ({placeholders})
+                WHERE user_id = %s AND message_id IN ({placeholders})
                   AND created_at = (
                       SELECT MAX(created_at) FROM message_summaries
-                      WHERE message_id = ms.message_id
+                      WHERE message_id = ms.message_id AND user_id = ms.user_id
                   )""",
-            ids,
+            [user_id, *ids],
         ).fetchall()
     return {
         r["message_id"]: {

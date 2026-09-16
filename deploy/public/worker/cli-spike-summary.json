@@ -1,0 +1,16 @@
+[
+  {
+    "runtime": "pi",
+    "returncode": 0,
+    "requests": 2,
+    "tool_file": "42",
+    "completion_marker": true
+  },
+  {
+    "runtime": "claude",
+    "returncode": 0,
+    "requests": 2,
+    "tool_file": "42",
+    "completion_marker": true
+  }
+]

@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare Tunnel for private Gmail Search web
+After=network-online.target gmail-search-public-web.service
+Wants=network-online.target gmail-search-public-web.service
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel --config %h/.cloudflared/config-gmail-search-web.yml run gmail-search-web
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=30
+[Install]
+WantedBy=default.target

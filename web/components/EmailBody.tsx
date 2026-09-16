@@ -172,7 +172,12 @@ const SandboxedHtml = ({ html }: { html: string }) => {
   // the active theme. Emails with inline styles (tables with baked-in
   // white cells, marketing templates) keep their own look, which is
   // the right call: rewriting them would break more than it fixes.
-  const doc = `<!doctype html><html><head><base target="_blank">
+  // The policy precedes all untrusted markup: external images, stylesheets,
+  // fonts, media, frames and CSS tracking URLs cannot load.
+  const doc = `<!doctype html><html><head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<base target="_blank">
 <style>
   html, body { margin: 0; padding: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif; color: ${fg}; background: ${bg}; word-break: break-word; }
   img { max-width: 100%; height: auto; }
@@ -190,6 +195,7 @@ const SandboxedHtml = ({ html }: { html: string }) => {
       // nav, popups, pointer lock, all off. This matches how Gmail
       // / Outlook render untrusted HTML.
       sandbox="allow-same-origin"
+      referrerPolicy="no-referrer"
       title="Email body"
       className="w-full rounded border"
       // Match the iframe's body bg on the HOST side too — otherwise

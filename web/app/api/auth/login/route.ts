@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 // Proxies /api/auth/login (Next.js side) → FastAPI's /api/auth/login.
 //
 // Critical detail: FastAPI returns 307 + a Set-Cookie (the OAuth state
@@ -20,7 +21,7 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET(req: NextRequest) {
+async function handleGET(req: NextRequest) {
   const search = req.nextUrl.search; // includes leading '?' or empty
   // Tell FastAPI which host the browser actually sees, so the inner
   // /api/auth/callback URL it hands to the broker points back at us
@@ -28,7 +29,7 @@ export async function GET(req: NextRequest) {
   // the broker would round-trip the user to 127.0.0.1:8090 and the
   // state + session cookies would land on the wrong origin.
   const fwdHost = req.headers.get("host") ?? "";
-  const fwdProto = req.nextUrl.protocol.replace(":", "");
+  const fwdProto = process.env.GMS_PUBLIC_ORIGIN !== undefined ? "https" : req.nextUrl.protocol.replace(":", "");
   const upstream = await fetch(`${pythonApiUrl()}/api/auth/login${search}`, {
     method: "GET",
     redirect: "manual",
@@ -48,3 +49,5 @@ export async function GET(req: NextRequest) {
   // returns 307; some Caddy setups normalise to 302 — both are valid.)
   return new NextResponse(null, { status: upstream.status, headers });
 }
+
+export const GET = publicRoute(handleGET);

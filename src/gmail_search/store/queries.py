@@ -12,7 +12,7 @@ def upsert_message(conn, msg: Message, *, user_id: Optional[str] = None) -> None
         """INSERT INTO messages (id, thread_id, from_addr, to_addr, subject,
            body_text, body_html, date, labels, history_id, raw_json, user_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT(id) DO UPDATE SET
+           ON CONFLICT(user_id, id) DO UPDATE SET
              thread_id=excluded.thread_id, from_addr=excluded.from_addr,
              to_addr=excluded.to_addr, subject=excluded.subject,
              body_text=excluded.body_text, body_html=excluded.body_html,
@@ -161,14 +161,12 @@ def upsert_thread_summary(
 
 
 def get_message(conn, message_id: str, *, user_id: Optional[str] = None) -> Message | None:
-    """Fetch a message by id. When `user_id` is given, the lookup is
-    scoped to that user — returns None if the message exists but
-    belongs to a different user (treats it as not-found rather than
-    leaking existence)."""
-    if user_id is None:
-        row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
-    else:
-        row = conn.execute("SELECT * FROM messages WHERE id = %s AND user_id = %s", (message_id, user_id)).fetchone()
+    """Fetch one owner's message; omitted owner selects the bootstrap mailbox.
+
+    Foreign messages are treated as not found.
+    """
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    row = conn.execute("SELECT * FROM messages WHERE id = %s AND user_id = %s", (message_id, user_id)).fetchone()
     if row is None:
         return None
     return Message(
@@ -191,28 +189,25 @@ def get_message_bodies_bulk(conn, message_ids: list[str], *, user_id: Optional[s
 
     Used by the search endpoint's `match_detail=full` mode so an agent can
     read whole emails per match in one round-trip instead of N get_thread
-    calls. Scoped to `user_id` when given so one user's search can never
-    surface another user's body text."""
+    calls. Omitted owner selects the bootstrap mailbox.
+    """
     if not message_ids:
         return {}
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     ids = list(message_ids)
-    if user_id is not None:
-        rows = conn.execute(
-            "SELECT id, body_text FROM messages WHERE id = ANY(%s) AND user_id = %s",
-            (ids, user_id),
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT id, body_text FROM messages WHERE id = ANY(%s)", (ids,)).fetchall()
+    rows = conn.execute(
+        "SELECT id, body_text FROM messages WHERE id = ANY(%s) AND user_id = %s",
+        (ids, user_id),
+    ).fetchall()
     return {r["id"]: (r["body_text"] or "") for r in rows}
 
 
 def get_messages_without_embeddings(
     conn, model: str, *, user_id: Optional[str] = None, limit: Optional[int] = None
 ) -> list[Message]:
-    """Messages that have no embedding row for `model` yet. When
-    `user_id` is given, scopes to that user — required for per-user
-    daemons so silvershabbat's embed pass doesn't try to embed
-    scott's 410k messages too (and OOM the box).
+    """Messages in one mailbox without an embedding row for `model`.
+
+    Omitted owner selects the bootstrap mailbox.
 
     `limit` bounds the batch: the old unbounded `SELECT m.* … fetchall()`
     loaded EVERY unembedded message's body + raw_json into RAM at once
@@ -220,20 +215,14 @@ def get_messages_without_embeddings(
     embed in chunks and loop. Uses NOT EXISTS + ORDER BY id so the LIMIT
     can terminate early via the PK + embeddings indexes.
     """
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     lim_sql = " ORDER BY m.id LIMIT %s" if limit is not None else ""
-    if user_id is not None:
-        sql = (
-            "SELECT m.* FROM messages m WHERE m.user_id = %s "
-            "AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.message_id = m.id "
-            "AND e.chunk_type = 'message' AND e.model = %s AND e.user_id = %s)" + lim_sql
-        )
-        params = (user_id, model, user_id) + ((limit,) if limit is not None else ())
-    else:
-        sql = (
-            "SELECT m.* FROM messages m WHERE NOT EXISTS (SELECT 1 FROM embeddings e "
-            "WHERE e.message_id = m.id AND e.chunk_type = 'message' AND e.model = %s)" + lim_sql
-        )
-        params = (model,) + ((limit,) if limit is not None else ())
+    sql = (
+        "SELECT m.* FROM messages m WHERE m.user_id = %s "
+        "AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.message_id = m.id "
+        "AND e.user_id = m.user_id AND e.chunk_type = 'message' AND e.model = %s)" + lim_sql
+    )
+    params = (user_id, model) + ((limit,) if limit is not None else ())
     rows = conn.execute(sql, params).fetchall()
     return [
         Message(
@@ -261,7 +250,7 @@ def upsert_attachment(conn, att: Attachment, *, user_id: Optional[str] = None) -
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
            extracted_text, image_path, raw_path, fetch_status, user_id)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT(message_id, filename) DO UPDATE SET
+           ON CONFLICT(user_id, message_id, filename) DO UPDATE SET
              mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
              raw_path=excluded.raw_path, fetch_status=excluded.fetch_status
            RETURNING id""",
@@ -288,13 +277,11 @@ def upsert_attachment(conn, att: Attachment, *, user_id: Optional[str] = None) -
 
 
 def get_attachments_for_message(conn, message_id: str, *, user_id: Optional[str] = None) -> list[Attachment]:
-    if user_id is None:
-        rows = conn.execute("SELECT * FROM attachments WHERE message_id = %s", (message_id,)).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM attachments WHERE message_id = %s AND user_id = %s",
-            (message_id, user_id),
-        ).fetchall()
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    rows = conn.execute(
+        "SELECT * FROM attachments WHERE message_id = %s AND user_id = %s",
+        (message_id, user_id),
+    ).fetchall()
     return [
         Attachment(
             id=r["id"],
@@ -317,7 +304,7 @@ MAX_EMBED_ERROR_LEN = 500
 
 
 def record_image_embed_failure(
-    conn, attachment_id: int, error: str, *, permanent: bool, max_attempts: int
+    conn, attachment_id: int, error: str, *, permanent: bool, max_attempts: int, user_id: Optional[str] = None
 ) -> str | None:
     """Bump embed_attempts and store the (sanitized) error. Sets
     embed_status = failed_permanent when `permanent` or when this failure
@@ -325,17 +312,18 @@ def record_image_embed_failure(
     attachment's images again (issue #12). One atomic UPDATE: two daemons
     run this pass concurrently, and a read-then-write would let both see
     attempt N-1 and neither apply the cap. Returns the resulting status."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
     row = conn.execute(
         """UPDATE attachments
            SET embed_attempts = embed_attempts + 1,
                embed_error = %s,
                embed_status = CASE WHEN %s OR embed_attempts + 1 >= %s THEN %s ELSE embed_status END
-           WHERE id = %s
+           WHERE id = %s AND user_id = %s
            RETURNING embed_status""",
-        (sanitize_embed_error(error), permanent, max_attempts, EMBED_STATUS_FAILED_PERMANENT, attachment_id),
+        (sanitize_embed_error(error), permanent, max_attempts, EMBED_STATUS_FAILED_PERMANENT, attachment_id, uid),
     ).fetchone()
     conn.commit()
-    return row[0] if row else None
+    return (row["embed_status"] if isinstance(row, dict) else row[0]) if row else None
 
 
 def sanitize_embed_error(error: str) -> str:
@@ -364,7 +352,7 @@ def record_unfetched_attachment(
         """INSERT INTO attachments (message_id, filename, mime_type, size_bytes,
            raw_path, fetch_status, user_id)
            VALUES (%s, %s, %s, %s, NULL, %s, %s)
-           ON CONFLICT(message_id, filename) DO UPDATE SET
+           ON CONFLICT(user_id, message_id, filename) DO UPDATE SET
              fetch_status = CASE WHEN attachments.raw_path IS NULL
                                  THEN excluded.fetch_status ELSE attachments.fetch_status END,
              size_bytes   = CASE WHEN attachments.raw_path IS NULL
@@ -473,27 +461,24 @@ def get_pending_extraction_message_ids(conn, *, user_id: Optional[str] = None) -
     each id through `get_attachments_for_message` to dispatch the
     actual extractor.
 
-    Multi-tenant: when `user_id` is given, only that user's pending
-    attachments are returned. WITHOUT this filter a per-user daemon
-    silently extracts every other user's backlog too — silvershabbat's
-    daemon was OOM-killed after pulling 14k of scott's pending
-    attachments into memory before getting to embed its own 118.
+    Only the selected owner's pending attachments are returned.
+    Omitted owner selects the bootstrap mailbox.
     """
     # GROUP BY (not DISTINCT) so we can reference MAX(m.date) in ORDER
     # BY — Postgres forbids `SELECT DISTINCT … ORDER BY <expr not in
     # select list>`. A given m.id has exactly one m.date, so MAX is a
     # no-op aggregation, just a syntactic bridge.
-    user_clause = "AND m.user_id = %s" if user_id is not None else ""
-    params = (user_id,) if user_id is not None else ()
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    params = (user_id,)
     rows = conn.execute(
-        f"""
+        """
         SELECT m.id
         FROM messages m
-        JOIN attachments a ON a.message_id = m.id
+        JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id
         WHERE a.extracted_text IS NULL
           AND a.image_path IS NULL
           AND a.raw_path IS NOT NULL
-          {user_clause}
+          AND m.user_id = %s
         GROUP BY m.id
         ORDER BY
           -- Frontfill wins over backfill: anything received in the
@@ -508,7 +493,7 @@ def get_pending_extraction_message_ids(conn, *, user_id: Optional[str] = None) -
     return [r["id"] for r in rows]
 
 
-def extract_attachment_on_demand(conn, attachment_id: int, *, config: dict):
+def extract_attachment_on_demand(conn, attachment_id: int, *, config: dict, user_id: Optional[str] = None):
     """Run the extractor for a single attachment that has NULL/empty
     `extracted_text`, write the result back to the row, and return the
     fresh `ExtractResult`.
@@ -526,13 +511,14 @@ def extract_attachment_on_demand(conn, attachment_id: int, *, config: dict):
     `extracted_text` means we never re-run the extractor for rows the
     daemon has already processed.
     """
+    uid = resolve_write_user_id(conn, user_id=user_id)
     from pathlib import Path as _Path
 
     from gmail_search.extract import dispatch
 
     row = conn.execute(
-        "SELECT id, mime_type, extracted_text, image_path, raw_path " "FROM attachments WHERE id = %s",
-        (attachment_id,),
+        "SELECT id, mime_type, extracted_text, image_path, raw_path " "FROM attachments WHERE id = %s AND user_id = %s",
+        (attachment_id, uid),
     ).fetchone()
     if row is None:
         return None
@@ -560,8 +546,8 @@ def extract_attachment_on_demand(conn, attachment_id: int, *, config: dict):
 
     set_clause = ", ".join(f"{k} = %s" for k in updates)
     conn.execute(
-        f"UPDATE attachments SET {set_clause} WHERE id = %s",
-        (*updates.values(), attachment_id),
+        f"UPDATE attachments SET {set_clause} WHERE id = %s AND user_id = %s",
+        (*updates.values(), attachment_id, uid),
     )
     conn.commit()
     return result
@@ -586,7 +572,7 @@ def upsert_drive_stub(
 ) -> int:
     """Insert a stub row for a Drive-linked doc. Returns the number
     of new rows inserted (0 if the stub already existed; the
-    `(message_id, filename)` dedup index enforces idempotency).
+    `(user_id, message_id, filename)` dedup index enforces idempotency).
     """
     filename = f"Drive: [{drive_id}]"
     uid = resolve_write_user_id(conn, user_id=user_id)
@@ -594,7 +580,7 @@ def upsert_drive_stub(
         """INSERT INTO attachments
            (message_id, filename, mime_type, size_bytes, user_id)
            VALUES (%s, %s, %s, 0, %s)
-           ON CONFLICT (message_id, filename) DO NOTHING""",
+           ON CONFLICT (user_id, message_id, filename) DO NOTHING""",
         (message_id, filename, mime_type, uid),
     )
     return cursor.rowcount
@@ -630,14 +616,16 @@ def fill_drive_attachment(
     title: str,
     text: str,
     drive_id: str,
+    user_id: Optional[str] = None,
 ) -> None:
     """Populate a previously-stubbed Drive row with fetched content.
     Renames the filename to include the title so the UI shows it.
     """
+    uid = resolve_write_user_id(conn, user_id=user_id)
     new_filename = f"Drive: {title} [{drive_id}]"
     conn.execute(
-        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s",
-        (text, new_filename, len(text), attachment_id),
+        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s AND user_id = %s",
+        (text, new_filename, len(text), attachment_id, uid),
     )
 
 
@@ -647,7 +635,7 @@ def fill_drive_attachment(
 # `filename = "URL: <url>"` (or `"URL: <title> [<url>]"` once filled),
 # and `extracted_text = NULL` until the fetcher populates it.
 #
-# The UNIQUE(message_id, filename) constraint is what gives us
+# The UNIQUE(user_id, message_id, filename) constraint is what gives us
 # idempotency — inserting the same stub twice is a no-op.
 
 # Keep stub filenames bounded so a pathological URL doesn't blow up
@@ -667,7 +655,7 @@ def upsert_url_stub(conn, *, message_id: str, url: str, user_id: Optional[str] =
     """Insert a stub row for a URL linked from the message body.
 
     Returns the number of rows inserted (0 if the stub already
-    existed; dedup via UNIQUE(message_id, filename)). Matches the
+    existed; dedup via UNIQUE(user_id, message_id, filename)). Matches the
     shape of `upsert_drive_stub`.
     """
     filename = _url_stub_filename(url)
@@ -676,31 +664,33 @@ def upsert_url_stub(conn, *, message_id: str, url: str, user_id: Optional[str] =
         """INSERT INTO attachments
            (message_id, filename, mime_type, size_bytes, user_id)
            VALUES (%s, %s, 'text/html', 0, %s)
-           ON CONFLICT (message_id, filename) DO NOTHING""",
+           ON CONFLICT (user_id, message_id, filename) DO NOTHING""",
         (message_id, filename, uid),
     )
     return cursor.rowcount
 
 
-def get_crawl_blocked_reason(conn, *, message_id: str) -> Optional[str]:
+def get_crawl_blocked_reason(conn, *, message_id: str, user_id: Optional[str] = None) -> Optional[str]:
     """Return the cached invitation-guard verdict for a message, or None
     if the message was never gated (the common case). Lets a re-sync
     reuse the verdict instead of re-calling Gemini. A row that doesn't
     exist yet also returns None."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
     row = conn.execute(
-        "SELECT crawl_blocked_reason FROM messages WHERE id = %s",
-        (message_id,),
+        "SELECT crawl_blocked_reason FROM messages WHERE id = %s AND user_id = %s",
+        (message_id, uid),
     ).fetchone()
     return row["crawl_blocked_reason"] if row else None
 
 
-def set_crawl_blocked_reason(conn, *, message_id: str, reason: Optional[str]) -> None:
+def set_crawl_blocked_reason(conn, *, message_id: str, reason: Optional[str], user_id: Optional[str] = None) -> None:
     """Persist the invitation-guard verdict for a message. `reason` is a
     short human string when all links were skipped, or None when the
     message crawls normally. Idempotent — overwrites any prior verdict."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
     conn.execute(
-        "UPDATE messages SET crawl_blocked_reason = %s WHERE id = %s",
-        (reason, message_id),
+        "UPDATE messages SET crawl_blocked_reason = %s WHERE id = %s AND user_id = %s",
+        (reason, message_id, uid),
     )
 
 
@@ -711,6 +701,7 @@ def fill_url_attachment(
     title: str,
     text: str,
     url: str,
+    user_id: Optional[str] = None,
 ) -> None:
     """Populate a SINGLE stubbed URL row with fetched content, so it gets
     embedded exactly once. The same URL is linked from up to thousands of
@@ -720,11 +711,12 @@ def fill_url_attachment(
     without improving recall. Renames to `"URL: <title> [<url>]"` so the UI is
     human and `url_from_stub_filename` still round-trips.
     """
+    uid = resolve_write_user_id(conn, user_id=user_id)
     display = (title or _host_of(url) or "link").strip()
     new_filename = f"URL: {display} [{url}]"[:_URL_STUB_FILENAME_CAP]
     conn.execute(
-        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s",
-        (text, new_filename, len(text), attachment_id),
+        "UPDATE attachments SET extracted_text = %s, filename = %s, size_bytes = %s WHERE id = %s AND user_id = %s",
+        (text, new_filename, len(text), attachment_id, uid),
     )
 
 
@@ -893,7 +885,7 @@ def _now_ts(conn) -> float:
 
 def pending_url_stubs(conn, limit: int) -> list[dict]:
     """Return URL stubs that haven't been fetched yet, oldest message
-    first. Each dict carries `{id, message_id, url}`.
+    first. Each dict carries `{user_id, id, message_id, url}`.
 
     Rows whose URL is now on the denylist (the list can tighten over
     time — see `gmail/url_extract.py::_is_denied`) are deleted here so
@@ -951,7 +943,7 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
     # slice yields live URLs (or the table really is drained).
     for _pass in range(6):
         rows = conn.execute(
-            """SELECT a.id, a.message_id, a.filename
+            """SELECT a.id, a.user_id, a.message_id, a.filename
                  FROM attachments a
                 WHERE a.mime_type = 'text/html'
                   AND a.extracted_text IS NULL
@@ -979,15 +971,15 @@ def pending_url_stubs(conn, limit: int) -> list[dict]:
 def _sift_stub_rows(rows, blocked: set[str], seen_urls: set[str], out: list[dict], limit: int):
     from gmail_search.gmail.url_extract import _is_denied  # noqa: PLC0415 (import cycle at module load)
 
-    deny_ids: list[int] = []
+    deny_ids: list[tuple[str, int]] = []
     host_blocked: list[tuple[int, str]] = []  # (id, filename)
     for r in rows:
         url = url_from_stub_filename(r["filename"])
         if not url:
-            deny_ids.append(int(r["id"]))
+            deny_ids.append((r["user_id"], int(r["id"])))
             continue
         if _is_denied(url):
-            deny_ids.append(int(r["id"]))
+            deny_ids.append((r["user_id"], int(r["id"])))
             continue
         if blocked and _host_of(url) in blocked:
             host_blocked.append((int(r["id"]), r["filename"]))
@@ -999,20 +991,23 @@ def _sift_stub_rows(rows, blocked: set[str], seen_urls: set[str], out: list[dict
         if url in seen_urls:
             continue
         seen_urls.add(url)
-        out.append({"id": int(r["id"]), "message_id": r["message_id"], "url": url, "filename": r["filename"]})
+        out.append({"id": int(r["id"]), "user_id": r["user_id"], "message_id": r["message_id"], "url": url, "filename": r["filename"]})
         if len(out) >= limit:
             break
     return deny_ids, host_blocked
 
 
-def _purge_denied(conn, deny_ids: list[int]) -> None:
+def _purge_denied(conn, deny_ids: list[tuple[str, int]]) -> None:
     if not deny_ids:
         return
     B = 1000
     for i in range(0, len(deny_ids), B):
         batch = deny_ids[i : i + B]
-        placeholders = ",".join(["%s"] * len(batch))
-        conn.execute(f"DELETE FROM attachments WHERE id IN ({placeholders})", batch)
+        placeholders = ",".join(["(%s,%s)"] * len(batch))
+        conn.execute(
+            f"DELETE FROM attachments WHERE (user_id,id) IN ({placeholders})",
+            [value for identity in batch for value in identity],
+        )
     conn.commit()
 
 
@@ -1039,40 +1034,49 @@ def insert_embedding(conn, rec: EmbeddingRecord, *, user_id: Optional[str] = Non
     cursor = conn.execute(
         """INSERT INTO embeddings (message_id, attachment_id, chunk_type,
            chunk_text, embedding, model, user_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           SELECT %s, %s, %s, %s, %s, %s, %s
+           WHERE EXISTS (SELECT 1 FROM messages WHERE user_id = %s AND id = %s)
+             AND (%s::bigint IS NULL OR EXISTS (
+               SELECT 1 FROM attachments WHERE user_id = %s AND message_id = %s AND id = %s))
            RETURNING id""",
-        (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model, uid),
+        (rec.message_id, rec.attachment_id, rec.chunk_type, rec.chunk_text, rec.embedding, rec.model, uid,
+         uid, rec.message_id, rec.attachment_id, uid, rec.message_id, rec.attachment_id),
     )
     row = cursor.fetchone()
-    conn.commit()
     if row is None:
-        return 0
+        raise ValueError("Embedding parent does not belong to the requested owner/message")
+    conn.commit()
     try:
         return int(row["id"])
     except (KeyError, TypeError):
         return int(row[0])
 
 
-def embedding_exists(conn, message_id: str, attachment_id: int | None, chunk_type: str, model: str) -> bool:
+def embedding_exists(
+    conn, message_id: str, attachment_id: int | None, chunk_type: str, model: str,
+    *, user_id: Optional[str] = None,
+) -> bool:
+    uid = resolve_write_user_id(conn, user_id=user_id)
     if attachment_id is None:
         row = conn.execute(
             """SELECT 1 FROM embeddings
                WHERE message_id = %s AND attachment_id IS NULL
-               AND chunk_type = %s AND model = %s""",
-            (message_id, chunk_type, model),
+               AND chunk_type = %s AND model = %s AND user_id = %s""",
+            (message_id, chunk_type, model, uid),
         ).fetchone()
     else:
         row = conn.execute(
             """SELECT 1 FROM embeddings
                WHERE message_id = %s AND attachment_id = %s
-               AND chunk_type = %s AND model = %s""",
-            (message_id, attachment_id, chunk_type, model),
+               AND chunk_type = %s AND model = %s AND user_id = %s""",
+            (message_id, attachment_id, chunk_type, model, uid),
         ).fetchone()
     return row is not None
 
 
-def load_all_embeddings(conn, model: str) -> tuple[list[int], list[bytes]]:
-    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s", (model,)).fetchall()
+def load_all_embeddings(conn, model: str, *, user_id: Optional[str] = None) -> tuple[list[int], list[bytes]]:
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    rows = conn.execute("SELECT id, embedding FROM embeddings WHERE model = %s AND user_id = %s", (model, uid)).fetchall()
     ids = [r["id"] for r in rows]
     blobs = [r["embedding"] for r in rows]
     return ids, blobs
@@ -1161,6 +1165,70 @@ def search_fts(
     return _search_fts_postgres(conn, query, limit, candidate_ids, user_id=user_id)
 
 
+# The BM25 key comes from the connection's bound schema profile, never a local
+# literal — see `store/schema_profile.py`.
+from gmail_search.store.schema_profile import bm25_key as _bm25_score_key  # noqa: E402
+
+# A query naming a column the schema does not have is a deployment mismatch, not
+# an empty result set. Letting it through as {} is how a silent search outage
+# looks from the outside: the request succeeds and simply ranks nothing.
+_SCHEMA_MISMATCH_SQLSTATES = frozenset({
+    "42703",  # undefined_column
+    "42P01",  # undefined_table
+    "42883",  # undefined_function
+    "3F000",  # invalid_schema_name
+})
+
+
+def _is_schema_mismatch(error: Exception) -> bool:
+    return getattr(getattr(error, "diag", None), "sqlstate", None) in _SCHEMA_MISMATCH_SQLSTATES
+
+
+def _pg_bm25_scores(
+    conn,
+    *,
+    table: str,
+    select_id: str,
+    candidate_column: str,
+    bm25_query: str,
+    limit: int,
+    logger,
+    candidate_ids: list[str] | None,
+    user_id: Optional[str],
+) -> dict[str, float]:
+    """One BM25 pass, shared by the message and attachment callers.
+
+    Returns `{message_id: best_score}`. Transient faults degrade to the scores
+    collected so far, matching the long-standing "FTS must never fail the
+    request" behaviour; a schema/profile mismatch is re-raised.
+    """
+    scores: dict[str, float] = {}
+    user_clause = " AND user_id = %s" if user_id else ""
+    user_param: list = [user_id] if user_id else []
+    candidate_clause = f" AND {candidate_column} = ANY(%s::text[])" if candidate_ids is not None else ""
+    sql = (
+        f"SELECT {select_id}, paradedb.score({_bm25_score_key(conn, table)}) AS rank "
+        f"FROM {table} "
+        f"WHERE {table} @@@ %s{candidate_clause}{user_clause} "
+        "ORDER BY rank DESC LIMIT %s"
+    )
+    params: list = [bm25_query]
+    if candidate_ids is not None:
+        params.append(list(candidate_ids))
+    params += user_param + [limit]
+    try:
+        for row in conn.execute(sql, params).fetchall():
+            message_id = row["message_id"]
+            rank = float(row["rank"] or 0.0)
+            if message_id not in scores or rank > scores[message_id]:
+                scores[message_id] = rank
+    except Exception as e:
+        if _is_schema_mismatch(e):
+            raise
+        logger.exception(f"PG BM25 error on {table}: {e!s} | query={bm25_query!r}")
+    return scores
+
+
 def _pg_bm25_messages(
     conn,
     bm25_query: str,
@@ -1172,7 +1240,7 @@ def _pg_bm25_messages(
 ) -> dict[str, float]:
     """BM25 pass against the `messages` table via pg_search.
 
-    Uses the `@@@` operator (Tantivy BM25 match) and `paradedb.score(id)`
+    Uses the `@@@` operator (Tantivy BM25 match) and `paradedb.score(search_id)`
     for a real BM25 score. The query string is interpreted by Tantivy's
     query parser, which natively handles phrase quoting (`"foo bar"`),
     boolean operators, and per-field targeting.
@@ -1182,39 +1250,21 @@ def _pg_bm25_messages(
     restriction. An empty list is treated as a no-op short-circuit by the
     caller (``search_fts``).
     """
-    scores: dict[str, float] = {}
-    try:
-        # Per the 0d benchmark, ParadeDB BM25 (`@@@`) composes cleanly
-        # with `AND user_id = $1` — same recall, ~75ms latency. We add
-        # the user filter into every BM25 SQL even when candidate_ids
-        # is set, since candidate_ids may have come from a different
-        # path that didn't itself filter by user.
-        user_clause = " AND user_id = %s" if user_id else ""
-        user_param: list = [user_id] if user_id else []
-        if candidate_ids is None:
-            rows = conn.execute(
-                "SELECT id AS message_id, paradedb.score(id) AS rank "
-                "FROM messages "
-                f"WHERE messages @@@ %s{user_clause} "
-                "ORDER BY rank DESC LIMIT %s",
-                [bm25_query] + user_param + [limit],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id AS message_id, paradedb.score(id) AS rank "
-                "FROM messages "
-                f"WHERE messages @@@ %s AND id = ANY(%s::text[]){user_clause} "
-                "ORDER BY rank DESC LIMIT %s",
-                [bm25_query, list(candidate_ids)] + user_param + [limit],
-            ).fetchall()
-        for r in rows:
-            mid = r["message_id"]
-            raw = float(r["rank"] or 0.0)
-            if mid not in scores or raw > scores[mid]:
-                scores[mid] = raw
-    except Exception as e:  # paranoid catch — FTS must never fail the request
-        logger.exception(f"PG BM25 error on messages: {e!s} | query={bm25_query!r}")
-    return scores
+    # Per the 0d benchmark, ParadeDB BM25 (`@@@`) composes cleanly with
+    # `AND user_id = $1` — same recall, ~75ms latency. We add the user filter
+    # into every BM25 SQL even when candidate_ids is set, since candidate_ids
+    # may have come from a different path that didn't itself filter by user.
+    return _pg_bm25_scores(
+        conn,
+        table="messages",
+        select_id="id AS message_id",
+        candidate_column="id",
+        bm25_query=bm25_query,
+        limit=limit,
+        logger=logger,
+        candidate_ids=candidate_ids,
+        user_id=user_id,
+    )
 
 
 def _pg_bm25_attachments(
@@ -1235,34 +1285,17 @@ def _pg_bm25_attachments(
     When ``candidate_ids`` is non-None, restricts hits to attachments
     whose ``message_id`` is in that set.
     """
-    scores: dict[str, float] = {}
-    try:
-        user_clause = " AND user_id = %s" if user_id else ""
-        user_param: list = [user_id] if user_id else []
-        if candidate_ids is None:
-            rows = conn.execute(
-                "SELECT message_id, paradedb.score(id) AS rank "
-                "FROM attachments "
-                f"WHERE attachments @@@ %s{user_clause} "
-                "ORDER BY rank DESC LIMIT %s",
-                [bm25_query] + user_param + [limit],
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT message_id, paradedb.score(id) AS rank "
-                "FROM attachments "
-                f"WHERE attachments @@@ %s AND message_id = ANY(%s::text[]){user_clause} "
-                "ORDER BY rank DESC LIMIT %s",
-                [bm25_query, list(candidate_ids)] + user_param + [limit],
-            ).fetchall()
-        for r in rows:
-            mid = r["message_id"]
-            raw = float(r["rank"] or 0.0)
-            if mid not in scores or raw > scores[mid]:
-                scores[mid] = raw
-    except Exception as e:
-        logger.exception(f"PG BM25 error on attachments: {e!s} | query={bm25_query!r}")
-    return scores
+    return _pg_bm25_scores(
+        conn,
+        table="attachments",
+        select_id="message_id",
+        candidate_column="message_id",
+        bm25_query=bm25_query,
+        limit=limit,
+        logger=logger,
+        candidate_ids=candidate_ids,
+        user_id=user_id,
+    )
 
 
 # Field lists for the BM25 multi-field query builder. pg_search's Tantivy

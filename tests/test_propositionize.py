@@ -1,6 +1,7 @@
 """Live proposition-extraction daemon: OpenRouterBackend + propositionize_pending."""
 
 import json
+from contextlib import contextmanager
 from datetime import datetime
 
 import httpx
@@ -140,6 +141,7 @@ def _count_facts(conn, uid):
     return conn.execute("SELECT count(*) AS n FROM propositions WHERE user_id=%s", (uid,)).fetchone()["n"]
 
 
+@contextmanager
 def _setup(db_backend):
     from gmail_search import propositions as P
     from gmail_search.auth.write_user import resolve_write_user_id
@@ -147,69 +149,69 @@ def _setup(db_backend):
 
     db_path = db_backend["db_path"]
     init_db(db_path)
-    conn = get_connection(db_path)
-    uid = resolve_write_user_id(conn)
-    P.ensure_table(conn)
-    P.ensure_processed_table(conn)
-    return conn, uid
+    with get_connection(db_path) as conn:
+        uid = resolve_write_user_id(conn)
+        P.ensure_table(conn)
+        P.ensure_processed_table(conn)
+        yield conn, uid
 
 
 def test_propositionize_pending_idempotent(db_backend, tmp_path):
     from gmail_search import propositions as P
 
-    conn, uid = _setup(db_backend)
-    _seed_msg(conn, "m1", "SUBJ_A", "body one", 1)
-    conn.commit()
-    be, emb = FakeBackend(), FakeEmbedder()
+    with _setup(db_backend) as (conn, uid):
+        _seed_msg(conn, "m1", "SUBJ_A", "body one", 1)
+        conn.commit()
+        be, emb = FakeBackend(), FakeEmbedder()
 
-    s1 = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="Owner (o@x.com)", batch=100)
-    assert (s1["messages"], s1["facts"], s1["errors"]) == (1, 1, 0)
-    assert _count_facts(conn, uid) == 1
-    assert be.calls == 1
+        s1 = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="Owner (o@x.com)", batch=100)
+        assert (s1["messages"], s1["facts"], s1["errors"]) == (1, 1, 0)
+        assert _count_facts(conn, uid) == 1
+        assert be.calls == 1
 
-    # second pass: nothing unprocessed -> no work, no extra LLM calls
-    s2 = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="Owner (o@x.com)", batch=100)
-    assert s2["messages"] == 0
-    assert be.calls == 1
+        # second pass: nothing unprocessed -> no work, no extra LLM calls
+        s2 = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="Owner (o@x.com)", batch=100)
+        assert s2["messages"] == 0
+        assert be.calls == 1
 
 
 def test_propositionize_atomic_replace(db_backend, tmp_path):
     from gmail_search import propositions as P
 
-    conn, uid = _setup(db_backend)
-    _seed_msg(conn, "m1", "SUBJ_A", "body one", 1)
-    conn.commit()
-    be, emb = FakeBackend(), FakeEmbedder()
-    P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
-    assert [r["text"] for r in conn.execute("SELECT text FROM propositions WHERE user_id=%s", (uid,)).fetchall()] == [
-        "fact A v1"
-    ]
+    with _setup(db_backend) as (conn, uid):
+        _seed_msg(conn, "m1", "SUBJ_A", "body one", 1)
+        conn.commit()
+        be, emb = FakeBackend(), FakeEmbedder()
+        P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
+        assert [r["text"] for r in conn.execute("SELECT text FROM propositions WHERE user_id=%s", (uid,)).fetchall()] == [
+            "fact A v1"
+        ]
 
-    # mutate the message + clear marker -> reprocess replaces the stale fact
-    conn.execute("UPDATE messages SET subject=%s WHERE id=%s AND user_id=%s", ("SUBJ_A_V2", "m1", uid))
-    conn.execute("DELETE FROM prop_processed WHERE user_id=%s AND message_id=%s", (uid, "m1"))
-    conn.commit()
-    P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
-    texts = [r["text"] for r in conn.execute("SELECT text FROM propositions WHERE user_id=%s", (uid,)).fetchall()]
-    assert texts == ["fact A v2"]  # old fact gone, no duplicate
+        # mutate the message + clear marker -> reprocess replaces the stale fact
+        conn.execute("UPDATE messages SET subject=%s WHERE id=%s AND user_id=%s", ("SUBJ_A_V2", "m1", uid))
+        conn.execute("DELETE FROM prop_processed WHERE user_id=%s AND message_id=%s", (uid, "m1"))
+        conn.commit()
+        P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
+        texts = [r["text"] for r in conn.execute("SELECT text FROM propositions WHERE user_id=%s", (uid,)).fetchall()]
+        assert texts == ["fact A v2"]  # old fact gone, no duplicate
 
 
 def test_propositionize_failure_leaves_message_unstamped(db_backend, tmp_path):
     from gmail_search import propositions as P
 
-    conn, uid = _setup(db_backend)
-    _seed_msg(conn, "ok1", "SUBJ_A", "fine", 1)
-    _seed_msg(conn, "bad1", "FAIL please", "nope", 2)
-    conn.commit()
-    be, emb = FakeBackend(), FakeEmbedder()
+    with _setup(db_backend) as (conn, uid):
+        _seed_msg(conn, "ok1", "SUBJ_A", "fine", 1)
+        _seed_msg(conn, "bad1", "FAIL please", "nope", 2)
+        conn.commit()
+        be, emb = FakeBackend(), FakeEmbedder()
 
-    s = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
-    assert s["errors"] == 1
-    stamped = {
-        r["message_id"]
-        for r in conn.execute("SELECT message_id FROM prop_processed WHERE user_id=%s", (uid,)).fetchall()
-    }
-    assert "ok1" in stamped and "bad1" not in stamped  # failed msg retries next pass
+        s = P.propositionize_pending(conn, None, be, emb, user_id=uid, owner="o", batch=100)
+        assert s["errors"] == 1
+        stamped = {
+            r["message_id"]
+            for r in conn.execute("SELECT message_id FROM prop_processed WHERE user_id=%s", (uid,)).fetchall()
+        }
+        assert "ok1" in stamped and "bad1" not in stamped  # failed msg retries next pass
 
 
 def test_owner_string_for_user_multitenant(db_backend, tmp_path):
@@ -218,15 +220,15 @@ def test_owner_string_for_user_multitenant(db_backend, tmp_path):
 
     db_path = db_backend["db_path"]
     init_db(db_path)
-    conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO users (id, email, name) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING",
-        ("u_named", "named@x.com", "Named Person"),
-    )
-    conn.execute(
-        "INSERT INTO users (id, email) VALUES (%s,%s) ON CONFLICT (id) DO NOTHING",
-        ("u_bare", "bare@x.com"),
-    )
-    conn.commit()
-    assert P.owner_string_for_user(conn, "u_named") == "Named Person (named@x.com)"
-    assert P.owner_string_for_user(conn, "u_bare") == "bare@x.com"
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, email, name) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+            ("u_named", "named@x.com", "Named Person"),
+        )
+        conn.execute(
+            "INSERT INTO users (id, email) VALUES (%s,%s) ON CONFLICT (id) DO NOTHING",
+            ("u_bare", "bare@x.com"),
+        )
+        conn.commit()
+        assert P.owner_string_for_user(conn, "u_named") == "Named Person (named@x.com)"
+        assert P.owner_string_for_user(conn, "u_bare") == "bare@x.com"

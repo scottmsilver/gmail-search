@@ -53,6 +53,8 @@ from gmail_search.auth.session import (
     verify_handoff_jwt,
 )
 
+from gmail_search.auth import public as public_auth
+
 logger = logging.getLogger(__name__)
 
 HANDOFF_QUERY_PARAM = "silver_oauth"
@@ -92,6 +94,19 @@ def _new_user_id() -> str:
     """Opaque per-user id. Not the email — emails change (rename, alias)
     and exposing them as FK targets leaks PII into log lines."""
     return f"u_{secrets.token_urlsafe(12)}"
+
+
+def _existing_public_user(db_path: Path, email: str) -> dict[str, Any]:
+    from gmail_search.store.db import get_connection
+
+    conn = get_connection(db_path)
+    try:
+        row = conn.execute("SELECT id, email, name FROM users WHERE email = %s", (email,)).fetchone()
+        if row is None:
+            raise HTTPException(403, "This account has no connected mailbox")
+        return dict(row)
+    finally:
+        conn.close()
 
 
 def _upsert_user(db_path: Path, *, email: str, name: Optional[str], picture: Optional[str]) -> dict[str, Any]:
@@ -180,6 +195,8 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
         # Restrict return_url to local paths — open-redirect prevention.
         # An external return_url would let an attacker phish through a
         # successful sign-in.
+        if public_auth.public_enabled():
+            return public_auth.start_login(return_url)
         safe_return = safe_relative_return_url(return_url)
         # Build our own callback URL using the request's host so
         # localhost / prod / LAN-name all work without per-host config.
@@ -248,21 +265,26 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
         if not token:
             raise HTTPException(status_code=400, detail="missing silver_oauth handoff token")
 
-        # State binding: cookie + query param must agree (constant-time
-        # compare). Without this, an attacker's valid 60s handoff JWT
-        # could be force-fed to a victim's browser via a crafted URL,
-        # logging the victim into the attacker's account (session swap).
-        cookie_state = request.cookies.get(STATE_COOKIE) or ""
-        query_state = request.query_params.get(STATE_QUERY_PARAM) or ""
-        if not cookie_state or not query_state or not hmac.compare_digest(cookie_state, query_state):
-            raise HTTPException(
-                status_code=400,
-                detail="login state mismatch — restart sign-in",
+        if public_auth.public_enabled():
+            payload, return_target = public_auth.consume_handoff(
+                token, request.cookies.get(public_auth.NONCE_COOKIE, "")
             )
+        else:
+            # State binding: cookie + query param must agree (constant-time
+            # compare). Without this, an attacker's valid 60s handoff JWT
+            # could be force-fed to a victim's browser via a crafted URL,
+            # logging the victim into the attacker's account (session swap).
+            cookie_state = request.cookies.get(STATE_COOKIE) or ""
+            query_state = request.query_params.get(STATE_QUERY_PARAM) or ""
+            if not cookie_state or not query_state or not hmac.compare_digest(cookie_state, query_state):
+                raise HTTPException(
+                    status_code=400,
+                    detail="login state mismatch — restart sign-in",
+                )
 
-        payload = verify_handoff_jwt(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="handoff token invalid or expired")
+            payload = verify_handoff_jwt(token)
+            if not payload:
+                raise HTTPException(status_code=401, detail="handoff token invalid or expired")
 
         email = normalize_email(str(payload.get("email") or ""))
         if not email:
@@ -275,16 +297,24 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
                 detail=f"{email} is not allowed to use this app",
             )
 
-        user = _upsert_user(
-            db_path,
-            email=email,
-            name=payload.get("name"),
-            picture=payload.get("picture"),
+        user = _existing_public_user(db_path, email) if public_auth.public_enabled() else _upsert_user(
+            db_path, email=email, name=payload.get("name"), picture=payload.get("picture"),
         )
 
         response = RedirectResponse(url=return_target)
         # Clear the one-time state cookie now that we've consumed it.
-        _clear_state_cookie(response)
+        if public_auth.public_enabled():
+            response.delete_cookie(
+                public_auth.NONCE_COOKIE,
+                path="/",
+                secure=True,
+                httponly=True,
+                samesite="lax",
+            )
+            response.headers["Cache-Control"] = "private, no-store"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        else:
+            _clear_state_cookie(response)
         set_session_cookie(
             response,
             request,
@@ -312,17 +342,20 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
             return {"multi_tenant": False, "user": None}
         return {
             "multi_tenant": True,
+            "public_mode": public_auth.public_enabled(),
             "user": {
                 "id": user.id,
                 "email": user.email,
                 "name": user.name,
                 "picture": user.picture,
-                "is_admin": is_admin_email(user.email),
+                "is_admin": not public_auth.public_enabled() and is_admin_email(user.email),
             },
         }
 
     @app.post("/api/auth/logout")
-    async def logout() -> JSONResponse:
+    async def logout(request: Request) -> JSONResponse:
+        if public_auth.public_enabled():
+            public_auth.revoke_session(request.cookies.get(public_auth.SESSION_COOKIE, ""))
         response = JSONResponse({"ok": True})
         clear_session_cookie(response)
         return response
@@ -351,6 +384,11 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="multi-tenant auth is disabled (GMAIL_MULTI_TENANT != 1)",
+            )
+        if public_auth.public_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Public Gmail linking requires a separately registered broker flow",
             )
         if user is None:
             raise HTTPException(status_code=401, detail="must sign in before connecting Gmail")
@@ -383,7 +421,9 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
         return response
 
     @app.get("/api/auth/gmail-status")
-    async def gmail_status(user: Optional[User] = Depends(require_user)) -> dict[str, Any]:
+    async def gmail_status(
+        user: Optional[User] = Depends(require_user),
+    ) -> dict[str, Any]:
         """Probe whether the broker has Gmail tokens for the signed-in
         user. UI uses this to show "Connect Gmail" vs. "Connected ✓"
         in Settings. Hits broker /token with a no-op call; 200 = have

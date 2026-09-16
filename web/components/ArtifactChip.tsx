@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { usePreview } from "./PreviewContext";
 
@@ -12,7 +13,7 @@ import { usePreview } from "./PreviewContext";
 // side panel the rest of the app uses.
 
 type Props = {
-  artifactId: number;
+  artifactId: string | number;
 };
 
 type ArtifactMeta = {
@@ -20,17 +21,21 @@ type ArtifactMeta = {
   filename: string;
 };
 
-const fetchMeta = async (id: number): Promise<ArtifactMeta> => {
+const fetchMeta = async (href: string, id: string | number): Promise<ArtifactMeta> => {
   // HEAD isn't wired upstream yet; do a tiny GET and peek only the
   // headers. Body is discarded via resp.body.cancel() below.
-  const resp = await fetch(`/api/artifact/${encodeURIComponent(String(id))}`, {
+  const resp = await fetch(href, {
     method: "GET",
   });
   if (!resp.ok) throw new Error(`artifact ${id}: ${resp.status}`);
   const ct = resp.headers.get("content-type") ?? "application/octet-stream";
   const cd = resp.headers.get("content-disposition") ?? "";
   const match = /filename="?([^";]+)"?/.exec(cd);
-  const filename = match?.[1] ?? `artifact-${id}`;
+  let filename = match?.[1] ?? `artifact-${id}`;
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (encoded) {
+    try { filename = decodeURIComponent(encoded[1]); } catch { /* retain fallback */ }
+  }
   await resp.body?.cancel();
   return { mimeType: ct, filename };
 };
@@ -38,18 +43,21 @@ const fetchMeta = async (id: number): Promise<ArtifactMeta> => {
 export const ArtifactChip = ({ artifactId }: Props) => {
   const [meta, setMeta] = useState<ArtifactMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const fetchedRef = useRef(false);
   const { openPreview } = usePreview();
+  const conversation = useSearchParams().get("c");
+  const opaque = /^[a-f0-9]{32}$/.test(String(artifactId));
+  const href = `/api/artifact/${encodeURIComponent(String(artifactId))}`
+    + (opaque && conversation ? `?conversation_id=${encodeURIComponent(conversation)}` : "");
 
   useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-    fetchMeta(artifactId)
-      .then(setMeta)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
-  }, [artifactId]);
-
-  const href = `/api/artifact/${encodeURIComponent(String(artifactId))}`;
+    let active = true;
+    setMeta(null);
+    setError(null);
+    fetchMeta(href, artifactId)
+      .then(value => { if (active) setMeta(value); })
+      .catch((e: unknown) => { if (active) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { active = false; };
+  }, [artifactId, href]);
   const label = meta?.filename ?? `art:${artifactId}`;
 
   const handleClick = (e: React.MouseEvent) => {

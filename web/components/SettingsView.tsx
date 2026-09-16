@@ -112,7 +112,7 @@ const JobControlCard = ({
 // Shown only when the server reports `multi_tenant: true`. Lets each
 // invited user grant Gmail access to the silver-oauth broker so the
 // sync daemon can fetch their mail with their own credentials.
-type GmailStatus = { multi_tenant: boolean; connected: boolean; scope_problem?: boolean };
+type GmailStatus = { multi_tenant: boolean; connected: boolean; scope_problem?: boolean; connect_method?: "POST" };
 
 const BrokerGmailCard = () => {
   const [status, setStatus] = useState<GmailStatus | null>(null);
@@ -149,8 +149,7 @@ const BrokerGmailCard = () => {
       <CardHeader>
         <CardTitle className="text-sm">Gmail connection</CardTitle>
         <CardDescription>
-          Grant the silver-oauth broker access to your Gmail so the sync daemon can index
-          your messages. Tokens stay on the broker — this app never sees them.
+          Connect your Gmail account to search and analyze your messages.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
@@ -174,14 +173,19 @@ const BrokerGmailCard = () => {
           <span className="text-xs text-muted-foreground">
             {status.connected
               ? "Re-connect to refresh granted scopes."
-              : "Click below to grant Gmail + Drive read access via Google."}
+              : "Connect using Google."}
           </span>
-          <a
-            href={connectHref}
-            className="inline-flex items-center rounded-md border border-border bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90"
-          >
-            {status.connected ? "Reconnect" : "Connect Gmail"}
-          </a>
+          {status.connect_method === "POST" ? (
+            <form method="post" action="/api/auth/connect-gmail">
+              <button type="submit" className="inline-flex items-center rounded-md border border-border bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90">
+                {status.connected ? "Reconnect" : "Connect Gmail"}
+              </button>
+            </form>
+          ) : (
+            <a href={connectHref} className="inline-flex items-center rounded-md border border-border bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90">
+              {status.connected ? "Reconnect" : "Connect Gmail"}
+            </a>
+          )}
         </div>
       </CardContent>
     </Card>

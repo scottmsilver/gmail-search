@@ -27,7 +27,7 @@ type AuthState =
   | { kind: "signed-out" }
   | { kind: "error"; detail: string };
 
-export function AuthGate({ children }: { children: React.ReactNode }) {
+export function AuthGate({ children, publicMode = false, fullWorkerMode = false }: { children: React.ReactNode; publicMode?: boolean; fullWorkerMode?: boolean }) {
   const [state, setState] = useState<AuthState>({ kind: "checking" });
 
   useEffect(() => {
@@ -45,7 +45,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           return;
         }
         const body = await res.json();
-        if (!body.multi_tenant) {
+        if (publicMode && (body.multi_tenant !== true || !body.user?.id)) {
+          setState({ kind: "signed-out" });
+        } else if (!body.multi_tenant) {
           setState({ kind: "open" });
         } else if (body.user) {
           const u = body.user;
@@ -70,7 +72,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [publicMode]);
 
   // Sign-out: clear the cookie, then full reload. We do a hard reload
   // (not router.push) so AuthGate's effect re-runs against the now-
@@ -96,9 +98,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const ctxSignedIn = useMemo(
     () =>
       state.kind === "signed-in"
-        ? { multiTenant: true, user: state.user, signOut }
+        ? { multiTenant: true, user: {...state.user, is_admin: publicMode ? false : state.user.is_admin}, signOut, publicMode, fullWorkerMode }
         : null,
-    [state, signOut],
+    [state, signOut, publicMode, fullWorkerMode],
   );
 
   if (state.kind === "checking") {

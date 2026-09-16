@@ -34,14 +34,15 @@ def extract_zip(file_path: Path, config: dict[str, Any]) -> ExtractResult | None
 
     text_parts: list[str] = []
     images: list[Path] = []
-    files_processed = 0
+    files_attempted = 0
 
     for info in zf.infolist():
         if info.is_dir():
             continue
-        if files_processed >= MAX_FILES:
+        if files_attempted >= MAX_FILES:
             logger.info(f"Reached file limit ({MAX_FILES}) in zip {file_path.name}")
             break
+        files_attempted += 1
 
         # Skip very large files inside the zip
         if info.file_size > config.get("max_file_size_mb", 10) * 1024 * 1024:
@@ -52,6 +53,11 @@ def extract_zip(file_path: Path, config: dict[str, Any]) -> ExtractResult | None
         if not safe_name:
             continue
 
+        # Unsupported entries consume the attempt budget but never host disk.
+        mime_type = _guess_mime_type(safe_name)
+        if not mime_type:
+            continue
+
         # Extract the file
         try:
             extracted_path = extract_dir / safe_name
@@ -59,11 +65,6 @@ def extract_zip(file_path: Path, config: dict[str, Any]) -> ExtractResult | None
                 dst.write(src.read())
         except Exception as e:
             logger.warning(f"Failed to extract {info.filename} from zip: {e}")
-            continue
-
-        # Guess mime type from extension
-        mime_type = _guess_mime_type(safe_name)
-        if not mime_type:
             continue
 
         # Run the appropriate extractor
@@ -77,7 +78,6 @@ def extract_zip(file_path: Path, config: dict[str, Any]) -> ExtractResult | None
             if result.text:
                 text_parts.append(f"[{safe_name}]\n{result.text}")
             images.extend(result.images)
-            files_processed += 1
 
     zf.close()
 

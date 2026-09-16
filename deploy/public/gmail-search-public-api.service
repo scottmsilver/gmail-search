@@ -1,0 +1,24 @@
+[Unit]
+Description=Gmail Search public API (owner-only, retrieval-only)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=%h/development/gmail-search
+Environment=OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=2
+Environment=PYTHONPATH=%h/.local/share/gmail-search/public-current/api/src
+EnvironmentFile=%h/.config/gmail-search/public-api.env
+ExecStart=%h/development/gmail-search/.venv/bin/python -m gmail_search.public_server
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitNOFILE=4096
+TasksMax=1024
+CPUQuota=400%
+MemoryMax=16G
+TimeoutStopSec=30
+[Install]
+WantedBy=default.target

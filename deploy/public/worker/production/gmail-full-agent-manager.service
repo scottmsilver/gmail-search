@@ -1,0 +1,29 @@
+[Unit]
+Description=Gmail Search dedicated full-agent VM manager
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+ConditionHost=gmail-execution-worker
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/gmail-worker
+ExecStartPre=/usr/bin/python3 -I /opt/gmail-worker/production_worker_profile.py --check
+ExecStart=/usr/bin/python3 -I /opt/gmail-worker/production_worker_profile.py
+ExecStopPost=/usr/bin/python3 -I /opt/gmail-worker/production_worker_profile.py --reap
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=90
+TimeoutStopSec=45
+KillMode=mixed
+LimitCORE=0
+# The jailer must manage its own mount/PID/net namespaces and cgroup subtree.
+# Do not add PrivateNetwork: relay must reach the fixed outer loopback tunnel.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

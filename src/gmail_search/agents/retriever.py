@@ -1,4 +1,4 @@
-"""Retriever sub-agent — runs search_emails / query_emails / sql_query /
+"""Retriever sub-agent — runs search_emails / query_emails /
 get_thread and produces an EvidenceBundle the Analyst and Writer
 downstream can ground on.
 
@@ -29,10 +29,10 @@ Tools:
   get_attachment(attachment_id, mode)                  — attachment text/meta;
                                                           mode is "text" (default),
                                                           "meta", or "rendered_pages"
-  sql_query(query)                                     — aggregations
+  Arbitrary SQL is disabled; use only the tools listed above.
 
 If a tool returns `{error: "..."}` instead of data, READ the error
-message, fix your query (wrong SQL dialect, bad arg name, etc.),
+message, fix your query (bad argument name or unsupported filter),
 and retry. Do NOT give up on the first failure.
 
 SIZE AWARENESS: the Writer's input context gets clipped at ~80k

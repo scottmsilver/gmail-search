@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -326,20 +326,72 @@ async def query_emails(
 # ── get_thread ─────────────────────────────────────────────────────
 
 
-async def get_thread(thread_id: str, *, user_id: str | None = None) -> dict:
-    """Fetch every message in a thread with body text + attachment
-    manifest. Bodies clipped to 20k chars (an `original_chars` field
-    tells you how much was dropped). Use AFTER search/query when you
-    need the actual words a message contained."""
+def _read_options_error(body_format, message_ids, body_offset, body_limit):
+    if body_format not in ("markdown", "raw"):
+        return "body_format must be markdown or raw"
+    if type(body_offset) is not int or body_offset < 0:
+        return "body_offset must be a non-negative integer"
+    if type(body_limit) is not int or not 1 <= body_limit <= 100_000:
+        return "body_limit must be between 1 and 100000 characters"
+    if message_ids is not None and (not isinstance(message_ids, list) or not message_ids or
+                                   len(message_ids) > 1000 or not all(isinstance(x, str) and x for x in message_ids)):
+        return "message_ids must be a non-empty list of at most 1000 message IDs, or omitted"
+    return None
+
+
+def _body_page(message, field, value, offset, limit):
+    message[field] = value[offset:offset + limit]
+    prefix = "body" if field == "body_text" else field
+    message[f"{prefix}_total_chars"] = len(value)
+    message[f"{prefix}_next_offset"] = offset + limit if offset + limit < len(value) else None
+    if offset or len(value) > limit:
+        message[f"{field}_truncated"] = True
+        if field == "body_text":
+            message["original_chars"] = len(value)
+
+
+async def get_thread(
+    thread_id: str, *, user_id: str | None = None,
+    body_format: Literal["markdown", "raw"] = "markdown",
+    message_ids: list[str] | None = None, body_offset: int = 0,
+    body_limit: int = THREAD_BODY_CHAR_CAP,
+) -> dict:
+    """Read selected messages as Markdown, or explicitly request original bodies.
+
+    The default page is 20k characters per message. Continuation offsets refer
+    to the chosen representation; original_chars is the full body length.
+    Stored content and the web thread response are never changed.
+    """
+    from gmail_search.agents.mail_content import readable_body
+
+    error = _read_options_error(body_format, message_ids, body_offset, body_limit)
+    if error:
+        return {"error": error}
     data = await _get(f"/api/thread/{thread_id}", user_id=user_id)
-    for msg in data.get("messages", []):
-        original = msg.get("body_text") or ""
-        clipped = _clip(original, THREAD_BODY_CHAR_CAP)
-        if clipped != original:
-            msg["body_text"] = clipped
-            msg["original_chars"] = len(original)
-            msg["body_text_truncated"] = True
-    return data
+    if "error" in data:
+        return data
+    cite_ref = data.get("thread_id") or thread_id
+    originals = data.get("messages", [])
+    selected = set(message_ids) if message_ids is not None else None
+    messages = []
+    for original in originals:
+        if selected is not None and original.get("id") not in selected:
+            continue
+        msg = dict(original)
+        msg.update(cite_ref=cite_ref, body_offset=body_offset, body_limit=body_limit)
+        if body_format == "raw":
+            msg["body_format"] = "raw"
+            _body_page(msg, "body_text", original.get("body_text") or "", body_offset, body_limit)
+            _body_page(msg, "body_html", original.get("body_html") or "", body_offset, body_limit)
+        else:
+            body, source = readable_body(original.get("body_text") or "", original.get("body_html") or "")
+            msg.pop("body_html", None)
+            msg["body_source"] = source
+            msg["body_format"] = "markdown" if source == "html" else "text"
+            _body_page(msg, "body_text", body, body_offset, body_limit)
+        messages.append(msg)
+    return {**data, "cite_ref": cite_ref, "thread_message_count": len(originals),
+            "returned_message_count": len(messages), "messages": messages}
 
 
 # Cap on how many items one batch tool call can request. Started at
@@ -417,7 +469,12 @@ async def query_emails_batch(filters: list[dict], *, user_id: str | None = None)
     return {"results": [{"input": f, "result": r} for f, r in zip(filters, results)]}
 
 
-async def get_thread_batch(thread_ids: list[str], *, user_id: str | None = None) -> dict:
+async def get_thread_batch(
+    thread_ids: list[str], *, user_id: str | None = None,
+    body_format: Literal["markdown", "raw"] = "markdown",
+    message_ids: list[str] | None = None, body_offset: int = 0,
+    body_limit: int = THREAD_BODY_CHAR_CAP,
+) -> dict:
     """Fetch many threads concurrently in a single tool call. Use
     this — not N sequential `get_thread` calls — whenever you need
     multiple threads' bodies. Same per-thread response shape as
@@ -434,7 +491,13 @@ async def get_thread_batch(thread_ids: list[str], *, user_id: str | None = None)
         return {"error": "thread_ids must be a non-empty list of strings"}
     if len(thread_ids) > BATCH_MAX_ITEMS:
         return {"error": f"thread_ids cap is {BATCH_MAX_ITEMS}; got {len(thread_ids)}. Split into multiple batches."}
-    results = await _gather_batch(lambda tid: get_thread(tid, user_id=user_id), thread_ids)
+    error = _read_options_error(body_format, message_ids, body_offset, body_limit)
+    if error:
+        return {"error": error}
+    results = await _gather_batch(lambda tid: get_thread(
+        tid, user_id=user_id, body_format=body_format, message_ids=message_ids,
+        body_offset=body_offset, body_limit=body_limit,
+    ), thread_ids)
     return {"results": [{"thread_id": tid, "result": r} for tid, r in zip(thread_ids, results)]}
 
 
@@ -442,50 +505,10 @@ async def get_thread_batch(thread_ids: list[str], *, user_id: str | None = None)
 
 
 async def sql_query(query: str, *, user_id: str | None = None) -> dict:
-    """Run a read-only SELECT against the messages DB (Postgres +
-    ParadeDB). Same safety gate as chat mode: only SELECT/WITH, no
-    DDL/DML, no introspection of pg_catalog / information_schema,
-    500-row + 10s timeout.
+    """Return a stable denial for callers retaining a stale SQL tool handle."""
+    from gmail_search.sql_access import raw_sql_disabled
 
-    Call `describe_schema` first if unsure about column names —
-    common gotchas: `from_addr` (not `sender`), `body_text` (not
-    `body`), `id` (not `message_id`), no `snippet` column.
-
-    REQUIRED — BM25 for free-text. The server REJECTS `LIKE`/`ILIKE`
-    on these columns (forces seq scan, ~50x slower):
-        messages: subject, body_text, from_addr, to_addr
-        attachments: filename, extracted_text
-    Use the `@@@` operator with the row PK (`id`) instead.
-    Translation table:
-        WHERE subject ILIKE '%credit%'
-            →  WHERE id @@@ 'subject:credit'
-        WHERE from_addr LIKE '%delta%' AND subject LIKE '%cancel%'
-            →  WHERE id @@@ 'from_addr:delta AND subject:cancel'
-        WHERE body_text LIKE '%refund issued%'  (phrase)
-            →  WHERE id @@@ 'body_text:"refund issued"'
-    Add `ORDER BY paradedb.score(id) DESC` for relevance.
-
-    Escape hatch: any query containing `@@@` skips the LIKE check —
-    so a BM25 prefilter + LIKE refinement is allowed (use only when
-    BM25 truly can't express the predicate).
-
-    Use for aggregations, multi-field OR, JOINs, NOT EXISTS, relative-
-    date arithmetic — anything search_emails / query_emails can't
-    express. Cells longer than 8000 chars are clipped."""
-    data = await _post("/api/sql", json={"query": query}, user_id=user_id)
-    # Clip huge cells so one row with a mega body_text doesn't blow
-    # the model's context. Match the TS-side cap for consistency.
-    clipped_rows: list[list] = []
-    for row in data.get("rows", []):
-        clipped = []
-        for cell in row:
-            if isinstance(cell, str) and len(cell) > SQL_CELL_CHAR_CAP:
-                clipped.append(_clip(cell, SQL_CELL_CHAR_CAP))
-            else:
-                clipped.append(cell)
-        clipped_rows.append(clipped)
-    data["rows"] = clipped_rows
-    return data
+    return raw_sql_disabled()
 
 
 async def sql_query_batch(queries: list[str], *, user_id: str | None = None) -> dict:
@@ -729,9 +752,6 @@ def build_retrieval_tools(user_id: str | None = None) -> list:
             query_emails_batch,
             get_thread,
             get_thread_batch,
-            sql_query,
-            sql_query_batch,
-            describe_schema,
             get_attachment,
             get_attachment_batch,
         )

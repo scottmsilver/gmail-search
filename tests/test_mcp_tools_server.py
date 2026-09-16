@@ -85,6 +85,23 @@ def test_query_emails_batch_routes_to_underlying_impl(monkeypatch):
 # ── unknown session_id ─────────────────────────────────────────────
 
 
+def test_readable_thread_options_keep_tenant_and_trace(monkeypatch):
+    captured = {}
+    async def fake_batch(thread_ids, **kwargs):
+        captured.update(thread_ids=thread_ids, **kwargs)
+        return {"results": []}
+    monkeypatch.setattr(mts, "_get_thread_batch_impl", fake_batch)
+    mts.register_session("readable-session", evidence_records=None, db_dsn=None, user_id="tenant-one")
+    result = asyncio.run(mts._tool_get_thread_batch(
+        "readable-session", thread_ids=["t1"], message_ids=["m1"],
+        body_format="raw", body_offset=25, body_limit=200,
+    ))
+    assert result == {"results": []}
+    assert captured == {"thread_ids": ["t1"], "message_ids": ["m1"],
+                        "body_format": "raw", "body_offset": 25,
+                        "body_limit": 200, "user_id": "tenant-one"}
+
+
 def test_unknown_session_id_raises():
     """A tool call with no prior register_session must blow up loud
     (not silently return empty / wrong evidence)."""
@@ -124,9 +141,7 @@ def test_build_app_registers_all_tools():
         "search_emails_batch",
         "query_emails_batch",
         "get_thread_batch",
-        "sql_query_batch",
         "find_facts",
-        "describe_schema",
         "get_attachment_batch",
         "publish_artifact_batch",
     }

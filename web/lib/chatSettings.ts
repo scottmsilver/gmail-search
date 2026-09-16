@@ -10,12 +10,11 @@
  * user's preference. All subscribers are notified on change.
  */
 import {
-  AVAILABLE_MODELS,
+  PI_AVAILABLE_MODELS,
+  piModelForRequest,
+  availableModelsFor,
   CLAUDE_AVAILABLE_MODELS,
-  DEFAULT_THINKING,
-  THINKING_LEVELS,
   type DeepBackend,
-  type ThinkingLevel,
 } from "./config";
 
 const STORAGE_KEY = "gmail-search-chat-settings-v1";
@@ -24,28 +23,17 @@ export const THEMES = ["light", "dark", "sepia", "slate"] as const;
 export type Theme = (typeof THEMES)[number];
 
 export type ChatSettings = {
-  model: (typeof AVAILABLE_MODELS)[number] | (typeof CLAUDE_AVAILABLE_MODELS)[number];
-  thinkingLevel: ThinkingLevel;
+  model: (typeof CLAUDE_AVAILABLE_MODELS)[number] | (typeof PI_AVAILABLE_MODELS)[number];
   battleMode: boolean;
-  // When on, the next message is routed through the deep-analysis
-  // multi-agent pipeline (planner → retriever → analyst → writer →
-  // critic) instead of the single-agent chat. Slower + more
-  // expensive; use for real analysis questions.
-  deepMode: boolean;
-  // Which backend powers deep mode. ADK = Python google-adk (Gemini),
-  // claude_code = Anthropic Claude Code runtime. Only meaningful when
-  // deepMode is on.
   deepBackend: DeepBackend;
   theme: Theme;
   sidebarOpen: boolean;
 };
 
 const defaultSettings = (): ChatSettings => ({
-  model: AVAILABLE_MODELS[0],
-  thinkingLevel: DEFAULT_THINKING,
+  model: PI_AVAILABLE_MODELS[0],
   battleMode: false,
-  deepMode: false,
-  deepBackend: "adk",
+  deepBackend: "pi",
   theme: "light",
   sidebarOpen: false,
 });
@@ -70,29 +58,21 @@ const loadFromStorage = () => {
     const parsed = JSON.parse(raw) as Partial<ChatSettings>;
     const deepBackend: DeepBackend =
       parsed.deepBackend === "claude_code" ||
-      parsed.deepBackend === "claude_native" ||
-      parsed.deepBackend === "pi" ||
-      parsed.deepBackend === "adk"
+      parsed.deepBackend === "pi"
         ? parsed.deepBackend
         : current.deepBackend;
-    const validModels =
-      deepBackend === "claude_code" || deepBackend === "claude_native"
-        ? CLAUDE_AVAILABLE_MODELS
-        : AVAILABLE_MODELS;
-    const model = (validModels as readonly string[]).includes(parsed.model ?? "")
-      ? (parsed.model as ChatSettings["model"])
+    const validModels = availableModelsFor(deepBackend);
+    const selectedModel = deepBackend === "pi" ? piModelForRequest(parsed.model) : parsed.model;
+    const model = (validModels as readonly string[]).includes(selectedModel ?? "")
+      ? (selectedModel as ChatSettings["model"])
       : (validModels[0] as ChatSettings["model"]);
-    const thinkingLevel = (THINKING_LEVELS as string[]).includes(parsed.thinkingLevel ?? "")
-      ? (parsed.thinkingLevel as ThinkingLevel)
-      : current.thinkingLevel;
     const battleMode = typeof parsed.battleMode === "boolean" ? parsed.battleMode : current.battleMode;
-    const deepMode = typeof parsed.deepMode === "boolean" ? parsed.deepMode : current.deepMode;
     const theme = (THEMES as readonly string[]).includes(parsed.theme ?? "")
       ? (parsed.theme as Theme)
       : current.theme;
     const sidebarOpen =
       typeof parsed.sidebarOpen === "boolean" ? parsed.sidebarOpen : current.sidebarOpen;
-    current = { model, thinkingLevel, battleMode, deepMode, deepBackend, theme, sidebarOpen };
+    current = { model, battleMode, deepBackend, theme, sidebarOpen };
   } catch {
     // ignore malformed storage
   }

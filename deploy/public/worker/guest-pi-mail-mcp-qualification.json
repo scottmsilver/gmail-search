@@ -1,0 +1,118 @@
+{
+  "profile": "separately pinned synthetic agent_pi_mcp; actual Pi typed MCP via pi-mcp-adapter 2.32.1",
+  "image_sha256": "478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc",
+  "mock_provider_only": true,
+  "inference_gateway_under_test": false,
+  "runs": [
+    {
+      "runtime": "pi",
+      "owner_label": "ALICE",
+      "synthetic_guest_process_observation": {
+        "runtime": "pi",
+        "returncode": 0,
+        "completion": true,
+        "csv_exists": true,
+        "observed_mcp_processes": 1,
+        "peak_mcp_processes": 1
+      },
+      "advertised_tools_exactly_four_mcp_plus_bash": true,
+      "csv": "id,subject,body\r\nshared-message,ALICE_ONLY_SUBJECT,ALICE_ONLY_BODY\r\n",
+      "artifact_bytes": 68,
+      "real_artifact_store": true,
+      "foreign_owner_read_denied": true,
+      "separate_reader_role": true,
+      "single_owner_caps": true,
+      "caps_revoked_after_run": true,
+      "provider_requests": 6,
+      "model_cli_typed_mcp_results": true,
+      "typed_tool_sequence": [
+        "mail_describe_schema",
+        "mail_sql_query_batch",
+        "mail_get_thread_batch",
+        "bash",
+        "mail_publish_artifact_batch"
+      ],
+      "discovered_mcp_tools": {
+        "describe_schema": "mail_describe_schema",
+        "sql_query_batch": "mail_sql_query_batch",
+        "get_thread_batch": "mail_get_thread_batch",
+        "publish_artifact_batch": "mail_publish_artifact_batch"
+      },
+      "bash_only_csv_creation": true,
+      "stop_ack": true,
+      "elapsed_seconds": 11.344,
+      "enforcement": {
+        "Uid:": "Uid:\t65534\t65534\t65534\t65534",
+        "Seccomp:": "Seccomp:\t2",
+        "NSpid:": "NSpid:\t692\t1",
+        "memory.max": "1073741824",
+        "memory.swap.max": "0",
+        "pids.max": "128",
+        "cpu.max": "100000 100000"
+      }
+    }
+  ],
+  "pi_typed_mcp_passed": true,
+  "images": {
+    "runtime.squashfs": "0546f3aad681b012a1b44b90ac6f18188a6e25419220806e6a7a6ed4245bb32a",
+    "attachment.squashfs": "89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068",
+    "agent-tools.squashfs": "4b981cd6a2e1eb2f28acad2d02ac6c365b4ef48b03345eb098578b9a1dd71402",
+    "agent-mcp.squashfs": "54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba",
+    "agent-pi-mcp.squashfs": "478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc"
+  },
+  "inventory_empty": true,
+  "outer_reverseforward_removed": true,
+  "runtime_sources_sha256": {
+    "guest_mail_mcp.py": "1add075a2fbf6ba84d6938ce984310ee85df181c99833f42f4af52a3d9bec92d",
+    "guest_mail_tool_cli.py": "acb9bc9a5afecc946034ddd8a15bb7c9e4d6fad2f5662f781a174a809c44d513",
+    "guest-pi-mail-mcp.ts": "b66a55327af9450daf20e1b116ebe90dbb9d01a54acb65d5c61ee758c6b47232",
+    "guest_mail_tools.py": "1fd8936709bf301235d631582c7dc41f900ca2aa8ee7dcd46ff3990a92cc9b22",
+    "guest-vsock-bridge.py": "e669dabd435b90918318c2a48cf28b153d31e84f6f38065b74048d0dbb35ee3e",
+    "guest_run_bootstrap.py": "e4f31cdcef5612380ccc7202175432c012ee509b05a4e151bf8147c8016ca939",
+    "guest-pi-mail-mcp-smoke.py": "88474e0cd16bf99b370185c7f02116b7308e5f66e9e221a5a80f9d75f8f0efa6"
+  },
+  "worker_sources_sha256": {
+    "firecracker_backend.py": "0175da8e98bb055f3a03b4210f81e005a78fe4ac9b3158d09a21c93116246c7b",
+    "agent-pi-mcp-backend-smoke.py": "41bf16bbd9798ecc4738a74ba1036a39be54a57bae34bbf5fea7c66eb1418e91",
+    "guest_run_bootstrap.py": "e4f31cdcef5612380ccc7202175432c012ee509b05a4e151bf8147c8016ca939",
+    "vsock_http_relay.py": "7654962b2dcaab87ca844be411800e14fcd6a71a2c3180eaa621b5a065be5e98"
+  },
+  "public_dependency_provenance": {
+    "installer": "npm ci --ignore-scripts --no-audit --no-fund",
+    "lifecycle_scripts_executed": false,
+    "package_lock_sha256": "29685e802c9c119d4a1eaa7e11fc01b774cfd4e900b2b4db6f01461d28ae3f3c",
+    "adapter_version": "2.32.1",
+    "adapter_resolved": "https://registry.npmjs.org/pi-mcp-adapter/-/pi-mcp-adapter-2.32.1.tgz",
+    "adapter_integrity": "sha512-GNLYa2U9T5ZqIhZmhx/RTenEjfakJTelq/z6Q+At5SIxyuYvrvobriDEVsnx+lqetVDizUCudTWLfdZytQu0rg==",
+    "adapter_license": "MIT",
+    "adapter_license_sha256": "2d20dfacd9742706e564470dc77438608a1e54b0ed46959f080709389209093c",
+    "input": "Fresh public registry dependencies from deploy/pi/pi-pkgs/package-lock.json; package lock and package licenses retained in immutable image."
+  },
+  "tests": {
+    "command": "PYTHONPATH=src original-venv/python -m pytest tests/test_firecracker_backend.py tests/test_agent_tools_cleanup.py tests/test_guest_run_bootstrap.py tests/test_guest_mail_mcp.py tests/test_guest_mail_tool_cli.py tests/test_guest_mail_tools.py -q",
+    "passed": 86
+  },
+  "limitations": [
+    "Dedicated synthetic-execution-worker root-only guard remains required.",
+    "Pi typed MCP discovery and calls for describe_schema, sql_query_batch, text get_thread_batch and publish_artifact_batch were exercised through pinned pi-mcp-adapter 2.32.1; full tool parity and production package deployment are not claimed.",
+    "Mock provider only; inference gateway is separately qualified and was not under test here.",
+    "Three audience-separated short-lived synthetic owner capabilities were delivered once over fixed per-jail vsock8002; production bootstrap is not enabled.",
+    "No real mail, production database, provider API key or mailbox credentials entered either guest.",
+    "Host gateway, reverseforward and disposable PostgreSQL database were temporary and removed; no host live services or network configuration changed.",
+    "One MCP PID was observed by the trusted synthetic guest fixture; this is not production assurance against adversarial guest process spoofing."
+  ],
+  "outer_powered_off": true,
+  "qemu_exit_code": 0,
+  "host_qualification_exit_code": 0,
+  "temporary_database_and_readers_removed": true,
+  "prior_attempts": [
+    {
+      "image_sha256": "e3857fd390a752bbbaffa25ebcffa266bb3a2436893eac08285f016064c1630a",
+      "outcome": "Failed before tool calls because Pi --tools bash excluded extension tools; VM stop acknowledged."
+    },
+    {
+      "image_sha256": "478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc",
+      "outcome": "Typed workflow passed; duplicate host Registry.finish caused cleanup exception. Fixed harness and repeated fresh run successfully; preserved private prior evidence."
+    }
+  ]
+}

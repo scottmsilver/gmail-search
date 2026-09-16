@@ -18,9 +18,9 @@ ensure_dirs() {
 
 ensure_env() {
   if [[ ! -f ./.env ]]; then
-    printf 'GMS_MCP_URL=http://host.docker.internal:7878/mcp\nGMAIL_MCP_SERVICE_TOKEN=\nANTHROPIC_API_KEY=\nGEMINI_API_KEY=\n' > ./.env
+    printf 'GMS_MCP_URL=http://host.docker.internal:7878/mcp\nGMAIL_MCP_SERVICE_TOKEN=\nANTHROPIC_API_KEY=\nGEMINI_API_KEY=\nOPENROUTER_API_KEY=\n' > ./.env
     chmod 600 ./.env
-    say "wrote .env template — fill in GEMINI_API_KEY (or ANTHROPIC_API_KEY) unless you /login"
+    say "wrote .env template — fill in GEMINI_API_KEY, ANTHROPIC_API_KEY, and OPENROUTER_API_KEY for the Pi model choices"
   else
     say ".env present"
   fi

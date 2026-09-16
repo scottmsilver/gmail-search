@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-15",
+  "scope": "Post-qualification public runtime builder validation only; historical VM qualification and image pin unchanged.",
+  "qualified_image_sha256": "478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc",
+  "manifest_origin": "Fresh unsquashfs extraction after verifying the qualified public image SHA256; five tree fingerprints independently matched retained public staging and a fresh copied snapshot.",
+  "source_sha256": {
+    "prepare-agent-pi-mcp-runtime.sh": "4b776d9071dda337d35b818ba5071235640faf046a7ff33df37051a0592542bf",
+    "verify_pi_mcp_runtime_inputs.py": "2b0c4467fbc7bd4bc726912b6794f2076b1b12ae476b56f860e8c98d15daa0f2",
+    "pi-mcp-runtime-inputs.json": "3141252625d0f6228cd08624fe480e62125f5c7a9b77c25f112b5b82d5f33f47",
+    "GUEST_PI_MAIL_MCP_QUALIFICATION.md": "d201064ed4181a8882bdb5c6f14643c7fa7c8afd74499ca121d0b886db914c8a"
+  },
+  "test_source_sha256": {
+    "tests/test_pi_mcp_runtime_inputs.py": "03226a5dee898d6b099f0c908ee6d5a12afcb4e140fd74cd65c5f7ef9b108b2d"
+  },
+  "verification": {
+    "command": "PYTHONPATH=src /home/ssilver/development/gmail-search/.venv/bin/python -m pytest tests/test_pi_mcp_runtime_inputs.py tests/test_firecracker_backend.py tests/test_agent_tools_cleanup.py -q",
+    "passed": 41,
+    "new_regression_tests": 18,
+    "shell_syntax": "bash -n deploy/public/worker/prepare-agent-pi-mcp-runtime.sh",
+    "qualified_image_extraction_and_snapshot_fingerprints_match": true,
+    "root_ownership_policy": "Metadata fixtures and ordinary-user rejection; no root-owned host staging executed."
+  },
+  "new_image_built": false,
+  "vm_rerun": false,
+  "production_changes": false
+}

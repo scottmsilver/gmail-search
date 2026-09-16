@@ -45,6 +45,8 @@ from typing import Optional
 import jwt
 from fastapi import HTTPException, Request, Response, status
 
+from gmail_search.auth import public as public_auth
+
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "gms_session"
@@ -88,6 +90,9 @@ class User:
 
 
 def is_multi_tenant_enabled() -> bool:
+    if public_auth.public_enabled():
+        public_auth.validate_public_auth_config()
+        return True
     return os.environ.get("GMAIL_MULTI_TENANT") == "1"
 
 
@@ -100,7 +105,7 @@ def _require_secret(name: str) -> str:
         raise AuthError(f"{name} is not configured on the server", status_code=500)
     if len(raw.encode("utf-8")) < _MIN_SECRET_BYTES:
         raise AuthError(
-            f"{name} must be at least {_MIN_SECRET_BYTES} bytes " "(generate with `openssl rand -base64 32`)",
+            f"{name} must be at least {_MIN_SECRET_BYTES} bytes (generate with `openssl rand -base64 32`)",
             status_code=500,
         )
     return raw
@@ -122,6 +127,8 @@ def broker_url() -> str:
 
 
 def _session_ttl_seconds() -> int:
+    if public_auth.public_enabled():
+        return public_auth.SESSION_TTL
     return int(os.environ.get("GMS_SESSION_TTL_DAYS", "30")) * 86400
 
 
@@ -144,6 +151,8 @@ def is_email_allowed(db_path: Path, email: str) -> bool:
     """Check both the env allowlist and the `invited_emails` table.
     Env-var membership is checked first (cheaper, no DB hit)."""
     normalized = normalize_email(email)
+    if public_auth.public_enabled():
+        return normalized in public_auth.validate_public_auth_config().emails
     if normalized in env_allowed_emails():
         return True
     from gmail_search.store.db import get_connection
@@ -184,9 +193,17 @@ def safe_relative_return_url(url: str) -> str:
 # ─── JWT helpers ─────────────────────────────────────────────────────────
 
 
-def make_session_cookie(*, user_id: str, email: str, name: Optional[str] = None, picture: Optional[str] = None) -> str:
+def make_session_cookie(
+    *,
+    user_id: str,
+    email: str,
+    name: Optional[str] = None,
+    picture: Optional[str] = None,
+) -> str:
     """Sign our own session cookie. Independent of the broker handoff —
     the handoff JWT lives only long enough to be exchanged for this."""
+    if public_auth.public_enabled():
+        return public_auth.issue_session(dict(uid=user_id, email=email, name=name, picture=picture))
     now = int(time.time())
     payload: dict[str, object] = {
         "uid": user_id,
@@ -202,6 +219,8 @@ def make_session_cookie(*, user_id: str, email: str, name: Optional[str] = None,
 
 
 def _verify_session_cookie(token: str) -> Optional[dict]:
+    if public_auth.public_enabled():
+        return public_auth.read_session(token)
     try:
         return jwt.decode(token, _session_secret(), algorithms=[_ALGORITHM])
     except jwt.PyJWTError as exc:
@@ -214,6 +233,8 @@ def verify_handoff_jwt(token: str) -> Optional[dict]:
     proving the holder went through Google OAuth and the broker says
     this email is theirs. Returning None lets the caller 401 without
     leaking which check failed (sig vs expiry vs missing claim)."""
+    if public_auth.public_enabled():
+        return None  # Public handoffs must consume a browser-bound nonce.
     try:
         return jwt.decode(token, _handoff_secret(), algorithms=[_ALGORITHM])
     except jwt.PyJWTError as exc:
@@ -238,18 +259,27 @@ def set_session_cookie(
     drops the cookie."""
     is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     response.set_cookie(
-        SESSION_COOKIE,
+        public_auth.SESSION_COOKIE if public_auth.public_enabled() else SESSION_COOKIE,
         make_session_cookie(user_id=user_id, email=email, name=name, picture=picture),
         max_age=_session_ttl_seconds(),
         httponly=True,
-        secure=is_https,
+        secure=public_auth.public_enabled() or is_https,
         samesite="lax",
         path="/",
     )
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    if public_auth.public_enabled():
+        response.delete_cookie(
+            public_auth.SESSION_COOKIE,
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    else:
+        response.delete_cookie(SESSION_COOKIE, path="/")
 
 
 # ─── user lookup / dependency ────────────────────────────────────────────
@@ -282,7 +312,7 @@ def require_user(request: Request) -> Optional[User]:
     if not is_multi_tenant_enabled():
         return None
 
-    cookie = request.cookies.get(SESSION_COOKIE)
+    cookie = request.cookies.get(public_auth.SESSION_COOKIE if public_auth.public_enabled() else SESSION_COOKIE)
     if not cookie:
         raise AuthError("not signed in")
     payload = _verify_session_cookie(cookie)

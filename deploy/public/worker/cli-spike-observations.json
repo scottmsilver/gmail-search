@@ -1,0 +1,216 @@
+[
+  {
+    "path": "/v1/messages",
+    "fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "stream",
+      "system",
+      "tools"
+    ],
+    "model": "claude-sonnet-4-6",
+    "header_names": [
+      "User-Agent",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "accept",
+      "accept-encoding",
+      "accept-language",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "connection",
+      "content-length",
+      "content-type",
+      "host",
+      "sec-fetch-mode",
+      "x-api-key"
+    ],
+    "tools": [
+      "bash"
+    ],
+    "strict_normalizer": "rejected",
+    "upstream_fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "tools"
+    ],
+    "upstream_model": "claude-sonnet-4-6",
+    "server_effort": "high",
+    "gateway_chain": "accepted"
+  },
+  {
+    "path": "/v1/messages",
+    "fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "stream",
+      "system",
+      "tools"
+    ],
+    "model": "claude-sonnet-4-6",
+    "header_names": [
+      "User-Agent",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "accept",
+      "accept-encoding",
+      "accept-language",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "connection",
+      "content-length",
+      "content-type",
+      "host",
+      "sec-fetch-mode",
+      "x-api-key"
+    ],
+    "tools": [
+      "bash"
+    ],
+    "strict_normalizer": "rejected",
+    "tool_result_received": true,
+    "upstream_fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "tools"
+    ],
+    "upstream_model": "claude-sonnet-4-6",
+    "server_effort": "high",
+    "gateway_chain": "accepted"
+  },
+  {
+    "path": "/v1/messages?beta=true",
+    "fields": [
+      "max_tokens",
+      "messages",
+      "metadata",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "temperature",
+      "tools"
+    ],
+    "model": "claude-sonnet-4-6",
+    "header_names": [
+      "Accept",
+      "Accept-Encoding",
+      "Connection",
+      "Content-Length",
+      "Content-Type",
+      "Host",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app"
+    ],
+    "tools": [
+      "Bash"
+    ],
+    "strict_normalizer": "rejected",
+    "upstream_fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "temperature",
+      "tools"
+    ],
+    "upstream_model": "claude-sonnet-4-6",
+    "server_effort": "high",
+    "gateway_chain": "accepted"
+  },
+  {
+    "path": "/v1/messages?beta=true",
+    "fields": [
+      "max_tokens",
+      "messages",
+      "metadata",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "temperature",
+      "tools"
+    ],
+    "model": "claude-sonnet-4-6",
+    "header_names": [
+      "Accept",
+      "Accept-Encoding",
+      "Connection",
+      "Content-Length",
+      "Content-Type",
+      "Host",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app"
+    ],
+    "tools": [
+      "Bash"
+    ],
+    "strict_normalizer": "rejected",
+    "tool_result_received": true,
+    "upstream_fields": [
+      "max_tokens",
+      "messages",
+      "model",
+      "output_config",
+      "stream",
+      "system",
+      "temperature",
+      "tools"
+    ],
+    "upstream_model": "claude-sonnet-4-6",
+    "server_effort": "high",
+    "gateway_chain": "accepted"
+  }
+]

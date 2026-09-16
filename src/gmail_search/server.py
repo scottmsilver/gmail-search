@@ -252,18 +252,19 @@ def _bm25_required_error(column: str) -> str:
     tool call after this error should be a correct BM25 query — no
     re-prompting needed."""
     table = "attachments" if column in ("filename", "extracted_text") else "messages"
+    key = "id" if table == "attachments" else "search_id"
     return (
         f"`{column} LIKE/ILIKE '%...%'` is rejected — it forces a seq scan on "
         f"the {table} table. Use the ParadeDB BM25 index instead "
         f"(~50x faster). Translate:\n"
         f"  WHERE {column} ILIKE '%foo%'\n"
-        f"    →  WHERE id @@@ '{column}:foo'\n"
+        f"    →  WHERE {key} @@@ '{column}:foo'\n"
         f"  WHERE from_addr LIKE '%delta%' AND subject LIKE '%credit%'\n"
-        f"    →  WHERE id @@@ 'from_addr:delta AND subject:credit'\n"
+        f"    →  WHERE search_id @@@ 'from_addr:delta AND subject:credit'\n"
         f"  WHERE body_text LIKE '%refund issued%'  (multi-word phrase)\n"
-        f"    →  WHERE id @@@ 'body_text:\"refund issued\"'\n"
-        f"Add `ORDER BY paradedb.score(id) DESC` for relevance ranking. "
-        f"Escape hatch: include `@@@` anywhere (e.g. an `id @@@ '...'` "
+        f"    →  WHERE search_id @@@ 'body_text:\"refund issued\"'\n"
+        f"Add `ORDER BY paradedb.score({key}) DESC` for relevance ranking. "
+        f"Escape hatch: include `@@@` anywhere (e.g. a `{key} @@@ '...'` "
         f"prefilter) and the LIKE check is skipped — use that only when "
         f"BM25 truly cannot express the predicate. Call `describe_schema` "
         f"if unsure which columns are BM25-indexed."
@@ -388,9 +389,9 @@ def _thread_ids_matching_filters(
     where = " AND ".join(clauses) if clauses else "1=1"
     join = ""
     if has_attachment is True:
-        join = "INNER JOIN attachments a ON a.message_id = m.id"
+        join = "INNER JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id"
     elif has_attachment is False:
-        where += " AND m.id NOT IN (SELECT message_id FROM attachments)"
+        where += " AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id AND a.user_id = m.user_id)"
     order = "MAX(m.date) DESC" if order_by == "date_desc" else "MAX(m.date) ASC"
     sql = f"""SELECT m.thread_id, MAX(m.date) as last_date
              FROM messages m {join}
@@ -603,6 +604,7 @@ def _inbox_rows(
         latest_msg AS (
             SELECT DISTINCT ON (m.thread_id)
                    m.thread_id,
+                   m.user_id,
                    m.id AS latest_message_id,
                    m.from_addr AS latest_from_addr,
                    m.body_text AS latest_body
@@ -626,7 +628,7 @@ def _inbox_rows(
         FROM priority_threads pt
         JOIN latest_msg lm USING (thread_id)
         LEFT JOIN message_summaries ms
-               ON ms.message_id = lm.latest_message_id
+               ON ms.message_id = lm.latest_message_id AND ms.user_id = lm.user_id
         ORDER BY pt.date_last DESC
     """
     # Bind order: ts.user_id, m.user_id (in EXISTS), predicate params, limit, offset, m.user_id (latest_msg).
@@ -666,18 +668,26 @@ def create_app(
     # documenting it in TABLE_DOCS — the LLM would silently miss it.
     from gmail_search.store.db import assert_table_docs_cover_schema, get_connection, reap_stale_jobs
 
+    from gmail_search.auth.public import PublicAuthMiddleware, validate_public_auth_config
+
+    public_config = validate_public_auth_config()
     assert_table_docs_cover_schema()
 
     # Sweep stale `running` job_progress rows left by crashed workers so
     # /api/status never surfaces a zombie banner on a fresh boot. Pure DB
     # — no process inspection here (that's the `gmail-search reap` CLI).
-    _conn = get_connection(db_path)
-    try:
-        reap_stale_jobs(_conn)
-    finally:
-        _conn.close()
+    if public_config is None:
+        _conn = get_connection(db_path)
+        try:
+            reap_stale_jobs(_conn)
+        finally:
+            _conn.close()
 
     app = FastAPI(title="Gmail Search")
+    from gmail_search.auth.boundary import PublicBoundaryMiddleware
+
+    app.add_middleware(PublicBoundaryMiddleware)
+    app.add_middleware(PublicAuthMiddleware)
     # Stash the data dir on app.state so the auth dependency (and
     # anything else added later) can resolve gmail_search.db without
     # a global. Phase 1 of PER_USER_LOGIN.
@@ -797,7 +807,7 @@ def create_app(
                 ids.add(m.message_id)
         return ids
 
-    def _compute_topic_facets(results, msg_topics):
+    def _compute_topic_facets(results, msg_topics, *, user_id: str):
         """Count how many result threads fall into each leaf topic.
 
         A thread belongs to a topic if any of its matching messages do.
@@ -805,6 +815,8 @@ def create_app(
         """
         from collections import Counter
 
+        if type(user_id) is not str or not user_id:
+            raise ValueError("Explicit topic owner is required")
         topic_thread_counts: Counter = Counter()
         topic_labels: dict[str, str] = {}
 
@@ -820,11 +832,13 @@ def create_app(
         if topic_thread_counts:
             conn_f = get_connection(db_path)
             placeholders = ",".join(["%s"] * len(topic_thread_counts))
-            rows = conn_f.execute(
-                f"SELECT topic_id, label FROM topics WHERE topic_id IN ({placeholders})",
-                list(topic_thread_counts.keys()),
-            ).fetchall()
-            conn_f.close()
+            try:
+                rows = conn_f.execute(
+                    f"SELECT topic_id, label FROM topics WHERE user_id = %s AND topic_id IN ({placeholders})",
+                    [user_id, *topic_thread_counts.keys()],
+                ).fetchall()
+            finally:
+                conn_f.close()
             topic_labels = {r["topic_id"]: r["label"] for r in rows}
 
         return sorted(
@@ -1120,7 +1134,10 @@ def create_app(
         # mode model output — the host refreshes on its own, the
         # mount lags. The check is also re-run per-turn in
         # service.py:_real_run as belt-and-suspenders.
-        sync_credentials_if_stale()
+        from gmail_search.auth.public import public_enabled
+
+        if not public_enabled():
+            sync_credentials_if_stale()
         # Prewarm in the BACKGROUND so the port accepts traffic immediately
         # instead of hanging for the full multi-GB ScaNN load. The first
         # search either finds the warmed engine or builds it itself via
@@ -1165,20 +1182,25 @@ def create_app(
         html_file = templates_dir / "index.html"
         return html_file.read_text()
 
-    def _lookup_message_topics(msg_ids):
-        """Map message IDs to their leaf topic IDs for client-side filtering."""
+    def _lookup_message_topics(msg_ids, *, user_id: str):
+        """Map one authenticated owner's message IDs to that owner's leaf topics."""
+        if type(user_id) is not str or not user_id:
+            raise ValueError("Explicit topic owner is required")
         if not msg_ids:
             return {}
         conn_t = get_connection(db_path)
         placeholders = ",".join(["%s"] * len(msg_ids))
-        rows = conn_t.execute(
-            f"""SELECT mt.message_id, mt.topic_id FROM message_topics mt
-                JOIN topics t ON mt.topic_id = t.topic_id
-                WHERE mt.message_id IN ({placeholders})
-                AND t.topic_id NOT IN (SELECT DISTINCT parent_id FROM topics WHERE parent_id IS NOT NULL)""",
-            list(msg_ids),
-        ).fetchall()
-        conn_t.close()
+        try:
+            rows = conn_t.execute(
+                f"""SELECT mt.message_id, mt.topic_id FROM message_topics mt
+                    JOIN topics t ON mt.topic_id = t.topic_id AND mt.user_id = t.user_id
+                    WHERE mt.user_id = %s AND mt.message_id IN ({placeholders})
+                    AND NOT EXISTS (SELECT 1 FROM topics child
+                                    WHERE child.user_id = t.user_id AND child.parent_id = t.topic_id)""",
+                [user_id, *msg_ids],
+            ).fetchall()
+        finally:
+            conn_t.close()
         result = {}
         for r in rows:
             result.setdefault(r["message_id"], []).append(r["topic_id"])
@@ -1239,13 +1261,13 @@ def create_app(
             response = {"results": [_format_thread_ref(r) for r in results]}
             if include_facets:
                 all_msg_ids = _collect_result_message_ids(results)
-                msg_topics = _lookup_message_topics(all_msg_ids)
-                response["facets"] = _compute_topic_facets(results, msg_topics)
+                msg_topics = _lookup_message_topics(all_msg_ids, user_id=user_id)
+                response["facets"] = _compute_topic_facets(results, msg_topics, user_id=user_id)
             return response
 
         # Look up topic IDs for all result messages (for client-side filtering)
         all_msg_ids = _collect_result_message_ids(results)
-        msg_topics = _lookup_message_topics(all_msg_ids)
+        msg_topics = _lookup_message_topics(all_msg_ids, user_id=user_id)
 
         # Per-match content, fetched in bulk only at the requested detail
         # level, and only for matches that survive the max_matches cap.
@@ -1261,7 +1283,7 @@ def create_app(
             conn_s = get_connection(db_path)
             try:
                 if match_detail == "summary":
-                    summary_meta = get_summaries_bulk_meta(conn_s, kept_msg_ids)
+                    summary_meta = get_summaries_bulk_meta(conn_s, kept_msg_ids, user_id=user_id)
                 else:
                     bodies = get_message_bodies_bulk(conn_s, kept_msg_ids, user_id=user_id)
             finally:
@@ -1292,7 +1314,7 @@ def create_app(
 
         response = {"results": formatted}
         if include_facets:
-            response["facets"] = _compute_topic_facets(results, msg_topics)
+            response["facets"] = _compute_topic_facets(results, msg_topics, user_id=user_id)
         return response
 
     @app.get("/api/find_facts")
@@ -1583,7 +1605,7 @@ def create_app(
             cost = conn.execute(
                 "SELECT coalesce(sum(estimated_cost_usd), 0) FROM costs WHERE user_id = %s", (user_id,)
             ).fetchone()[0]
-            jobs = [
+            jobs = [] if public_config else [
                 {"job": r["job_id"].split(":", 1)[0], "status": r["status"], "detail": r["detail"]}
                 for r in conn.execute(
                     # Escape LIKE wildcards so a user_id can never widen the
@@ -1594,6 +1616,12 @@ def create_app(
             ]
         finally:
             conn.close()
+
+        if public_config:
+            return {"state": "ready", "sync_enabled": bool(urow["sync_enabled"]),
+                    "messages_synced": synced, "messages_total": None, "messages_embedded": embedded,
+                    "messages_summarized": summarized, "rate_per_min": None, "eta_minutes": None,
+                    "cost_usd": round(float(cost), 2), "jobs": []}
 
         # Denominator: Gmail's own message count. Best-effort — a broker
         # hiccup must not break the progress page, so fall back to the
@@ -1706,60 +1734,13 @@ def create_app(
         payload: dict = Body(...),
         user_id: str = Depends(require_user_id),
     ):
-        """Run a read-only SQL SELECT (or WITH...SELECT) against the DB.
+        """Reject arbitrary SQL until queries cannot change tenant/role identity."""
+        from gmail_search.sql_access import raw_sql_disabled
 
-        Hard limits: max 500 rows returned, 10s timeout, 5000 char query.
-        Enforced read-only at the connection level AND via keyword
-        blacklist (defense in depth). Statement must begin with SELECT or
-        WITH; multiple statements are rejected.
-
-        Multi-tenant: gated by require_user_id AND scoped by Postgres
-        RLS at the storage layer. The connection drops to the
-        `gmail_search_reader` role and binds `app.user_id` to the
-        caller's user_id before the LLM's query runs, so policies on
-        every per-user table (messages, attachments, conversations…)
-        filter rows automatically — even an unscoped `SELECT count(*)
-        FROM messages` returns only the active user's count.
-
-        The reader role has SELECT only on LLM-facing tables, so an
-        attempt to read `query_cache` / `users` / `embeddings` etc.
-        raises permission-denied rather than leaking. See pg_schema.sql
-        "Phase 3g — Row-Level Security" block.
-        """
-        import psycopg
-
-        query = str(payload.get("query", ""))
-        err = _validate_sql(query)
-        if err:
-            return JSONResponse({"error": err}, status_code=400)
-        try:
-            return _run_sql_with_timeout(db_path, query, user_id=user_id)
-        except SqlTooExpensiveError as e:
-            # Pre-flight plan-cost gate tripped — reject BEFORE running so a
-            # pathological query never consumes time. Give the agent something
-            # actionable to fix rather than a bare cost number.
-            return JSONResponse(
-                {
-                    "error": (
-                        f"Query rejected: estimated plan cost {e.cost:,.0f} exceeds the limit "
-                        f"({SQL_MAX_PLAN_COST:,.0f}). This usually means a missing/!indexed filter, "
-                        f"a cartesian join, or a correlated subquery doing a per-row scan. Add a "
-                        f"WHERE on an indexed column (id/thread_id/message_id/date), narrow the date "
-                        f"range, replace `LIKE '%...%'` with BM25 (`@@@`), or rewrite `NOT IN "
-                        f"(correlated SELECT)` as `NOT EXISTS (... correlated on an indexed column)`."
-                    )
-                },
-                status_code=400,
-            )
-        except psycopg.errors.QueryCanceled as e:
-            # statement_timeout tripped — surface as 408 so the UI can
-            # tell timeout apart from a syntax error.
-            return JSONResponse({"error": f"SQL timeout: {e!s}"}, status_code=408)
-        except psycopg.Error as e:
-            return JSONResponse({"error": f"SQL error: {e!s}"}, status_code=400)
+        return JSONResponse(raw_sql_disabled(), status_code=403)
 
     @app.post("/api/battle/vote")
-    def api_battle_vote(payload: dict = Body(...)):
+    def api_battle_vote(payload: dict = Body(...), user_id: str = Depends(require_user_id)):
         """Record a model battle outcome.
 
         Body: {question, variant_a, variant_b, winner, request_id_a?, request_id_b?}
@@ -1780,9 +1761,7 @@ def create_app(
         # RETURNING id works on SQLite 3.35+ and Postgres; replaces the
         # old cursor.lastrowid which returned None under psycopg's
         # dict_row factory. user_id is required by multi-tenant schema.
-        from gmail_search.auth.write_user import resolve_write_user_id as _resolve_uid
-
-        uid = _resolve_uid(conn)
+        uid = user_id
         cur = conn.execute(
             """INSERT INTO model_battles
                  (question, variant_a, variant_b, winner, request_id_a, request_id_b, user_id)
@@ -1811,15 +1790,17 @@ def create_app(
         return {"ok": True, "id": row_id}
 
     @app.get("/api/battle/stats")
-    def api_battle_stats():
+    def api_battle_stats(user_id: str = Depends(require_user_id)):
         """Per-variant win rate + head-to-head matrix."""
         import json as _json
 
         conn = get_connection(db_path)
-        rows = conn.execute("SELECT variant_a, variant_b, winner FROM model_battles").fetchall()
+        rows = conn.execute("SELECT variant_a, variant_b, winner FROM model_battles WHERE user_id = %s", (user_id,)).fetchall()
         conn.close()
 
         def key(v: dict) -> str:
+            if v.get("backend"):
+                return f"{v['backend']} · {v.get('model', '?')}"
             return f"{v.get('model','?')} · {v.get('thinkingLevel','?')}"
 
         wins: dict[str, int] = {}
@@ -2029,15 +2010,20 @@ def create_app(
             # Use the auth-resolved user_id (multi-tenant: signed-in
             # user; legacy: bootstrap). The conversation rows can only
             # ever belong to the request's owner.
-            conn.execute(
+            owned = conn.execute(
                 """INSERT INTO conversations (id, title, created_at, updated_at, user_id)
                    VALUES (%s, %s, %s, %s, %s)
                    ON CONFLICT(id) DO UPDATE SET
                      title = COALESCE(excluded.title, conversations.title),
                      updated_at = excluded.updated_at
-                   WHERE conversations.user_id = excluded.user_id""",
+                   WHERE conversations.user_id = excluded.user_id
+                   RETURNING id""",
                 (conversation_id, title, now, now, user_id),
-            )
+            ).fetchone()
+            # The upsert holds the row lock until commit. A foreign ID must
+            # never reach the destructive replacement of message history.
+            if owned is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
             conn.execute(
                 "DELETE FROM conversation_messages WHERE conversation_id = %s",
                 (conversation_id,),
@@ -2332,7 +2318,7 @@ def create_app(
                 """SELECT a.id, a.filename, a.mime_type, a.size_bytes,
                           a.message_id, m.thread_id
                    FROM attachments a
-                   JOIN messages m ON m.id = a.message_id
+                   JOIN messages m ON m.id = a.message_id AND m.user_id = a.user_id
                    WHERE a.id = %s AND a.user_id = %s""",
                 (attachment_id, user_id),
             ).fetchone()
@@ -2445,7 +2431,7 @@ def create_app(
             # OCR run can't hang the endpoint. Any failure degrades
             # silently to the legacy empty-text behaviour.
             if not text.strip():
-                text = await _extract_attachment_text_on_demand(conn, attachment_id) or ""
+                text = await _extract_attachment_text_on_demand(conn, attachment_id, user_id=user_id) or ""
 
             return {
                 "attachment_id": attachment_id,
@@ -2456,7 +2442,7 @@ def create_app(
         finally:
             conn.close()
 
-    async def _extract_attachment_text_on_demand(conn, attachment_id: int) -> str | None:
+    async def _extract_attachment_text_on_demand(conn, attachment_id: int, *, user_id: str) -> str | None:
         """Run on-demand extraction for a single attachment under a 20s
         wall-clock budget. Returns the extracted text or None on any
         failure / timeout / no-op. Side effect: persists the extracted
@@ -2471,7 +2457,7 @@ def create_app(
 
         def _run() -> str | None:
             try:
-                result = extract_attachment_on_demand(conn, attachment_id, config=config)
+                result = extract_attachment_on_demand(conn, attachment_id, config=config, user_id=user_id)
             except Exception:
                 logger.exception(f"on-demand extract failed for attachment {attachment_id}")
                 return None
@@ -2608,8 +2594,10 @@ def create_app(
             filename=row["filename"],
         )
 
+    from gmail_search.auth import require_admin
+
     @app.get("/api/progress")
-    def api_progress():
+    def api_progress(_admin=Depends(require_admin)):
         from gmail_search.store.db import JobProgress
 
         return JobProgress.get(db_path) or []
@@ -2637,10 +2625,10 @@ def create_app(
             "  -- correct (joins keep the scope):\n"
             "  SELECT m.subject FROM messages m\n"
             "    JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id\n"
-            "   WHERE m.user_id = '" + user_id + "' AND m.id @@@ 'subject:invoice';\n\n"
+            "   WHERE m.user_id = '" + user_id + "' AND m.search_id @@@ 'subject:invoice';\n\n"
             "---\n\n"
             "## Performance (write FAST SQL)\n\n"
-            "BM25 search (`id @@@ 'field:term'`) is fast even across the whole\n"
+            "BM25 search (`search_id @@@ 'field:term'` on messages) is fast even across the whole\n"
             "mailbox. What's slow is **per-row text processing over `body_text`**\n"
             "(`regexp_replace`, `~*`, `substring`, `split_part`) — bodies are large\n"
             "HTML, and a broad match is tens of thousands of rows, so this blows the\n"
@@ -2707,7 +2695,7 @@ def create_app(
             int(summary_pending / summary_rate_per_sec) if summary_rate_per_sec > 0 and summary_pending > 0 else None
         )
         conn.close()
-        jobs = JobProgress.get(db_path) or []
+        jobs = [] if public_config else JobProgress.get_for_user(db_path, user_id)
         running = [j for j in jobs if j["status"] == "running"]
         return {
             "messages": msg_count,

@@ -123,6 +123,7 @@ const MessageCard = ({ msg, pythonBaseUrl }: { msg: ThreadMessage; pythonBaseUrl
       )}
       <div className="mt-2">
         <EmailBody textBody={msg.body_text} htmlBody={msg.body_html} />
+        {msg.body_text_truncated && <p className="mt-2 text-xs text-neutral-500">This message is longer than the displayed excerpt.</p>}
       </div>
       <AttachmentPills attachments={msg.attachments} pythonBaseUrl={pythonBaseUrl} />
     </div>
@@ -164,6 +165,7 @@ export const ThreadDrawer = ({ threadId, onClose, pythonBaseUrl }: Props) => {
         {!error && !detail && open && (
           <div className="py-8 text-sm text-neutral-500">Loading thread…</div>
         )}
+        {detail?.complete === false && <p className="py-2 text-xs text-neutral-500">This is a partial view of the thread.</p>}
         {detail &&
           detail.messages.map((m) => <MessageCard key={m.id} msg={m} pythonBaseUrl={pythonBaseUrl} />)}
       </div>

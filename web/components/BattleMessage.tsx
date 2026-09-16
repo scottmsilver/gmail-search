@@ -17,6 +17,12 @@ type BattleData = {
   answer_b: string;
   tools_a: Array<{ name: string; args: unknown; output: unknown }>;
   tools_b: Array<{ name: string; args: unknown; output: unknown }>;
+  steps_a?: number;
+  steps_b?: number;
+  usd_a?: number;
+  usd_b?: number;
+  session_a?: string;
+  session_b?: string;
   running_a?: boolean;
   running_b?: boolean;
 };
@@ -113,14 +119,20 @@ const BattleSide = ({
   won,
   running,
   onInspect,
+  canInspect,
+  steps,
+  usd,
 }: {
   label: string;
+  steps?: number;
+  usd?: number;
   text: string;
   tools: BattleData["tools_a"];
   side: "a" | "b";
   won: boolean | null;
   running: boolean;
   onInspect: () => void;
+  canInspect: boolean;
 }) => {
   // Walk tool outputs just like the normal renderer so [ref:] chips resolve.
   const hints = extractThreadHints(
@@ -139,12 +151,12 @@ const BattleSide = ({
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs font-mono text-neutral-500">{label}</span>
         {running ? (
-          <span className="text-[10px] text-neutral-400">thinking…</span>
+          <span className="text-[10px] text-neutral-400">{steps ?? 0} steps…</span>
         ) : (
           <button
             type="button"
             onClick={onInspect}
-            disabled={tools.length === 0}
+            disabled={!canInspect || tools.length === 0}
             className="text-[10px] text-neutral-400 hover:text-neutral-800 hover:underline disabled:no-underline disabled:cursor-default"
             title="Inspect tool calls"
           >
@@ -152,6 +164,7 @@ const BattleSide = ({
           </button>
         )}
       </div>
+      {typeof usd === "number" && <div className="text-[10px] text-neutral-400 mb-2">${usd.toFixed(4)}</div>}
       {running && !text ? (
         <div className="flex-1 flex items-center justify-center py-6 text-xs text-neutral-400">
           <Spinner />
@@ -166,6 +179,7 @@ const BattleSide = ({
 
 export const BattleMessage = ({ data }: { data: BattleData }) => {
   const [vote, setVote] = useState<Vote | null>(null);
+  const [voteError, setVoteError] = useState<string | null>(null);
   const [voting, setVoting] = useState(false);
   const [inspect, setInspect] = useState<"a" | "b" | null>(null);
   const anyRunning = !!(data.running_a || data.running_b);
@@ -174,7 +188,7 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
     if (vote || voting) return;
     setVoting(true);
     try {
-      await fetch("/api/battle/vote", {
+      const response = await fetch("/api/battle/vote", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -182,13 +196,15 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
           variant_a: data.variant_a,
           variant_b: data.variant_b,
           winner,
-          request_id_a: data.request_id,
-          request_id_b: data.request_id,
+          request_id_a: data.session_a ?? data.request_id,
+          request_id_b: data.session_b ?? data.request_id,
         }),
       });
+      if (!response.ok) throw new Error("Vote could not be saved. Please retry.");
+      setVoteError(null);
       setVote(winner);
     } catch (e) {
-      console.error(e);
+      setVoteError(e instanceof Error ? e.message : "Vote could not be saved.");
     } finally {
       setVoting(false);
     }
@@ -216,21 +232,27 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
     <div className="my-3">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <BattleSide
+          steps={data.steps_a}
+          usd={data.usd_a}
           label={labelA}
           text={data.answer_a}
           tools={data.tools_a}
           side="a"
           won={wonA}
           running={!!data.running_a}
+          canInspect={revealed}
           onInspect={() => setInspect("a")}
         />
         <BattleSide
+          steps={data.steps_b}
+          usd={data.usd_b}
           label={labelB}
           text={data.answer_b}
           tools={data.tools_b}
           side="b"
           won={wonB}
           running={!!data.running_b}
+          canInspect={revealed}
           onInspect={() => setInspect("b")}
         />
       </div>
@@ -256,6 +278,7 @@ export const BattleMessage = ({ data }: { data: BattleData }) => {
           </>
         )}
       </div>
+      {voteError && <p role="alert" className="text-xs text-red-600">{voteError}</p>}
       <InspectorDrawer
         open={inspect !== null}
         onClose={() => setInspect(null)}

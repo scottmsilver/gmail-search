@@ -33,3 +33,6 @@ scripts/bench_out/
 
 # worktrunk-managed git worktrees (working dirs, never source)
 worktrees/
+
+# Symlink to the main checkout's install; machine-specific.
+web/node_modules

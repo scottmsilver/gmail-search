@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -6,6 +7,7 @@ from typing import Any
 from googleapiclient.discovery import Resource
 from tqdm import tqdm
 
+from gmail_search.auth.write_user import resolve_write_user_id
 from gmail_search.gmail.drive import drive_mime_for_kind, extract_drive_ids
 from gmail_search.gmail.parser import parse_message
 from gmail_search.store.db import get_connection
@@ -13,7 +15,6 @@ from gmail_search.store.models import Attachment
 from gmail_search.store.queries import (
     get_sync_state,
     record_unfetched_attachment,
-    set_sync_state,
     upsert_attachment,
     upsert_drive_stub,
     upsert_message,
@@ -84,13 +85,20 @@ def ingest_attachment(
     """Store one attachment Gmail listed on `message_id` and ALWAYS leave a
     row behind. Returns the row's `fetch_status`:
 
-    - "ok": bytes written under `attachments_dir/<message_id>/`.
+    - "ok": bytes written under the owner-specific attachment directory.
     - "skipped_too_large": declared size > `max_attachment_size`; no API
       call is made, a manifest-only row records the declared size.
     - "fetch_failed": `attachments.get` raised; manifest-only row.
 
     Before 2026-09-02 the last two cases hit `continue` and wrote nothing,
     so an 18 MB PDF looked exactly like an email with no PDF at all."""
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    if not conn.execute(
+        "SELECT 1 FROM messages WHERE id = %s AND user_id = %s", (message_id, user_id)
+    ).fetchone():
+        raise ValueError("Attachment message does not belong to the requested owner")
+    if not message_id or Path(message_id).name != message_id or message_id in {".", ".."}:
+        raise ValueError("Invalid message ID for attachment storage")
     safe_name = _sanitize_filename(att_meta["filename"])
     mime_type = att_meta["mime_type"]
     declared = _declared_size(att_meta)
@@ -111,7 +119,9 @@ def ingest_attachment(
         logger.warning(f"Not storing attachment {safe_name} ({declared} bytes) — exceeds size limit; manifest row only")
         return _unfetched("skipped_too_large")
 
-    msg_att_dir = attachments_dir / message_id
+    # Hash the opaque owner ID so it cannot introduce path components.
+    owner_dir = hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+    msg_att_dir = attachments_dir / "owners" / owner_dir / message_id
     msg_att_dir.mkdir(parents=True, exist_ok=True)
     raw_path = msg_att_dir / safe_name
     try:
@@ -147,6 +157,30 @@ def ingest_attachment(
     return "ok"
 
 
+def _advance_history_checkpoint(conn, user_id: str, history_id: int) -> None:
+    """Keep concurrent backfill and watch checkpoints monotonic for one owner."""
+    conn.execute(
+        """INSERT INTO sync_state (key, value) VALUES (%s, %s)
+           ON CONFLICT (key) DO UPDATE
+           SET value = greatest(sync_state.value::bigint, excluded.value::bigint)::text""",
+        (f"last_history_id:{user_id}", str(history_id)),
+    )
+    conn.commit()
+
+
+def _history_checkpoint(conn, user_id: str) -> str | None:
+    """Initialize older installs only from this owner's stored message history."""
+    checkpoint = get_sync_state(conn, f"last_history_id:{user_id}")
+    if checkpoint is None:
+        row = conn.execute(
+            "SELECT max(history_id) AS history_id FROM messages WHERE user_id = %s", (user_id,)
+        ).fetchone()
+        if row and row["history_id"]:
+            _advance_history_checkpoint(conn, user_id, int(row["history_id"]))
+            checkpoint = get_sync_state(conn, f"last_history_id:{user_id}")
+    return checkpoint
+
+
 def download_messages(
     service: Resource,
     db_path: Path,
@@ -154,8 +188,10 @@ def download_messages(
     batch_size: int = 100,
     max_messages: int | None = None,
     max_attachment_size: int = 10 * 1024 * 1024,
+    *, user_id: str | None = None,
 ) -> int:
     conn = get_connection(db_path)
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     attachments_dir = data_dir / "attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,16 +234,17 @@ def download_messages(
     logger.info(f"Found {len(message_ids)} messages to download")
 
     existing = set()
-    for row in conn.execute("SELECT id FROM messages").fetchall():
+    for row in conn.execute("SELECT id FROM messages WHERE user_id = %s", (user_id,)).fetchall():
         existing.add(row["id"])
     to_download = [mid for mid in message_ids if mid not in existing]
     logger.info(f"{len(existing)} already downloaded, {len(to_download)} remaining")
 
+    checkpoint = _history_checkpoint(conn, user_id)
     if not to_download:
         conn.close()
         return 0
 
-    max_history_id = 0
+    max_history_id = int(checkpoint or 0)
     downloaded = 0
     progress = tqdm(total=len(to_download), desc="Downloading messages")
 
@@ -264,7 +301,7 @@ def download_messages(
 
         for raw in batch_results:
             msg, att_metas = parse_message(raw)
-            upsert_message(conn, msg)
+            upsert_message(conn, msg, user_id=user_id)
 
             if msg.history_id > max_history_id:
                 max_history_id = msg.history_id
@@ -277,7 +314,7 @@ def download_messages(
             # Layering: regex lives in gmail/drive (API client code),
             # the INSERT lives in store/queries (schema owner).
             for drive_id, kind in extract_drive_ids(msg.body_text or ""):
-                upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
+                upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind), user_id=user_id)
 
             # Any other URL in the body becomes a URL stub — same
             # shape as Drive stubs. The `crawl-urls` command fetches
@@ -292,9 +329,9 @@ def download_messages(
             from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
             from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-            if not _skip_link_crawl(conn, msg, att_metas):
+            if not _skip_link_crawl(conn, msg, att_metas, user_id=user_id):
                 for url in _extract_urls(msg.body_text or "", labels=msg.labels):
-                    _upsert_url_stub(conn, message_id=msg.id, url=url)
+                    _upsert_url_stub(conn, message_id=msg.id, url=url, user_id=user_id)
 
             for att_meta in att_metas:
                 ingest_attachment(
@@ -304,6 +341,7 @@ def download_messages(
                     att_meta,
                     attachments_dir=attachments_dir,
                     max_attachment_size=max_attachment_size,
+                    user_id=user_id,
                 )
 
             downloaded += 1
@@ -313,7 +351,7 @@ def download_messages(
     progress.close()
 
     if max_history_id > 0:
-        set_sync_state(conn, "last_history_id", str(max_history_id))
+        _advance_history_checkpoint(conn, user_id, max_history_id)
 
     conn.close()
     return downloaded
@@ -324,9 +362,11 @@ def sync_new_messages(
     db_path: Path,
     data_dir: Path,
     max_attachment_size: int = 10 * 1024 * 1024,
+    *, user_id: str | None = None,
 ) -> int:
     conn = get_connection(db_path)
-    last_history_id = get_sync_state(conn, "last_history_id")
+    user_id = resolve_write_user_id(conn, user_id=user_id)
+    last_history_id = _history_checkpoint(conn, user_id)
     conn.close()
 
     if not last_history_id:
@@ -400,6 +440,7 @@ def sync_new_messages(
     logger.info(f"Found {len(new_message_ids)} new messages")
 
     conn = get_connection(db_path)
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     attachments_dir = data_dir / "attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
     max_history_id = int(last_history_id)
@@ -413,14 +454,14 @@ def sync_new_messages(
             continue
 
         msg, att_metas = parse_message(raw)
-        upsert_message(conn, msg)
+        upsert_message(conn, msg, user_id=user_id)
 
         if msg.history_id > max_history_id:
             max_history_id = msg.history_id
 
         # Drive stubs (same rationale as download_messages above).
         for drive_id, kind in extract_drive_ids(msg.body_text or ""):
-            upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind))
+            upsert_drive_stub(conn, message_id=msg.id, drive_id=drive_id, mime_type=drive_mime_for_kind(kind), user_id=user_id)
 
         # URL stubs — plain URLs filled later by the crawl-urls command.
         # Same invitation guard as download_messages: skip ALL links when
@@ -430,9 +471,9 @@ def sync_new_messages(
         from gmail_search.gmail.url_extract import extract_crawlable_urls as _extract_urls
         from gmail_search.store.queries import upsert_url_stub as _upsert_url_stub
 
-        if not _skip_link_crawl(conn, msg, att_metas):
+        if not _skip_link_crawl(conn, msg, att_metas, user_id=user_id):
             for url in _extract_urls(msg.body_text or "", labels=msg.labels):
-                _upsert_url_stub(conn, message_id=msg.id, url=url)
+                _upsert_url_stub(conn, message_id=msg.id, url=url, user_id=user_id)
 
         for att_meta in att_metas:
             ingest_attachment(
@@ -442,6 +483,7 @@ def sync_new_messages(
                 att_meta,
                 attachments_dir=attachments_dir,
                 max_attachment_size=max_attachment_size,
+                user_id=user_id,
             )
 
         count += 1
@@ -462,6 +504,6 @@ def sync_new_messages(
             logger.warning(f"couldn't fetch current historyId after recovery: {e}")
 
     if max_history_id > int(last_history_id or 0):
-        set_sync_state(conn, "last_history_id", str(max_history_id))
+        _advance_history_checkpoint(conn, user_id, max_history_id)
     conn.close()
     return count

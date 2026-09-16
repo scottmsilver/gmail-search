@@ -1,3 +1,5 @@
+import { publicRoute } from "@/lib/publicBoundary";
+import { backendOriginHeaders, rejectUnsafeOrigin } from "@/lib/originSecurity";
 import { NextRequest, NextResponse } from "next/server";
 
 import { pythonApiUrl } from "@/lib/config";
@@ -15,7 +17,7 @@ const forward = async (
   body?: string,
 ): Promise<NextResponse> => {
   if (!check(id)) return NextResponse.json({ error: "invalid id" }, { status: 400 });
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...backendOriginHeaders() };
   if (body) headers["Content-Type"] = "application/json";
   if (cookie) headers["cookie"] = cookie;
   const res = await fetch(`${pythonApiUrl()}/api/conversations/${encodeURIComponent(id)}`, {
@@ -31,18 +33,28 @@ const forward = async (
   });
 };
 
-export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+async function handleGET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   return forward("GET", id, req.headers.get("cookie") ?? "");
 }
 
-export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+async function handlePUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const originDenied = rejectUnsafeOrigin(req);
+  if (originDenied) return originDenied;
   const { id } = await ctx.params;
   const body = await req.text();
   return forward("PUT", id, req.headers.get("cookie") ?? "", body);
 }
 
-export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+async function handleDELETE(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const originDenied = rejectUnsafeOrigin(req);
+  if (originDenied) return originDenied;
   const { id } = await ctx.params;
   return forward("DELETE", id, req.headers.get("cookie") ?? "");
 }
+
+export const GET = publicRoute(handleGET);
+
+export const PUT = publicRoute(handlePUT);
+
+export const DELETE = publicRoute(handleDELETE);

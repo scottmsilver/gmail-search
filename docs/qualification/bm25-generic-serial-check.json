@@ -1,0 +1,5758 @@
+{
+  "synthetic_only": true,
+  "profiles": {
+    "message_text": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437521,
+          3437521,
+          3437524,
+          3437524,
+          8192,
+          3437528,
+          3437528,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5397a393",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          16384,
+          3437538,
+          3437538,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_delete": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          16384,
+          3437538,
+          3437538,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_analyze": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          16384,
+          3437538,
+          3437538,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6080",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_vacuum": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437538,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6140",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "after_attach": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437538,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6140",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "leaf_after_attach_objects": [
+        3437531,
+        3437531,
+        3437534,
+        3437534,
+        8192,
+        3437538,
+        3437538,
+        3063808
+      ],
+      "direct_child_denied": true,
+      "attach_plan": [
+        {
+          "Plan": {
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Startup Cost": 10.0,
+            "Total Cost": 10.01,
+            "Plan Rows": 1,
+            "Plan Width": 11,
+            "Actual Startup Time": 0.112,
+            "Actual Total Time": 0.113,
+            "Actual Rows": 3,
+            "Actual Loops": 1,
+            "Output": [
+              "mixed_message_text.id",
+              "(paradedb.score(mixed_message_text.id))"
+            ],
+            "Plans": [
+              {
+                "Node Type": "Custom Scan",
+                "Parent Relationship": "Outer",
+                "Custom Plan Provider": "ParadeDB Base Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "mixed_message_text",
+                "Schema": "retained_leaves",
+                "Alias": "mixed_message_text",
+                "Startup Cost": 10.0,
+                "Total Cost": 10.01,
+                "Plan Rows": 1,
+                "Plan Width": 11,
+                "Actual Startup Time": 0.111,
+                "Actual Total Time": 0.113,
+                "Actual Rows": 3,
+                "Actual Loops": 1,
+                "Output": [
+                  "mixed_message_text.id",
+                  "paradedb.score(mixed_message_text.id)"
+                ],
+                "Table": "mixed_message_text",
+                "Index": "mixed_message_text_bm25",
+                "Segment Count": 1,
+                "Heap Fetches": 3,
+                "Virtual Tuples": 0,
+                "Invisible Tuples": 0,
+                "Exec Method": "TopKScanExecState",
+                "Scores": true,
+                "   TopK Order By": "pdb.score() desc, id asc",
+                "   TopK Limit": 100,
+                "   Queries": 1,
+                "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+              }
+            ]
+          },
+          "Query Identifier": 2439074889656320263,
+          "Planning Time": 0.306,
+          "Triggers": [],
+          "Execution Time": 0.148
+        }
+      ],
+      "attached_vacuum": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437538,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6140",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.008535317028872669,
+        "cluster_wal_bytes": 944
+      },
+      "force_merge": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437538,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6140",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": {
+          "sqlstate": "22000",
+          "error": "force_merge is deprecated, run `VACUUM` instead"
+        },
+        "seconds": 0.0129589659627527,
+        "cluster_wal_bytes": 0
+      },
+      "after_merge_vacuum": {
+        "force_custom_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner2",
+            5.6072526
+          ],
+          [
+            "owner3",
+            2.8221111
+          ],
+          [
+            "owner1",
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437538,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "226c05dd",
+            "mutable": false,
+            "byte_size": "6140",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2290",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "1218",
+            "fieldnorms_bytes": "872",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.013641017954796553,
+        "cluster_wal_bytes": 920
+      },
+      "reindex_rollback": {
+        "before": {
+          "force_custom_plan": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437531,
+            3437531,
+            3437534,
+            3437534,
+            8192,
+            3437538,
+            3437538,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_message_text_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "226c05dd",
+              "mutable": false,
+              "byte_size": "6140",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "2290",
+              "postings_bytes": "1039",
+              "positions_bytes": "661",
+              "fast_fields_bytes": "1218",
+              "fieldnorms_bytes": "872",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        },
+        "during_objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437550,
+          3022848
+        ],
+        "after": {
+          "force_custom_plan": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              "owner2",
+              5.6072526
+            ],
+            [
+              "owner3",
+              2.8221111
+            ],
+            [
+              "owner1",
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437531,
+            3437531,
+            3437534,
+            3437534,
+            8192,
+            3437538,
+            3437538,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_message_text_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "226c05dd",
+              "mutable": false,
+              "byte_size": "6140",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "2290",
+              "postings_bytes": "1039",
+              "positions_bytes": "661",
+              "fast_fields_bytes": "1218",
+              "fieldnorms_bytes": "872",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        }
+      },
+      "reindex": {
+        "force_custom_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            "owner3",
+            1.5697745
+          ],
+          [
+            "owner1",
+            1.1926777
+          ],
+          [
+            "owner2",
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437531,
+          3437531,
+          3437534,
+          3437534,
+          8192,
+          3437538,
+          3437551,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_text_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "d4c7ca10",
+            "mutable": false,
+            "byte_size": "669",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "258",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "173",
+            "fieldnorms_bytes": "69",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.015488634002394974,
+        "cluster_wal_bytes": 824
+      },
+      "post_reindex_churn": {
+        "mode": "observed",
+        "stages": {
+          "after_insert": {
+            "force_custom_plan": [
+              [
+                "owner3",
+                1.5179627
+              ],
+              [
+                "owner2",
+                1.3282974
+              ],
+              [
+                "owner1",
+                0.91214794
+              ],
+              [
+                "churn",
+                0.7411202
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                "owner3",
+                1.5179627
+              ],
+              [
+                "owner2",
+                1.3282974
+              ],
+              [
+                "owner1",
+                0.91214794
+              ],
+              [
+                "churn",
+                0.7411202
+              ]
+            ],
+            "fresh_backend": [
+              [
+                "owner3",
+                1.5179627
+              ],
+              [
+                "owner2",
+                1.3282974
+              ],
+              [
+                "owner1",
+                0.91214794
+              ],
+              [
+                "churn",
+                0.7411202
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                "owner3",
+                1.5179627
+              ],
+              [
+                "owner2",
+                1.3282974
+              ],
+              [
+                "owner1",
+                0.91214794
+              ],
+              [
+                "churn",
+                0.7411202
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "(paradedb.score(mixed_message_text.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_text",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_text",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 11,
+                          "Output": [
+                            "mixed_message_text.id",
+                            "paradedb.score(mixed_message_text.id)"
+                          ],
+                          "Table": "mixed_message_text",
+                          "Index": "mixed_message_text_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                "owner3",
+                1.5179627
+              ],
+              [
+                "owner2",
+                1.3282974
+              ],
+              [
+                "owner1",
+                0.91214794
+              ],
+              [
+                "churn",
+                0.7411202
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_text",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_text",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "paradedb.score(mixed_message_text.id)"
+                      ],
+                      "Table": "mixed_message_text",
+                      "Index": "mixed_message_text_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "foreign_only": [
+              [
+                "churn",
+                1.9061548
+              ]
+            ],
+            "live_rows": 5,
+            "objects": [
+              3437531,
+              3437531,
+              3437534,
+              3437534,
+              8192,
+              3437538,
+              3437551,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "d4c7ca10",
+                "mutable": false,
+                "byte_size": "669",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "258",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "173",
+                "fieldnorms_bytes": "69",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "3c337ea8",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_delete": {
+            "force_custom_plan": [
+              [
+                "owner3",
+                1.8312013
+              ],
+              [
+                "owner1",
+                1.4694518
+              ],
+              [
+                "owner2",
+                1.3185544
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                "owner3",
+                1.8312013
+              ],
+              [
+                "owner1",
+                1.4694518
+              ],
+              [
+                "owner2",
+                1.3185544
+              ]
+            ],
+            "fresh_backend": [
+              [
+                "owner3",
+                1.8312013
+              ],
+              [
+                "owner1",
+                1.4694518
+              ],
+              [
+                "owner2",
+                1.3185544
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                "owner3",
+                1.8312013
+              ],
+              [
+                "owner1",
+                1.4694518
+              ],
+              [
+                "owner2",
+                1.3185544
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "(paradedb.score(mixed_message_text.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_text",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_text",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 11,
+                          "Output": [
+                            "mixed_message_text.id",
+                            "paradedb.score(mixed_message_text.id)"
+                          ],
+                          "Table": "mixed_message_text",
+                          "Index": "mixed_message_text_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                "owner3",
+                1.8312013
+              ],
+              [
+                "owner1",
+                1.4694518
+              ],
+              [
+                "owner2",
+                1.3185544
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_text",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_text",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "paradedb.score(mixed_message_text.id)"
+                      ],
+                      "Table": "mixed_message_text",
+                      "Index": "mixed_message_text_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "foreign_only": [],
+            "live_rows": 4,
+            "objects": [
+              3437531,
+              3437531,
+              3437534,
+              3437534,
+              8192,
+              3437538,
+              3437551,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "d4c7ca10",
+                "mutable": false,
+                "byte_size": "669",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "258",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "173",
+                "fieldnorms_bytes": "69",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "3c337ea8",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_vacuum": {
+            "force_custom_plan": [
+              [
+                "owner3",
+                1.5697745
+              ],
+              [
+                "owner1",
+                1.1926777
+              ],
+              [
+                "owner2",
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                "owner3",
+                1.5697745
+              ],
+              [
+                "owner1",
+                1.1926777
+              ],
+              [
+                "owner2",
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "(paradedb.score(mixed_message_text.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_text",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_text",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 11,
+                          "Output": [
+                            "mixed_message_text.id",
+                            "paradedb.score(mixed_message_text.id)"
+                          ],
+                          "Table": "mixed_message_text",
+                          "Index": "mixed_message_text_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_text",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_text",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "paradedb.score(mixed_message_text.id)"
+                      ],
+                      "Table": "mixed_message_text",
+                      "Index": "mixed_message_text_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437531,
+              3437531,
+              3437534,
+              3437534,
+              8192,
+              3437538,
+              3437551,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "d4c7ca10",
+                "mutable": false,
+                "byte_size": "669",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "258",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "173",
+                "fieldnorms_bytes": "69",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "3c337ea8",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "read_retry": {
+            "force_custom_plan": [
+              [
+                "owner3",
+                1.5697745
+              ],
+              [
+                "owner1",
+                1.1926777
+              ],
+              [
+                "owner2",
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                "owner3",
+                1.5697745
+              ],
+              [
+                "owner1",
+                1.1926777
+              ],
+              [
+                "owner2",
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "(paradedb.score(mixed_message_text.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_text",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_text",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 11,
+                          "Output": [
+                            "mixed_message_text.id",
+                            "paradedb.score(mixed_message_text.id)"
+                          ],
+                          "Table": "mixed_message_text",
+                          "Index": "mixed_message_text_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 11,
+                  "Output": [
+                    "mixed_message_text.id",
+                    "(paradedb.score(mixed_message_text.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_text",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_text",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 11,
+                      "Output": [
+                        "mixed_message_text.id",
+                        "paradedb.score(mixed_message_text.id)"
+                      ],
+                      "Table": "mixed_message_text",
+                      "Index": "mixed_message_text_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 2439074889656320263
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437531,
+              3437531,
+              3437534,
+              3437534,
+              8192,
+              3437538,
+              3437551,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "d4c7ca10",
+                "mutable": false,
+                "byte_size": "669",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "258",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "173",
+                "fieldnorms_bytes": "69",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_text_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "3c337ea8",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    "message_numeric": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437552,
+          3437552,
+          3437555,
+          3437555,
+          8192,
+          3437559,
+          3437559,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "7abc5959",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          16384,
+          3437569,
+          3437569,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          16384,
+          3437569,
+          3437569,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_analyze": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          16384,
+          3437569,
+          3437569,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7911",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437569,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7971",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "after_attach": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437569,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7971",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "leaf_after_attach_objects": [
+        3437562,
+        3437562,
+        3437565,
+        3437565,
+        8192,
+        3437569,
+        3437569,
+        3063808
+      ],
+      "direct_child_denied": true,
+      "attach_plan": [
+        {
+          "Plan": {
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Startup Cost": 10.0,
+            "Total Cost": 10.01,
+            "Plan Rows": 1,
+            "Plan Width": 12,
+            "Actual Startup Time": 0.213,
+            "Actual Total Time": 0.216,
+            "Actual Rows": 3,
+            "Actual Loops": 1,
+            "Output": [
+              "mixed_message_numeric.search_id",
+              "(paradedb.score(mixed_message_numeric.search_id))"
+            ],
+            "Plans": [
+              {
+                "Node Type": "Custom Scan",
+                "Parent Relationship": "Outer",
+                "Custom Plan Provider": "ParadeDB Base Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "mixed_message_numeric",
+                "Schema": "retained_leaves",
+                "Alias": "mixed_message_numeric",
+                "Startup Cost": 10.0,
+                "Total Cost": 10.01,
+                "Plan Rows": 1,
+                "Plan Width": 12,
+                "Actual Startup Time": 0.212,
+                "Actual Total Time": 0.215,
+                "Actual Rows": 3,
+                "Actual Loops": 1,
+                "Output": [
+                  "mixed_message_numeric.search_id",
+                  "paradedb.score(mixed_message_numeric.search_id)"
+                ],
+                "Table": "mixed_message_numeric",
+                "Index": "mixed_message_numeric_bm25",
+                "Segment Count": 1,
+                "Heap Fetches": 3,
+                "Virtual Tuples": 0,
+                "Invisible Tuples": 0,
+                "Exec Method": "TopKScanExecState",
+                "Scores": true,
+                "   TopK Order By": "pdb.score() desc, search_id asc",
+                "   TopK Limit": 100,
+                "   Queries": 1,
+                "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+              }
+            ]
+          },
+          "Query Identifier": 3198420887075550852,
+          "Planning Time": 0.6,
+          "Triggers": [],
+          "Execution Time": 0.284
+        }
+      ],
+      "attached_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437569,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7971",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.0180194090353325,
+        "cluster_wal_bytes": 1016
+      },
+      "force_merge": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437569,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7971",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": {
+          "sqlstate": "22000",
+          "error": "force_merge is deprecated, run `VACUUM` instead"
+        },
+        "seconds": 0.016000651055946946,
+        "cluster_wal_bytes": 0
+      },
+      "after_merge_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437569,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "45190029",
+            "mutable": false,
+            "byte_size": "7971",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "3370",
+            "postings_bytes": "1538",
+            "positions_bytes": "1152",
+            "fast_fields_bytes": "768",
+            "fieldnorms_bytes": "1083",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.012839627917855978,
+        "cluster_wal_bytes": 1016
+      },
+      "reindex_rollback": {
+        "before": {
+          "force_custom_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437562,
+            3437562,
+            3437565,
+            3437565,
+            8192,
+            3437569,
+            3437569,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_message_numeric_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "45190029",
+              "mutable": false,
+              "byte_size": "7971",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "3370",
+              "postings_bytes": "1538",
+              "positions_bytes": "1152",
+              "fast_fields_bytes": "768",
+              "fieldnorms_bytes": "1083",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        },
+        "during_objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437581,
+          3022848
+        ],
+        "after": {
+          "force_custom_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437562,
+            3437562,
+            3437565,
+            3437565,
+            8192,
+            3437569,
+            3437569,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_message_numeric_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "45190029",
+              "mutable": false,
+              "byte_size": "7971",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "3370",
+              "postings_bytes": "1538",
+              "positions_bytes": "1152",
+              "fast_fields_bytes": "768",
+              "fieldnorms_bytes": "1083",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        }
+      },
+      "reindex": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437562,
+          3437562,
+          3437565,
+          3437565,
+          8192,
+          3437569,
+          3437582,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_message_numeric_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "f504ae00",
+            "mutable": false,
+            "byte_size": "754",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "335",
+            "postings_bytes": "113",
+            "positions_bytes": "92",
+            "fast_fields_bytes": "135",
+            "fieldnorms_bytes": "79",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.016045826021581888,
+        "cluster_wal_bytes": 856
+      },
+      "post_reindex_churn": {
+        "mode": "observed",
+        "stages": {
+          "after_insert": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "(paradedb.score(mixed_message_numeric.search_id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_numeric",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_numeric",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_message_numeric.search_id",
+                            "paradedb.score(mixed_message_numeric.search_id)"
+                          ],
+                          "Table": "mixed_message_numeric",
+                          "Index": "mixed_message_numeric_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, search_id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_numeric",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_numeric",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "paradedb.score(mixed_message_numeric.search_id)"
+                      ],
+                      "Table": "mixed_message_numeric",
+                      "Index": "mixed_message_numeric_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, search_id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "foreign_only": [
+              [
+                999,
+                1.9061548
+              ]
+            ],
+            "live_rows": 5,
+            "objects": [
+              3437562,
+              3437562,
+              3437565,
+              3437565,
+              8192,
+              3437569,
+              3437582,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "f504ae00",
+                "mutable": false,
+                "byte_size": "754",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "335",
+                "postings_bytes": "113",
+                "positions_bytes": "92",
+                "fast_fields_bytes": "135",
+                "fieldnorms_bytes": "79",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "e01a88d6",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_delete": {
+            "force_custom_plan": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "(paradedb.score(mixed_message_numeric.search_id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_numeric",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_numeric",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_message_numeric.search_id",
+                            "paradedb.score(mixed_message_numeric.search_id)"
+                          ],
+                          "Table": "mixed_message_numeric",
+                          "Index": "mixed_message_numeric_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, search_id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_numeric",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_numeric",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "paradedb.score(mixed_message_numeric.search_id)"
+                      ],
+                      "Table": "mixed_message_numeric",
+                      "Index": "mixed_message_numeric_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, search_id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "foreign_only": [],
+            "live_rows": 4,
+            "objects": [
+              3437562,
+              3437562,
+              3437565,
+              3437565,
+              8192,
+              3437569,
+              3437582,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "f504ae00",
+                "mutable": false,
+                "byte_size": "754",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "335",
+                "postings_bytes": "113",
+                "positions_bytes": "92",
+                "fast_fields_bytes": "135",
+                "fieldnorms_bytes": "79",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "e01a88d6",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_vacuum": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "(paradedb.score(mixed_message_numeric.search_id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_numeric",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_numeric",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_message_numeric.search_id",
+                            "paradedb.score(mixed_message_numeric.search_id)"
+                          ],
+                          "Table": "mixed_message_numeric",
+                          "Index": "mixed_message_numeric_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, search_id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_numeric",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_numeric",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "paradedb.score(mixed_message_numeric.search_id)"
+                      ],
+                      "Table": "mixed_message_numeric",
+                      "Index": "mixed_message_numeric_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, search_id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437562,
+              3437562,
+              3437565,
+              3437565,
+              8192,
+              3437569,
+              3437582,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "f504ae00",
+                "mutable": false,
+                "byte_size": "754",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "335",
+                "postings_bytes": "113",
+                "positions_bytes": "92",
+                "fast_fields_bytes": "135",
+                "fieldnorms_bytes": "79",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "e01a88d6",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "read_retry": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "(paradedb.score(mixed_message_numeric.search_id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_message_numeric",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_message_numeric",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_message_numeric.search_id",
+                            "paradedb.score(mixed_message_numeric.search_id)"
+                          ],
+                          "Table": "mixed_message_numeric",
+                          "Index": "mixed_message_numeric_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, search_id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_message_numeric.search_id",
+                    "(paradedb.score(mixed_message_numeric.search_id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_message_numeric",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_message_numeric",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_message_numeric.search_id",
+                        "paradedb.score(mixed_message_numeric.search_id)"
+                      ],
+                      "Table": "mixed_message_numeric",
+                      "Index": "mixed_message_numeric_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, search_id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"search_id\",\"query_string\":\"body_text:alpha OR body_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 3198420887075550852
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437562,
+              3437562,
+              3437565,
+              3437565,
+              8192,
+              3437569,
+              3437582,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "f504ae00",
+                "mutable": false,
+                "byte_size": "754",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "335",
+                "postings_bytes": "113",
+                "positions_bytes": "92",
+                "fast_fields_bytes": "135",
+                "fieldnorms_bytes": "79",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_message_numeric_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "e01a88d6",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    "attachment": {
+      "clean": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437583,
+          3437583,
+          3437586,
+          3437586,
+          8192,
+          3437590,
+          3437590,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "clean_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "ae325e16",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "mixed_before_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          16384,
+          3437600,
+          3437600,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_delete": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          16384,
+          3437600,
+          3437600,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_analyze": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          16384,
+          3437600,
+          3437600,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5197",
+            "num_docs": "204",
+            "num_deleted": "0",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ]
+      },
+      "after_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437600,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5257",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "after_attach": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437600,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5257",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ]
+      },
+      "leaf_after_attach_objects": [
+        3437593,
+        3437593,
+        3437596,
+        3437596,
+        8192,
+        3437600,
+        3437600,
+        3063808
+      ],
+      "direct_child_denied": true,
+      "attach_plan": [
+        {
+          "Plan": {
+            "Node Type": "Limit",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Startup Cost": 10.0,
+            "Total Cost": 10.01,
+            "Plan Rows": 1,
+            "Plan Width": 12,
+            "Actual Startup Time": 0.186,
+            "Actual Total Time": 0.189,
+            "Actual Rows": 3,
+            "Actual Loops": 1,
+            "Output": [
+              "mixed_attachment.id",
+              "(paradedb.score(mixed_attachment.id))"
+            ],
+            "Plans": [
+              {
+                "Node Type": "Custom Scan",
+                "Parent Relationship": "Outer",
+                "Custom Plan Provider": "ParadeDB Base Scan",
+                "Parallel Aware": false,
+                "Async Capable": false,
+                "Relation Name": "mixed_attachment",
+                "Schema": "retained_leaves",
+                "Alias": "mixed_attachment",
+                "Startup Cost": 10.0,
+                "Total Cost": 10.01,
+                "Plan Rows": 1,
+                "Plan Width": 12,
+                "Actual Startup Time": 0.185,
+                "Actual Total Time": 0.188,
+                "Actual Rows": 3,
+                "Actual Loops": 1,
+                "Output": [
+                  "mixed_attachment.id",
+                  "paradedb.score(mixed_attachment.id)"
+                ],
+                "Table": "mixed_attachment",
+                "Index": "mixed_attachment_bm25",
+                "Segment Count": 1,
+                "Heap Fetches": 3,
+                "Virtual Tuples": 0,
+                "Invisible Tuples": 0,
+                "Exec Method": "TopKScanExecState",
+                "Scores": true,
+                "   TopK Order By": "pdb.score() desc, id asc",
+                "   TopK Limit": 100,
+                "   Queries": 1,
+                "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+              }
+            ]
+          },
+          "Query Identifier": 6077516137789776117,
+          "Planning Time": 0.52,
+          "Triggers": [],
+          "Execution Time": 0.253
+        }
+      ],
+      "attached_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437600,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5257",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.011956157977692783,
+        "cluster_wal_bytes": 824
+      },
+      "force_merge": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437600,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5257",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": {
+          "sqlstate": "22000",
+          "error": "force_merge is deprecated, run `VACUUM` instead"
+        },
+        "seconds": 0.018966539995744824,
+        "cluster_wal_bytes": 0
+      },
+      "after_merge_vacuum": {
+        "force_custom_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "fresh_backend": [
+          [
+            2,
+            5.6072526
+          ],
+          [
+            3,
+            2.8221111
+          ],
+          [
+            1,
+            0.017096052
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437600,
+          3063808
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "1c73b5c0",
+            "mutable": false,
+            "byte_size": "5257",
+            "num_docs": "4",
+            "num_deleted": "200",
+            "termdict_bytes": "2286",
+            "postings_bytes": "1039",
+            "positions_bytes": "661",
+            "fast_fields_bytes": "761",
+            "fieldnorms_bytes": "450",
+            "store_bytes": "0",
+            "deletes_bytes": "60"
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.015194335021078587,
+        "cluster_wal_bytes": 824
+      },
+      "reindex_rollback": {
+        "before": {
+          "force_custom_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437593,
+            3437593,
+            3437596,
+            3437596,
+            8192,
+            3437600,
+            3437600,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_attachment_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "1c73b5c0",
+              "mutable": false,
+              "byte_size": "5257",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "2286",
+              "postings_bytes": "1039",
+              "positions_bytes": "661",
+              "fast_fields_bytes": "761",
+              "fieldnorms_bytes": "450",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        },
+        "during_objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437612,
+          3022848
+        ],
+        "after": {
+          "force_custom_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "force_generic_plan": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "fresh_backend": [
+            [
+              2,
+              5.6072526
+            ],
+            [
+              3,
+              2.8221111
+            ],
+            [
+              1,
+              0.017096052
+            ]
+          ],
+          "foreign_only": [],
+          "live_rows": 4,
+          "objects": [
+            3437593,
+            3437593,
+            3437596,
+            3437596,
+            8192,
+            3437600,
+            3437600,
+            3063808
+          ],
+          "segments": [
+            {
+              "index_name": "mixed_attachment_bm25",
+              "visible": true,
+              "recyclable": false,
+              "xmax": null,
+              "segno": "1c73b5c0",
+              "mutable": false,
+              "byte_size": "5257",
+              "num_docs": "4",
+              "num_deleted": "200",
+              "termdict_bytes": "2286",
+              "postings_bytes": "1039",
+              "positions_bytes": "661",
+              "fast_fields_bytes": "761",
+              "fieldnorms_bytes": "450",
+              "store_bytes": "0",
+              "deletes_bytes": "60"
+            }
+          ]
+        }
+      },
+      "reindex": {
+        "force_custom_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "force_generic_plan": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "fresh_backend": [
+          [
+            3,
+            1.5697745
+          ],
+          [
+            1,
+            1.1926777
+          ],
+          [
+            2,
+            1.0674466
+          ]
+        ],
+        "foreign_only": [],
+        "live_rows": 4,
+        "objects": [
+          3437593,
+          3437593,
+          3437596,
+          3437596,
+          8192,
+          3437600,
+          3437613,
+          3022848
+        ],
+        "segments": [
+          {
+            "index_name": "mixed_attachment_bm25",
+            "visible": true,
+            "recyclable": false,
+            "xmax": null,
+            "segno": "5a8e5921",
+            "mutable": false,
+            "byte_size": "606",
+            "num_docs": "4",
+            "num_deleted": "0",
+            "termdict_bytes": "260",
+            "postings_bytes": "91",
+            "positions_bytes": "78",
+            "fast_fields_bytes": "128",
+            "fieldnorms_bytes": "49",
+            "store_bytes": "0",
+            "deletes_bytes": null
+          }
+        ],
+        "maintenance_return": null,
+        "seconds": 0.015226412913762033,
+        "cluster_wal_bytes": 824
+      },
+      "post_reindex_churn": {
+        "mode": "observed",
+        "stages": {
+          "after_insert": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "(paradedb.score(mixed_attachment.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_attachment",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_attachment",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_attachment.id",
+                            "paradedb.score(mixed_attachment.id)"
+                          ],
+                          "Table": "mixed_attachment",
+                          "Index": "mixed_attachment_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                3,
+                1.5179627
+              ],
+              [
+                2,
+                1.3282974
+              ],
+              [
+                1,
+                0.91214794
+              ],
+              [
+                999,
+                0.7411202
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_attachment",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_attachment",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "paradedb.score(mixed_attachment.id)"
+                      ],
+                      "Table": "mixed_attachment",
+                      "Index": "mixed_attachment_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "foreign_only": [
+              [
+                999,
+                1.9061548
+              ]
+            ],
+            "live_rows": 5,
+            "objects": [
+              3437593,
+              3437593,
+              3437596,
+              3437596,
+              8192,
+              3437600,
+              3437613,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "5a8e5921",
+                "mutable": false,
+                "byte_size": "606",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "260",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "128",
+                "fieldnorms_bytes": "49",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "dcf3aa64",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_delete": {
+            "force_custom_plan": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "force_generic_plan": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_generic_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "(paradedb.score(mixed_attachment.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_attachment",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_attachment",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_attachment.id",
+                            "paradedb.score(mixed_attachment.id)"
+                          ],
+                          "Table": "mixed_attachment",
+                          "Index": "mixed_attachment_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "fresh_serial_generic_backend": [
+              [
+                3,
+                1.8312013
+              ],
+              [
+                1,
+                1.4694518
+              ],
+              [
+                2,
+                1.3185544
+              ]
+            ],
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_attachment",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_attachment",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "paradedb.score(mixed_attachment.id)"
+                      ],
+                      "Table": "mixed_attachment",
+                      "Index": "mixed_attachment_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "foreign_only": [],
+            "live_rows": 4,
+            "objects": [
+              3437593,
+              3437593,
+              3437596,
+              3437596,
+              8192,
+              3437600,
+              3437613,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "5a8e5921",
+                "mutable": false,
+                "byte_size": "606",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "260",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "128",
+                "fieldnorms_bytes": "49",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "dcf3aa64",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "1",
+                "num_deleted": "0",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "after_vacuum": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "(paradedb.score(mixed_attachment.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_attachment",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_attachment",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_attachment.id",
+                            "paradedb.score(mixed_attachment.id)"
+                          ],
+                          "Table": "mixed_attachment",
+                          "Index": "mixed_attachment_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_attachment",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_attachment",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "paradedb.score(mixed_attachment.id)"
+                      ],
+                      "Table": "mixed_attachment",
+                      "Index": "mixed_attachment_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437593,
+              3437593,
+              3437596,
+              3437596,
+              8192,
+              3437600,
+              3437613,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "5a8e5921",
+                "mutable": false,
+                "byte_size": "606",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "260",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "128",
+                "fieldnorms_bytes": "49",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "dcf3aa64",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          },
+          "read_retry": {
+            "force_custom_plan": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "force_generic_plan": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_backend": [
+              [
+                3,
+                1.5697745
+              ],
+              [
+                1,
+                1.1926777
+              ],
+              [
+                2,
+                1.0674466
+              ]
+            ],
+            "fresh_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 1010.01,
+                  "Total Cost": 1010.36,
+                  "Plan Rows": 3,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Gather Merge",
+                      "Parent Relationship": "Outer",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Startup Cost": 1010.01,
+                      "Total Cost": 1010.36,
+                      "Plan Rows": 3,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "(paradedb.score(mixed_attachment.id))"
+                      ],
+                      "Workers Planned": 1,
+                      "Plans": [
+                        {
+                          "Node Type": "Custom Scan",
+                          "Parent Relationship": "Outer",
+                          "Custom Plan Provider": "ParadeDB Base Scan",
+                          "Parallel Aware": true,
+                          "Async Capable": false,
+                          "Relation Name": "mixed_attachment",
+                          "Schema": "retained_leaves",
+                          "Alias": "mixed_attachment",
+                          "Startup Cost": 10.0,
+                          "Total Cost": 10.01,
+                          "Plan Rows": 0,
+                          "Plan Width": 12,
+                          "Output": [
+                            "mixed_attachment.id",
+                            "paradedb.score(mixed_attachment.id)"
+                          ],
+                          "Table": "mixed_attachment",
+                          "Index": "mixed_attachment_bm25",
+                          "Segment Count": 2,
+                          "Exec Method": "TopKScanExecState",
+                          "Scores": true,
+                          "   TopK Order By": "pdb.score() desc, id asc",
+                          "   TopK Limit": 100,
+                          "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "fresh_serial_generic_backend": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "fresh_serial_generic_plan": [
+              {
+                "Plan": {
+                  "Node Type": "Limit",
+                  "Parallel Aware": false,
+                  "Async Capable": false,
+                  "Startup Cost": 10.0,
+                  "Total Cost": 10.01,
+                  "Plan Rows": 1,
+                  "Plan Width": 12,
+                  "Output": [
+                    "mixed_attachment.id",
+                    "(paradedb.score(mixed_attachment.id))"
+                  ],
+                  "Plans": [
+                    {
+                      "Node Type": "Custom Scan",
+                      "Parent Relationship": "Outer",
+                      "Custom Plan Provider": "ParadeDB Base Scan",
+                      "Parallel Aware": false,
+                      "Async Capable": false,
+                      "Relation Name": "mixed_attachment",
+                      "Schema": "retained_leaves",
+                      "Alias": "mixed_attachment",
+                      "Startup Cost": 10.0,
+                      "Total Cost": 10.01,
+                      "Plan Rows": 1,
+                      "Plan Width": 12,
+                      "Output": [
+                        "mixed_attachment.id",
+                        "paradedb.score(mixed_attachment.id)"
+                      ],
+                      "Table": "mixed_attachment",
+                      "Index": "mixed_attachment_bm25",
+                      "Segment Count": 2,
+                      "Exec Method": "TopKScanExecState",
+                      "Scores": true,
+                      "   TopK Order By": "pdb.score() desc, id asc",
+                      "   TopK Limit": 100,
+                      "Tantivy Query": "{\"boolean\":{\"must\":[{\"heap_filter\":{\"indexed_query\":{\"boolean\":{\"must\":[{\"with_index\":{\"query\":{\"with_index\":{\"query\":{\"parse_with_field\":{\"field\":\"id\",\"query_string\":\"extracted_text:alpha OR extracted_text:beta\",\"lenient\":null,\"conjunction_mode\":null}}}}}}]}},\"field_filters\":[{\"heap_filter\":\"(user_id = 'alice'::text)\"}]}}]}}"
+                    }
+                  ]
+                },
+                "Query Identifier": 6077516137789776117
+              }
+            ],
+            "foreign_only": {
+              "sqlstate": "XX000",
+              "error": "assertion failed: item_pointer_is_valid(ctid)"
+            },
+            "live_rows": 4,
+            "objects": [
+              3437593,
+              3437593,
+              3437596,
+              3437596,
+              8192,
+              3437600,
+              3437613,
+              3039232
+            ],
+            "segments": [
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "5a8e5921",
+                "mutable": false,
+                "byte_size": "606",
+                "num_docs": "4",
+                "num_deleted": "0",
+                "termdict_bytes": "260",
+                "postings_bytes": "91",
+                "positions_bytes": "78",
+                "fast_fields_bytes": "128",
+                "fieldnorms_bytes": "49",
+                "store_bytes": "0",
+                "deletes_bytes": null
+              },
+              {
+                "index_name": "mixed_attachment_bm25",
+                "visible": true,
+                "recyclable": false,
+                "xmax": null,
+                "segno": "dcf3aa64",
+                "mutable": true,
+                "byte_size": null,
+                "num_docs": "0",
+                "num_deleted": "1",
+                "termdict_bytes": null,
+                "postings_bytes": null,
+                "positions_bytes": null,
+                "fast_fields_bytes": null,
+                "fieldnorms_bytes": null,
+                "store_bytes": null,
+                "deletes_bytes": null
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "object_fields": [
+    "heap_oid",
+    "heap_relfilenode",
+    "toast_oid",
+    "toast_relfilenode",
+    "heap_bytes",
+    "bm25_oid",
+    "bm25_relfilenode",
+    "bm25_main_bytes"
+  ],
+  "version": [
+    "PostgreSQL 16.13 (Debian 16.13-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "0.23.0"
+  ]
+}

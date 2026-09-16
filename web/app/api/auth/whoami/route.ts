@@ -1,3 +1,4 @@
+import { publicRoute } from "@/lib/publicBoundary";
 // Public diagnostic proxy — no cookies needed either way.
 
 import { NextResponse } from "next/server";
@@ -7,7 +8,7 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function GET() {
+async function handleGET() {
   const upstream = await fetch(`${pythonApiUrl()}/api/auth/whoami`, {
     cache: "no-store",
   });
@@ -17,3 +18,5 @@ export async function GET() {
     headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
   });
 }
+
+export const GET = publicRoute(handleGET);

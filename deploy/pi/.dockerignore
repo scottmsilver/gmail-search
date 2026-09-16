@@ -1,0 +1,6 @@
+.env
+.env.*
+sessions
+pi-agent
+pi-pkgs/node_modules
+workflow/*.test.mjs

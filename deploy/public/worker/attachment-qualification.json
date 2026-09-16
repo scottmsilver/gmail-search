@@ -1,0 +1,94 @@
+{
+  "status": "passed",
+  "results": [
+    {
+      "fixture": "hello.pdf",
+      "text": "SYNTHETIC ATTACHMENT 42\n",
+      "pages": [
+        {
+          "width": 417,
+          "height": 417,
+          "sha256": "11d4e1a6e42514d6e381b627cc89a321310fe79163e987ba3e9def128781e9d2"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "fixture": "huge.pdf",
+      "rejected": true
+    },
+    {
+      "fixture": "malformed.pdf",
+      "rejected": true
+    },
+    {
+      "fixture": "tiny.png",
+      "text": "",
+      "pages": [
+        {
+          "width": 8,
+          "height": 8,
+          "sha256": "95fa854b8c906b260de2b8d4c1c7a85c77b105af7adaf7f9b9e3662c44d3dd82"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "fixture": "huge.png",
+      "rejected": true
+    },
+    {
+      "fixture": "hello.zip",
+      "text": "SYNTHETIC ATTACHMENT 42\n",
+      "pages": [
+        {
+          "width": 417,
+          "height": 417,
+          "sha256": "11d4e1a6e42514d6e381b627cc89a321310fe79163e987ba3e9def128781e9d2"
+        }
+      ],
+      "truncated": false
+    },
+    {
+      "fixture": "many.zip",
+      "text": "",
+      "pages": [],
+      "truncated": true
+    },
+    {
+      "orphan_watchdog_killed": true,
+      "evidence": {
+        "Uid:": "Uid:\t65534\t65534\t65534\t65534",
+        "Seccomp:": "Seccomp:\t2",
+        "NSpid:": "NSpid:\t614\t1",
+        "memory.max": "805306368",
+        "memory.swap.max": "0",
+        "pids.max": "128",
+        "cpu.max": "100000 100000"
+      }
+    },
+    {
+      "fixture": "long-text.pdf",
+      "text_bytes": 200000,
+      "truncated": true
+    }
+  ],
+  "image_sha256": "89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068",
+  "cancellation": {
+    "status": "passed",
+    "actual_vm_cancelled_during_launch": true,
+    "start_seconds": 0.0007623620000032361,
+    "stop_seconds": 0.057947324000011236,
+    "worker_joined": true,
+    "vmm_reaped": true,
+    "evidence": {
+      "Uid:": "Uid:\t65534\t65534\t65534\t65534",
+      "Seccomp:": "Seccomp:\t2",
+      "NSpid:": "NSpid:\t625\t1",
+      "memory.max": "805306368",
+      "memory.swap.max": "0",
+      "pids.max": "128",
+      "cpu.max": "100000 100000"
+    }
+  }
+}

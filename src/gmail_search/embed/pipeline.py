@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from gmail_search.auth.write_user import resolve_write_user_id
 from gmail_search.embed.client import (
     GeminiEmbedder,
     InvalidImage,
@@ -63,7 +64,7 @@ def _describe_image_failure(img_file: Path, e: Exception) -> str:
 
 
 def _record_image_failures(
-    conn, att_id: int, failures: list[tuple[Path, Exception]]
+    conn, att_id: int, failures: list[tuple[Path, Exception]], *, user_id: str | None = None
 ) -> None:
     """One attachment, one pass, one bookkeeping write. The attachment is
     only marked permanent when EVERY failed image failed permanently —
@@ -72,7 +73,7 @@ def _record_image_failures(
     permanent = all(_is_permanent_image_error(e) for _, e in failures)
     error = "; ".join(_describe_image_failure(f, e) for f, e in failures[:3])
     status = record_image_embed_failure(
-        conn, att_id, error, permanent=permanent, max_attempts=MAX_IMAGE_EMBED_ATTEMPTS
+        conn, att_id, error, permanent=permanent, max_attempts=MAX_IMAGE_EMBED_ATTEMPTS, user_id=user_id
     )
     outcome = "permanent" if status == EMBED_STATUS_FAILED_PERMANENT else "will retry"
     level = logger.warning if outcome == "permanent" else logger.info
@@ -118,12 +119,9 @@ def run_embedding_pipeline(
     user_id: str | None = None,
     limit: int | None = None,
 ) -> int:
-    """Embed all unembedded messages and attachments. When `user_id`
-    is given, scopes BOTH phases (messages + attachments) to that
-    user — required for per-user daemons so silvershabbat's pass
-    doesn't try to embed scott's 410k messages and OOM the box.
-    """
+    """Embed pending messages and attachments for one resolved mailbox owner."""
     conn = get_connection(db_path)
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     model = config["embedding"]["model"]
     max_budget = config["budget"]["max_usd"]
     att_config = config.get("attachments", {})
@@ -239,21 +237,19 @@ def run_embedding_pipeline(
     _att_lim = " LIMIT %s" if limit is not None else ""
     _att_where = (
         "((a.extracted_text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
-        "WHERE e.attachment_id = a.id AND e.chunk_type = 'attachment_text' AND e.model = %s)) "
+        "WHERE e.attachment_id = a.id AND e.user_id = a.user_id AND e.chunk_type = 'attachment_text' AND e.model = %s)) "
         "OR (a.image_path IS NOT NULL AND a.embed_status IS DISTINCT FROM %s "
         "AND NOT EXISTS (SELECT 1 FROM embeddings e "
-        "WHERE e.attachment_id = a.id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s)))"
+        "WHERE e.attachment_id = a.id AND e.user_id = a.user_id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s)))"
     )
-    _scope_sql, _scope_params = (
-        ("m.user_id = %s AND ", (user_id,)) if user_id is not None else ("", ())
-    )
+    _scope_sql, _scope_params = "m.user_id = %s AND ", (user_id,)
     _p = (
         _scope_params
         + (model, EMBED_STATUS_FAILED_PERMANENT, model)
         + ((limit,) if limit is not None else ())
     )
     all_messages = conn.execute(
-        "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id "
+        "SELECT DISTINCT m.id, m.subject FROM messages m JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id "
         "WHERE " + _scope_sql + _att_where + " ORDER BY m.id" + _att_lim,
         _p,
     ).fetchall()
@@ -262,11 +258,11 @@ def run_embedding_pipeline(
     for row in tqdm(all_messages, desc="Processing attachments"):
         msg_id = row["id"]
         msg_subject = row["subject"]
-        attachments = get_attachments_for_message(conn, msg_id)
+        attachments = get_attachments_for_message(conn, msg_id, user_id=user_id)
 
         for att in attachments:
             if att.extracted_text and not embedding_exists(
-                conn, msg_id, att.id, "attachment_text", model
+                conn, msg_id, att.id, "attachment_text", model, user_id=user_id
             ):
                 ok, spent, remaining = check_budget(conn, max_budget, user_id=user_id)
                 if not ok:
@@ -321,10 +317,10 @@ def run_embedding_pipeline(
                 for img_idx, img_file in enumerate(image_files):
                     chunk_key = f"attachment_image_{img_idx}"
                     # Check both new per-image key and legacy single key
-                    if embedding_exists(conn, msg_id, att.id, chunk_key, model):
+                    if embedding_exists(conn, msg_id, att.id, chunk_key, model, user_id=user_id):
                         continue
                     if img_idx == 0 and embedding_exists(
-                        conn, msg_id, att.id, "attachment_image", model
+                        conn, msg_id, att.id, "attachment_image", model, user_id=user_id
                     ):
                         continue
                     ok, spent, remaining = check_budget(
@@ -369,7 +365,7 @@ def run_embedding_pipeline(
                     total_embedded += 1
 
                 if failures:
-                    _record_image_failures(conn, att.id, failures)
+                    _record_image_failures(conn, att.id, failures, user_id=user_id)
 
     conn.close()
     logger.info(f"Embedded {total_embedded} chunks total")

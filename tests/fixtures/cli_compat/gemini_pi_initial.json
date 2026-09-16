@@ -1,0 +1,41 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "synthetic fixture prompt"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "synthetic Pi coding assistant system prompt"
+      }
+    ],
+    "role": "user"
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "bash",
+          "description": "synthetic tool",
+          "parametersJsonSchema": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+              "command": {"type": "string", "description": "shell command"},
+              "timeout": {"type": "number", "description": "timeout seconds"}
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 1024
+  }
+}

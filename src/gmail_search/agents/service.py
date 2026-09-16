@@ -26,7 +26,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 # conversation_id is interpolated into a claudebox workspace DIRECTORY name
 # (_claudebox_workspace_for), so it must be a strict slug — no '/', no '..',
@@ -65,7 +65,9 @@ def _use_real_pipeline() -> bool:
     live Gemini call the moment you POST to /api/agent/analyze."""
     import os
 
-    return os.environ.get("GMAIL_DEEP_REAL", "").lower() in ("1", "true", "yes")
+    from gmail_search.auth.public import public_enabled
+
+    return public_enabled() or os.environ.get("GMAIL_DEEP_REAL", "").lower() in ("1", "true", "yes")
 
 
 logger = logging.getLogger(__name__)
@@ -87,10 +89,9 @@ class AnalyzeRequest(BaseModel):
     # web picker takes when the user picks a non-default model for
     # deep mode.
     model: str | None = None
-    # Which runtime adapter to use: `adk` (Gemini via google-adk) or
-    # `claude_code` (claudebox HTTP + MCP side-channel). When None,
-    # falls back to the `GMAIL_DEEP_BACKEND` env var (default `adk`).
-    backend: str | None = None
+    # Public analysis backends. Legacy adapters remain internal to existing
+    # orchestration code; new requests default to Pi.
+    backend: Literal["claude_code", "pi"] = "pi"
 
 
 def _sse(event_type: str, data: dict) -> str:
@@ -590,6 +591,13 @@ def _extract_text_from_parts_json(parts_raw: str) -> str:
             text = p.get("text")
             if isinstance(text, str) and text.strip():
                 pieces.append(text.strip())
+        elif isinstance(p, dict) and p.get("type") == "data-battle":
+            data = p.get("data")
+            if isinstance(data, dict):
+                for side in ("a", "b"):
+                    answer = data.get(f"answer_{side}")
+                    if isinstance(answer, str) and answer.strip():
+                        pieces.append(f"Previous analysis {side.upper()}: {answer.strip()}")
     return "\n\n".join(pieces)
 
 
@@ -807,6 +815,32 @@ async def _real_run(
     # with all MCP tools, no orchestrator). The first two preserve the
     # orchestrator's InvokeFn contract; claude_native is a separate
     # path that owns its own event emission + finalization.
+    from gmail_search.auth.public import public_enabled
+
+    if public_enabled():
+        from gmail_search.agents.runtime_public import public_run
+
+        public_task = asyncio.create_task(public_run(
+            db_path=db_path, session_id=session_id, question=question,
+            user_id=user_id, conversation_id=conversation_id,
+        ))
+        try:
+            async for frame in _stream_task_events(poll_conn, session_id, public_task):
+                yield frame
+            tail = _finish_single_agent_turn(
+                conn, public_task, conversation_id=conversation_id,
+                session_id=session_id, runner_name="public_run",
+            )
+            if tail is not None:
+                yield tail
+        finally:
+            if not public_task.done():
+                public_task.cancel()
+                await asyncio.gather(public_task, return_exceptions=True)
+            poll_conn.close()
+            conn.close()
+        return
+
     backend = _deep_backend(backend)
     # Per-turn credential preflight: syncs the host-rotated token into
     # the claudebox mount AND classifies its expiry. Claude Code
@@ -853,7 +887,7 @@ async def _real_run(
                 workspace=workspace,
                 conversation_id=conversation_id,
                 question=question,
-                model=None,
+                model=default_model,
                 cost_sink=_record_cost,
                 user_id=user_id,
             )
@@ -1391,6 +1425,10 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
     # via `GMAIL_DEEP_PROBE_STREAMING=1`.
     @app.on_event("startup")
     async def _streaming_probe_on_startup() -> None:
+        from gmail_search.auth.public import public_enabled
+
+        if public_enabled():
+            return
         try:
             await _probe_claudebox_streaming()
         except Exception:
@@ -1561,9 +1599,20 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
             conn.close()
         if row is None:
             return JSONResponse({"error": "Artifact not found"}, status_code=404)
+        from urllib.parse import quote
+
         name, mime_type, data = row
+        safe_inline = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif", "application/pdf", "text/plain"}
+        disposition = "inline" if mime_type.split(";", 1)[0].strip().lower() in safe_inline else "attachment"
         return Response(
             content=data,
             media_type=mime_type,
-            headers={"Content-Disposition": f'inline; filename="{name}"'},
+            headers={
+                "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(name, safe='')}",
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
+                "Referrer-Policy": "no-referrer",
+                "Cross-Origin-Resource-Policy": "same-origin",
+            },
         )

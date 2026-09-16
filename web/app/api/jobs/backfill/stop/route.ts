@@ -1,3 +1,5 @@
+import { publicRoute } from "@/lib/publicBoundary";
+import { backendOriginHeaders, rejectUnsafeOrigin } from "@/lib/originSecurity";
 import { NextRequest, NextResponse } from "next/server";
 
 import { pythonApiUrl } from "@/lib/config";
@@ -5,11 +7,13 @@ import { pythonApiUrl } from "@/lib/config";
 export const runtime = "nodejs";
 export const revalidate = 0;
 
-export async function POST(req: NextRequest) {
+async function handlePOST(req: NextRequest) {
+  const originDenied = rejectUnsafeOrigin(req);
+  if (originDenied) return originDenied;
   const cookie = req.headers.get("cookie") ?? "";
   const upstream = await fetch(`${pythonApiUrl()}/api/jobs/backfill/stop`, {
     method: "POST",
-    headers: cookie ? { cookie } : undefined,
+    headers: { ...backendOriginHeaders(), ...(cookie ? { cookie } : {}) },
   });
   const body = await upstream.text();
   return new NextResponse(body, {
@@ -17,3 +21,5 @@ export async function POST(req: NextRequest) {
     headers: { "Content-Type": upstream.headers.get("content-type") ?? "application/json" },
   });
 }
+
+export const POST = publicRoute(handlePOST);

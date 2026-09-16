@@ -11,6 +11,7 @@ says whether the bytes are on disk.
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime
 
 import pytest
@@ -173,8 +174,12 @@ def test_successful_fetch_is_ok_and_writes_file(conn, tmp_path):
     (row,) = get_attachments_for_message(conn, "msg-big-1")
     assert row.fetch_status == "ok"
     assert row.size_bytes == 14
-    assert row.raw_path == str(tmp_path / "msg-big-1" / "Big Draw.pdf")
-    assert (tmp_path / "msg-big-1" / "Big Draw.pdf").read_bytes() == b"%PDF-1.4 hello"
+    owner = conn.execute("SELECT user_id FROM messages WHERE id = %s", ("msg-big-1",)).fetchone()["user_id"]
+    owner_dir = hashlib.sha256(owner.encode("utf-8")).hexdigest()
+    expected = tmp_path / "owners" / owner_dir / "msg-big-1" / "Big Draw.pdf"
+    assert row.raw_path == str(expected)
+    assert expected.read_bytes() == b"%PDF-1.4 hello"
+    assert not (tmp_path / "msg-big-1" / "Big Draw.pdf").exists()
 
 
 def test_later_failure_never_clobbers_a_fetched_row(conn, tmp_path):

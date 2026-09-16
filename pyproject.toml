@@ -62,6 +62,8 @@ dependencies = [
     # transitive deps. Only active when GMS_LOG_JSON=1; otherwise logs stay
     # human-readable. >=3.1 for the `pythonjsonlogger.json` import path.
     "python-json-logger>=3.1",
+    "pglast>=7,<8",
+    "httpx>=0.28,<0.29",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,21 @@
+[Unit]
+Description=Gmail Search public web (owner-only)
+After=network-online.target gmail-search-public-api.service
+Wants=network-online.target gmail-search-public-api.service
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/gmail-search/public-current/web
+EnvironmentFile=%h/.config/gmail-search/public-web.env
+ExecStart=%h/development/gmail-search/web/node_modules/.bin/next start --hostname 127.0.0.1 --port 3001
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitNOFILE=4096
+TasksMax=128
+MemoryMax=2G
+TimeoutStopSec=30
+[Install]
+WantedBy=default.target

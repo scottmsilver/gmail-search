@@ -65,7 +65,7 @@ non-zero.
 pi needs a provider credential. Either:
 
 - Put a key in `deploy/pi/.env` before starting — `GEMINI_API_KEY=…`
-  (gmail-search's deep-mode default provider is Gemini) or
+  (for direct Google-provider models) or
   `ANTHROPIC_API_KEY=…`; or
 - Run `docker exec -it pi-sandbox pi` and use `/login` interactively.
   Tokens land in `pi-agent/auth.json` on the host (mounted at
@@ -181,3 +181,54 @@ MCP tools reachable, a real session registered), see Task 9's smoke
 script in `.superpowers/sdd/2026-09-02-pi-deep-backend/task-9-report.md` — it
 registers a throwaway session via the admin API, drives one turn through
 `runtime_pi.drive_turn`, and unregisters the session afterward.
+
+## Pi provider credentials
+
+Set `OPENROUTER_API_KEY` in the gitignored `deploy/pi/.env`, then run
+`docker compose -f deploy/pi/docker-compose.yml up -d pi-sandbox` to apply it.
+In the chat picker, enable **Deep analysis**, select **Pi**, and choose
+**Muse Spark 1.3 (OpenRouter)**, **Gemini 3.8 Flash (Google)**, or
+**Claude Opus 5 (Anthropic)**. The key stays in the Pi container environment.
+
+`models.json` registers all three provider models explicitly for the
+pinned Pi version and is mounted read-only. Its context size and token prices
+come from https://openrouter.ai/meta/muse-spark-1.3; output is capped at 65,536
+tokens per response. To use it as the configured default, set
+`GMAIL_PI_MODEL=openrouter/meta/muse-spark-1.3` on the Python service.
+
+Gemini uses `GEMINI_API_KEY` directly with Google; Opus uses `ANTHROPIC_API_KEY`
+directly with Anthropic. Opus 5 requires `compat.forceAdaptiveThinking: true`.
+The driver uses medium thinking by default, which Gemini 3.8 Flash accepts.
+Muse stays on OpenRouter pending a direct Meta API credential.
+
+## Optional workflow profile
+
+The default remains `GMAIL_PI_WORKFLOW_PROFILE=baseline`. To enable the optional
+workflow toolkit, rebuild the Pi image from this directory and set
+`GMAIL_PI_WORKFLOW_PROFILE=workflow` on the **Python service**. The eval CLI can
+select either profile per run without changing that service default. Existing
+sessions should start a fresh conversation when switching profiles.
+
+The workflow profile adds pinned `pi-subagents` (0.67.0), a persistent `todo`
+tool, and skills for source verification, conflicting facts, and timelines.
+The model chooses direct Gmail tools, `mcpScript`, tasks, or delegation; no
+question has a prescribed pipeline. The `mail-researcher` and `mail-verifier`
+children inherit the parent's model and receive the session-bound Gmail token.
+They have read-only Gmail tools. Delegation is bounded to three concurrent
+background runs, twelve spawns per turn, and one child level.
+
+The driver waits for child completion and parent synthesis, and stops owned
+children when a turn fails or is cancelled. Per-turn configuration and redacted
+lifecycle/usage events live under the workspace's private `.workflow` directory;
+hidden files are excluded from automatic artifact publication.
+
+See [the eval guide](../../docs/AGENT_WORKFLOW_EVAL.md) for historical reporting,
+controlled comparisons, billing opt-in, and manual evidence review. A synthetic
+smoke test exercises real Pi processes and the MCP adapter without model charges
+or mailbox credentials:
+
+```bash
+docker build -t gmail-search-pi:workflow-eval-test deploy/pi
+PYTHONPATH=src .venv/bin/python scripts/smoke_pi_workflow.py \
+  --image gmail-search-pi:workflow-eval-test
+```

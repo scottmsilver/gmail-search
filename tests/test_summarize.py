@@ -354,9 +354,9 @@ def test_record_and_clear_summary_failure(db_backend):
     conn = get_connection(db_backend["db_path"])
     # summary_failures has a FK to messages; stub one row.
     conn.execute(
-        """INSERT INTO messages (id, thread_id, from_addr, to_addr, subject,
+        """INSERT INTO messages (user_id, id, thread_id, from_addr, to_addr, subject,
                                  body_text, date, labels)
-           VALUES ('m1', 't1', 'a@x.com', 'b@x.com', 's', 'b',
+           VALUES ('u_test_bootstrap', 'm1', 't1', 'a@x.com', 'b@x.com', 's', 'b',
                    '2026-04-21T00:00:00+00:00', '[]')"""
     )
     conn.commit()

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from gmail_search.agents import runtime_claude as rc
 from gmail_search.agents import runtime_pi
 
@@ -81,6 +83,58 @@ class _FakeClient:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _WorkflowClient(_FakeClient):
+    def __init__(self, records, states):
+        super().__init__(records)
+        self.states = list(states)
+
+    async def request(self, command, *, timeout):
+        if command.get("message") == "/gms-workflow-status":
+            self.sent.append(command)
+            self.stray.append({"type": "gms_workflow_state", **self.states.pop(0)})
+            return {"success": True}
+        return await super().request(command, timeout=timeout)
+
+
+def test_workflow_waits_for_children_and_parent_synthesis():
+    client = _WorkflowClient([
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Research running"}]}},
+        {"type": "agent_end"},
+        {"type": "agent_settled"},
+        {"type": "agent_start"},
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Answer with child evidence"}]}},
+        {"type": "agent_end"},
+        {"type": "agent_settled"},
+    ], [{"ready": True, "active": False}, {"ready": True, "active": True}, {"ready": True, "active": False}])
+
+    async def sink(*args):
+        pass
+
+    result = asyncio.run(runtime_pi.drive_turn(client, "q", on_tool_event=sink, hard_timeout=5, idle_timeout=5, workflow=True))
+    assert result.final_text == "Answer with child evidence"
+    assert not client.states
+
+
+def test_workflow_fails_if_lifecycle_bridge_missing():
+    import pytest
+
+    client = _FakeClient([])
+
+    async def sink(*args):
+        pass
+
+    with pytest.raises(runtime_pi.PiRpcError, match="workflow"):
+        asyncio.run(runtime_pi.drive_turn(client, "q", on_tool_event=sink, hard_timeout=5, idle_timeout=5, workflow=True))
+    assert not any(cmd.get("message") == "q" for cmd in client.sent)
+
+
+def test_workflow_prompt_offers_delegation_without_fixed_stages():
+    text = runtime_pi.render_instruction("openrouter/meta/muse-spark-1.3", workflow_profile="workflow")
+    assert "There is no sub-agent tool" not in text
+    assert "mail-researcher" in text
+    assert "None of these is a mandatory step" in text
 
 
 def _happy_records() -> list[dict]:
@@ -222,6 +276,64 @@ def test_argv_uses_conversation_session_path(monkeypatch):
     assert "pi-test" in argv and "GMS_SESSION_ID=s1" in argv
 
 
+def _malformed_records():
+    return [
+        {"type": "message_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "broken call"}],
+            "stopReason": "error", "errorMessage": "Provider stopped with: MALFORMED_FUNCTION_CALL",
+        }},
+        {"type": "agent_end", "messages": []},
+    ]
+
+
+def test_malformed_call_resumes_same_session_once(monkeypatch):
+    records = _happy_records()[:-2] + _malformed_records() + _happy_records()[-2:]
+    client = _FakeClient(records)
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    assert conn.finalized == [{"status": "done", "final_answer": "Final answer"}]
+    assert len([c for c in client.sent if c["type"] == "prompt"]) == 2
+    assert len([e for e in conn.events if e["kind"] == "tool_call"]) == 4
+    assert not client.aborted
+
+
+def test_malformed_call_retry_is_bounded(monkeypatch):
+    client = _FakeClient(_malformed_records() * 3)
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    assert conn.finalized[-1]["status"] == "error"
+    assert len([c for c in client.sent if c["type"] == "prompt"]) == 2
+    assert client.aborted
+
+
+def test_malformed_retry_does_not_publish_broken_text_on_empty_answer(monkeypatch):
+    client = _FakeClient(_malformed_records() + [{"type": "agent_end", "messages": []}])
+    conn, _ = _install(monkeypatch, client)
+    _run()
+    assert conn.finalized == [{"status": "error", "final_answer": None}]
+    assert "without an assistant answer" in conn.events[-1]["payload"]["message"]
+
+
+def test_malformed_retry_keeps_original_deadline(monkeypatch):
+    from types import SimpleNamespace
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(runtime_pi, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: clock.now))
+
+    class ExpiringClient(_FakeClient):
+        async def send(self, command):
+            await super().send(command)
+            if len(self.sent) == 2:
+                clock.now = 11.0
+
+    client = ExpiringClient(_malformed_records() + _happy_records())
+    conn, _ = _install(monkeypatch, client)
+    monkeypatch.setattr(runtime_pi, "hard_timeout_seconds", lambda: 10.0)
+    _run()
+    assert conn.finalized[-1]["status"] == "error"
+    assert "hard timeout" in conn.events[-1]["payload"]["message"]
+
+
 def test_no_conversation_runs_without_session(monkeypatch):
     client = _FakeClient(_happy_records())
     _install(monkeypatch, client)
@@ -348,6 +460,7 @@ def test_error_stop_reason_surfaces_as_error_event(monkeypatch):
     assert conn.events[-1]["kind"] == "error"
     assert "context too large" in conn.events[-1]["payload"]["message"]
     assert conn.finalized == [{"status": "error", "final_answer": None}]
+    assert len([c for c in client.sent if c["type"] == "prompt"]) == 1
 
 
 def test_killed_on_normal_close_triggers_stray_kill(monkeypatch):
@@ -483,10 +596,13 @@ def test_render_instruction_injects_gemini3_budget():
     assert "session_id" not in text
 
 
-def test_render_instruction_includes_narration_requirement():
+def test_render_instruction_scales_work_and_reads_readable_mail():
     text = runtime_pi.render_instruction("google/gemini-3.7-flash")
-    assert "Narrate as you go" in text
-    assert "before each tool call" in text
+    assert "body_next_offset" in text
+    assert "message_ids" in text
+    assert "before each tool call" not in text
+    assert "substr(body_text" not in text
+    assert "coverage" in text
 
 
 def test_context_window_env_override(monkeypatch):
@@ -512,6 +628,7 @@ def test_context_window_for_unknown_model_falls_back_to_default():
 
 
 def test_context_window_for_known_prefixes():
+    assert runtime_pi.context_window_for("openrouter/meta/muse-spark-1.3") == 1_048_576
     assert runtime_pi.context_window_for("google/gemini-2.5-pro") == 1_048_576
     assert runtime_pi.context_window_for("anthropic/claude-test") == 200_000
 
@@ -698,3 +815,38 @@ def test_pi_turn_failed_carries_usage_and_is_a_pi_rpc_error():
     exc = runtime_pi.PiTurnFailed("boom", usage=None)
     assert isinstance(exc, runtime_pi.PiRpcError)
     assert exc.usage is None
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+def test_workflow_records_only_per_turn_parent_and_child_cost_even_on_cancel(monkeypatch, tmp_path, cancel):
+    conn, calls = _install_common(monkeypatch)
+    directory = tmp_path / 'trace'
+    directory.mkdir()
+    records = [
+        {'type': 'message_end', 'parent': True, 'event_id': 'p:1', 'provider': 'p', 'model': 'm', 'usage': {'input': 10, 'output': 2, 'cost': {'total': .1}}},
+        {'type': 'message_end', 'parent': False, 'event_id': 'c:1', 'provider': 'p', 'model': 'm', 'usage': {'input': 20, 'output': 4, 'cost': {'total': .2}}},
+    ]
+    import json
+    (directory / 'events.jsonl').write_text('\n'.join(json.dumps(r) for r in records))
+    monkeypatch.setattr(runtime_pi.wf, 'prepare_workflow', lambda *a, **kw: runtime_pi.wf.WorkflowFiles(directory, {}))
+    async def run_turn(*a, **kw):
+        if cancel:
+            raise asyncio.CancelledError()
+        return runtime_pi.TurnOutcome(final_text='answer', local_tool_calls=[], usage=runtime_pi.pp.UsageStats(3000, 600, 0, 0, 30))
+    monkeypatch.setattr(runtime_pi, '_run_turn', run_turn)
+    costs = []
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            _run(workflow_profile='workflow', cost_sink=lambda **kw: costs.append(kw))
+    else:
+        _run(workflow_profile='workflow', cost_sink=lambda **kw: costs.append(kw))
+    assert sorted(c['input_tokens'] for c in costs) == [10, 20]
+    assert sum(c['usd_override'] for c in costs) == pytest.approx(.3)
+    assert calls['unregister'] == ['s1']
+
+
+def test_pi_default_is_gemini_and_explicit_model_wins(monkeypatch):
+    monkeypatch.delenv("GMAIL_PI_MODEL", raising=False)
+    assert runtime_pi.pi_model() == "google/gemini-3.8-flash"
+    monkeypatch.setenv("GMAIL_PI_MODEL", "openrouter/meta/muse-spark-1.3")
+    assert runtime_pi.pi_model() == "openrouter/meta/muse-spark-1.3"

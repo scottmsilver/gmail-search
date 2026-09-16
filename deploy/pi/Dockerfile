@@ -27,6 +27,8 @@ RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSIO
 COPY pi-pkgs/package.json pi-pkgs/package-lock.json /opt/pi-pkgs/
 RUN cd /opt/pi-pkgs && npm ci --ignore-scripts
 COPY mcp.json /opt/gmail-mcp.json
+COPY workflow /opt/pi-workflow
+RUN ln -s /opt/pi-pkgs/node_modules /opt/pi-workflow/node_modules
 
 # node:24 ships a `node` user at uid 1000; rename it so the workspace
 # files it writes are owned by the host user (also uid 1000).

@@ -107,7 +107,8 @@ def ensure_table(conn) -> None:
             embedding   BYTEA,
             model       TEXT NOT NULL,
             date        TEXT,
-            created_at  TIMESTAMPTZ DEFAULT now()
+            created_at  TIMESTAMPTZ DEFAULT now(),
+            FOREIGN KEY (user_id, message_id) REFERENCES messages(user_id, id) ON DELETE CASCADE
         )
         """
     )
@@ -186,6 +187,13 @@ def extract_propositions(
     return _parse_facts(raw)
 
 
+def _require_message_owner(conn, user_id: str, message_id: str, *, lock: bool = False) -> None:
+    if not conn.execute(
+        "SELECT 1 FROM messages WHERE user_id=%s AND id=%s" + (" FOR KEY SHARE" if lock else ""), (user_id, message_id)
+    ).fetchone():
+        raise ValueError("Proposition message does not belong to requested owner")
+
+
 def store_propositions(
     conn,
     embedder,
@@ -201,14 +209,18 @@ def store_propositions(
 
     if not facts:
         return 0
+    _require_message_owner(conn, user_id, message_id)
     vectors = embedder.embed_texts_batch(facts)
     model_tag = f"{embedder.model}+{PROPOSITIONIZER_VERSION}"
-    for fact, vec in zip(facts, vectors):
-        conn.execute(
-            """INSERT INTO propositions (user_id, message_id, thread_id, text, embedding, model, date)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (user_id, message_id, thread_id, fact, embedding_to_blob(vec), model_tag, date),
-        )
+    with conn.transaction():
+        _require_message_owner(conn, user_id, message_id, lock=True)
+        for fact, vec in zip(facts, vectors):
+            conn.execute(
+                """INSERT INTO propositions (user_id, message_id, thread_id, text, embedding, model, date)
+                   SELECT %s, %s, %s, %s, %s, %s, %s
+                   WHERE EXISTS (SELECT 1 FROM messages WHERE user_id=%s AND id=%s)""",
+                (user_id, message_id, thread_id, fact, embedding_to_blob(vec), model_tag, date, user_id, message_id),
+            )
     conn.commit()
     return len(facts)
 
@@ -226,11 +238,15 @@ def backfill(
 ) -> dict[str, int]:
     """Extract+store propositions for the messages matching `bm25_query`
     (ParadeDB `@@@`), newest first. Skips messages already done this run."""
-    owner = owner or owner_string()
+    owner = owner or owner_string_for_user(conn, user_id)
+    # The BM25 key is the connection's, not a literal: the TEXT profile keys on
+    # `id`, and a hardcoded `search_id` here would fail against the live schema.
+    from gmail_search.store.schema_profile import bm25_key
+
     rows = conn.execute(
-        """SELECT id, thread_id, date, from_addr, to_addr, subject, body_text
+        f"""SELECT id, thread_id, date, from_addr, to_addr, subject, body_text
            FROM messages
-           WHERE user_id = %s AND id @@@ %s
+           WHERE user_id = %s AND {bm25_key(conn)} @@@ %s
            ORDER BY date DESC
            LIMIT %s""",
         (user_id, bm25_query, limit),
@@ -239,6 +255,7 @@ def backfill(
     for r in rows:
         stats["messages"] += 1
         try:
+            _require_message_owner(conn, user_id, r["id"])
             facts = extract_propositions(
                 client,
                 backend,
@@ -268,7 +285,9 @@ def ensure_processed_table(conn) -> None:
     """Marker table so the live daemon is idempotent: a message is reprocessed
     only until it has been successfully propositionized once."""
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS prop_processed (user_id text, message_id text, PRIMARY KEY(user_id, message_id))"
+        """CREATE TABLE IF NOT EXISTS prop_processed (user_id text NOT NULL, message_id text NOT NULL,
+           PRIMARY KEY(user_id, message_id),
+           FOREIGN KEY(user_id,message_id) REFERENCES messages(user_id,id) ON DELETE CASCADE)"""
     )
     conn.commit()
 
@@ -333,6 +352,7 @@ def propositionize_pending(
     for r in rows:
         stats["messages"] += 1
         try:
+            _require_message_owner(conn, user_id, r["id"])
             facts = extract_propositions(
                 client,
                 backend,
@@ -343,31 +363,38 @@ def propositionize_pending(
                 subject=r["subject"] or "",
                 body=r["body_text"] or "",
             )
+            _require_message_owner(conn, user_id, r["id"])
             vectors = embedder.embed_texts_batch(facts) if facts else []
-            # Atomic replace + marker in a single transaction.
-            conn.execute("DELETE FROM propositions WHERE user_id = %s AND message_id = %s", (user_id, r["id"]))
-            if facts:
-                from gmail_search.embed.client import embedding_to_blob
+            with conn.transaction():
+                _require_message_owner(conn, user_id, r["id"], lock=True)
+                # Atomic replace + marker in a single transaction.
+                conn.execute("DELETE FROM propositions WHERE user_id = %s AND message_id = %s", (user_id, r["id"]))
+                if facts:
+                    from gmail_search.embed.client import embedding_to_blob
 
-                model_tag = f"{embedder.model}+{PROPOSITIONIZER_VERSION}"
-                for fact, vec in zip(facts, vectors):
-                    conn.execute(
-                        """INSERT INTO propositions (user_id, message_id, thread_id, text, embedding, model, date)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        (
-                            user_id,
-                            r["id"],
-                            r["thread_id"],
-                            fact,
-                            embedding_to_blob(vec),
-                            model_tag,
-                            str(r["date"] or ""),
-                        ),
-                    )
-            conn.execute(
-                "INSERT INTO prop_processed (user_id, message_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (user_id, r["id"]),
-            )
+                    model_tag = f"{embedder.model}+{PROPOSITIONIZER_VERSION}"
+                    for fact, vec in zip(facts, vectors):
+                        conn.execute(
+                            """INSERT INTO propositions (user_id, message_id, thread_id, text, embedding, model, date)
+                               SELECT %s, %s, %s, %s, %s, %s, %s
+                               WHERE EXISTS (SELECT 1 FROM messages WHERE user_id=%s AND id=%s)""",
+                            (
+                                user_id,
+                                r["id"],
+                                r["thread_id"],
+                                fact,
+                                embedding_to_blob(vec),
+                                model_tag,
+                                str(r["date"] or ""),
+                                user_id, r["id"],
+                            ),
+                        )
+                conn.execute(
+                    """INSERT INTO prop_processed (user_id, message_id)
+                       SELECT %s, %s WHERE EXISTS (SELECT 1 FROM messages WHERE user_id=%s AND id=%s)
+                       ON CONFLICT (user_id,message_id) DO NOTHING""",
+                    (user_id, r["id"], user_id, r["id"]),
+                )
             conn.commit()
             stats["facts"] += len(facts)
         except Exception:

@@ -4,7 +4,7 @@ the specific holes an adversarial review flagged:
 - conversation ownership gate: NULL-owner rows must NOT be treated as
   "brand new", and absent ids must be atomically claimed (no TOCTOU).
 - session/artifact ownership helpers fail closed across tenants.
-- summary upsert refreshes a stale owner instead of preserving it.
+- summary upserts preserve separate owners when Gmail IDs collide.
 """
 
 from __future__ import annotations
@@ -109,24 +109,21 @@ class TestSessionOwnerFailsClosed:
 
 
 class TestSummaryOwnerRefresh:
-    def test_upsert_refreshes_stale_owner(self, db):
+    def test_upsert_preserves_other_owner(self, db):
         from gmail_search.summarize import _store_summary
 
-        # Seed a message owned by uB and a STALE summary row misattributed
-        # to uA (simulating a pre-fix write).
-        db.execute(
-            "INSERT INTO messages (id, thread_id, from_addr, to_addr, date, user_id)"
-            " VALUES ('m1','t1','a@b.c','d@e.f','2026-01-01','uB')"
-        )
-        db.execute(
-            "INSERT INTO message_summaries (message_id, summary, model, user_id)" " VALUES ('m1','old','mdl','uA')"
-        )
+        for owner in ("uA", "uB"):
+            db.execute(
+                "INSERT INTO messages (id, thread_id, from_addr, to_addr, date, user_id)"
+                " VALUES ('m1','t1','a@b.c','d@e.f','2026-01-01',%s)",
+                (owner,),
+            )
+            _store_summary(db, "m1", owner, "mdl", user_id=owner)
+        _store_summary(db, "m1", "fresh summary", "mdl", user_id="uB")
         db.commit()
-
-        _store_summary(db, "m1", "fresh summary", "mdl")
-        db.commit()
-
-        row = db.execute("SELECT summary, user_id FROM message_summaries WHERE message_id='m1'").fetchone()
-        assert row["summary"] == "fresh summary"
-        # Owner corrected to the message's true owner (uB), not left at uA.
-        assert row["user_id"] == "uB"
+        rows = db.execute(
+            "SELECT summary, user_id FROM message_summaries WHERE message_id='m1' ORDER BY user_id"
+        ).fetchall()
+        assert [(r["user_id"], r["summary"]) for r in rows] == [
+            ("uA", "uA"), ("uB", "fresh summary")
+        ]

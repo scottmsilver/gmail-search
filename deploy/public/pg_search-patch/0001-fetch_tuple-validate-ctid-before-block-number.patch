@@ -1,0 +1,18 @@
+diff --git a/pg_search/src/postgres/heap.rs b/pg_search/src/postgres/heap.rs
+index 167ce04e..ba9d5050 100644
+--- a/pg_search/src/postgres/heap.rs
++++ b/pg_search/src/postgres/heap.rs
+@@ -320,6 +320,13 @@ impl HeapFetchState {
+         call_again: &mut bool,
+         all_dead: &mut bool,
+     ) -> bool {
++        // A stale ctid can be not merely out-of-range but outright invalid
++        // (offset 0). `item_pointer_get_block_number` asserts validity, so it
++        // would panic before the truncated-block guard below could reject it.
++        // Test the pointer first.
++        if !pgrx::itemptr::item_pointer_is_valid(ctid) {
++            return false;
++        }
+         let blockno = pgrx::itemptr::item_pointer_get_block_number(ctid);
+         if blockno >= self.nblocks {
+             return false;

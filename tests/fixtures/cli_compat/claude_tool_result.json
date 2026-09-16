@@ -1,0 +1,106 @@
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        },
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        },
+        {
+          "type": "text",
+          "text": "synthetic fixture text"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "synthetic_tool",
+          "name": "Bash",
+          "input": {
+            "command": "python3 -c \"from pathlib import Path; Path('synthetic-result.txt').write_text(str(6 * 7)); print('SYNTHETIC_TOOL_OK 42')\"",
+            "description": "synthetic fixture text"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "synthetic_tool",
+          "type": "tool_result",
+          "content": "SYNTHETIC_TOOL_OK 42",
+          "is_error": false
+        }
+      ]
+    }
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    },
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    },
+    {
+      "type": "text",
+      "text": "synthetic fixture text"
+    }
+  ],
+  "tools": [
+    {
+      "name": "Bash",
+      "description": "synthetic fixture text",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "synthetic fixture text",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "synthetic fixture text",
+            "type": "number"
+          },
+          "description": {
+            "description": "synthetic fixture text",
+            "type": "string"
+          },
+          "run_in_background": {
+            "description": "synthetic fixture text",
+            "type": "boolean"
+          },
+          "dangerouslyDisableSandbox": {
+            "description": "synthetic fixture text",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "metadata": {
+    "user_id": "synthetic fixture text"
+  },
+  "max_tokens": 32000,
+  "temperature": 1,
+  "output_config": {
+    "effort": "high"
+  },
+  "stream": true
+}

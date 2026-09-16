@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "purpose": "gmail-full-agent-production",
+  "hostname": "gmail-execution-worker",
+  "machine_id": "REPLACE_WITH_DEDICATED_VM_MACHINE_ID"
+}

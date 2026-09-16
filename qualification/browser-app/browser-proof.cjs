@@ -1,0 +1,41 @@
+const {chromium}=require('/home/ssilver/.cache/ms-playwright-go/1.57.0/package');
+const fs=require('node:fs'),assert=require('node:assert/strict');
+(async()=>{
+const browser=await chromium.launch({headless:true,executablePath:'/home/ssilver/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome',args:['--no-sandbox','--no-proxy-server','--host-resolver-rules=MAP gms.browser.test:443 127.0.0.1:34493']});
+try {
+ const context=await browser.newContext({ignoreHTTPSErrors:true});const page=await context.newPage();
+ page.on('requestfailed',r=>console.log('request failed:',new URL(r.url()).pathname,r.failure()?.errorText));
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('https://gms.browser.test/',{waitUntil:'domcontentloaded'});
+ console.log('anonymous:',(await page.locator('body').innerText()).slice(0,300));
+ const sessions=JSON.parse(fs.readFileSync('/tmp/gms-browser-app-proof-v2/sessions.json','utf8'));
+ await context.addCookies([{name:'__Host-gms_session',value:sessions.alice,domain:'gms.browser.test',path:'/',secure:true,httpOnly:true,sameSite:'Lax'}]);
+ await page.reload({waitUntil:'domcontentloaded'});
+ await page.getByPlaceholder('Ask about your email…').fill('Find synthetic receipts');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await page.getByText('Answer for Find synthetic receipts',{exact:true}).waitFor({timeout:15000});
+ const url=page.url();console.log('first answer visible');
+ await page.reload({waitUntil:'domcontentloaded'});
+ await page.getByText('Answer for Find synthetic receipts',{exact:true}).waitFor({timeout:15000});
+ console.log('reload retained answer');
+ await page.getByPlaceholder('Ask about your email…').fill('Total those receipts');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await page.getByText('Current user request:',{exact:false}).waitFor({timeout:15000});
+ console.log('follow-up answer visible');
+ const bob=await browser.newContext({ignoreHTTPSErrors:true});
+ await bob.addCookies([{name:'__Host-gms_session',value:sessions.bob,domain:'gms.browser.test',path:'/',secure:true,httpOnly:true,sameSite:'Lax'}]);
+ const bobPage=await bob.newPage();await bobPage.goto(url,{waitUntil:'domcontentloaded'});
+ assert.equal(await bobPage.getByText('Answer for Find synthetic receipts',{exact:true}).count(),0);
+ console.log('foreign owner cannot see conversation');
+ await page.goto('https://gms.browser.test/',{waitUntil:'domcontentloaded'});
+ await page.getByPlaceholder('Ask about your email…').fill('keep running');
+ await page.getByRole('button',{name:'Send',exact:true}).click();
+ await page.getByRole('button',{name:'Stop',exact:true}).waitFor({timeout:10000});
+ await page.waitForTimeout(500);
+ const stopResponse=page.waitForResponse(r=>r.url().includes('/api/agent/analyze') && r.request().method()==='DELETE');
+ await page.getByRole('button',{name:'Stop',exact:true}).click();
+ const stopped=await stopResponse;assert.equal(stopped.status(),200);assert.equal((await stopped.json()).state,'cancelled');
+ console.log('Stop confirmed worker cancellation');
+ assert.deepEqual(errors,[]);console.log('browser proof passed');
+} finally {await browser.close();}
+})().catch(e=>{console.error(e.message);process.exitCode=1;});

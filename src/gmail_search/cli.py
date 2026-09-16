@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import click
+from gmail_search.auth.write_user import resolve_write_user_id
 from gmail_search.config import load_config
 from gmail_search.store.cost import check_budget, get_spend_breakdown, get_total_spend
 from gmail_search.store.db import get_connection, init_db
@@ -69,13 +70,14 @@ def _message_for_invite_guard(row):
     )
 
 
-def _att_metas_for_message(conn, message_id):
+def _att_metas_for_message(conn, message_id, *, user_id: str | None = None):
     """Fetch attachment mime/filename pairs for the calendar auto-skip
     check in the catch-up scan. Returns the att_metas shape the guard
     expects (only the keys it reads)."""
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     rows = conn.execute(
-        "SELECT mime_type, filename FROM attachments WHERE message_id = %s",
-        (message_id,),
+        "SELECT mime_type, filename FROM attachments WHERE message_id = %s AND user_id = %s",
+        (message_id, user_id),
     ).fetchall()
     return [{"mime_type": r["mime_type"], "filename": r["filename"]} for r in rows]
 
@@ -112,6 +114,8 @@ def download(ctx, max_messages):
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import download_messages
 
+    with get_connection(ctx.obj["db_path"]) as conn:
+        active_user_id = resolve_write_user_id(conn)
     cfg = ctx.obj["config"]
     service = build_gmail_service(ctx.obj["data_dir"])
     max_msg = max_messages or cfg["download"].get("max_messages")
@@ -122,6 +126,7 @@ def download(ctx, max_messages):
         batch_size=cfg["download"]["batch_size"],
         max_messages=max_msg,
         max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+        user_id=active_user_id,
     )
     click.echo(f"Downloaded {count} new messages.")
 
@@ -133,6 +138,8 @@ def sync(ctx):
     from gmail_search.gmail.auth import build_gmail_service
     from gmail_search.gmail.client import sync_new_messages
 
+    with get_connection(ctx.obj["db_path"]) as conn:
+        active_user_id = resolve_write_user_id(conn)
     cfg = ctx.obj["config"]
     service = build_gmail_service(ctx.obj["data_dir"])
     count = sync_new_messages(
@@ -140,6 +147,7 @@ def sync(ctx):
         db_path=ctx.obj["db_path"],
         data_dir=ctx.obj["data_dir"],
         max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+        user_id=active_user_id,
     )
     click.echo(f"Synced {count} new messages.")
 
@@ -379,8 +387,8 @@ def extract(ctx, email):
             # invite. att_metas (mime/filename) come from the
             # attachments table for the calendar auto-skip case.
             msg = _message_for_invite_guard(r)
-            att_metas = _att_metas_for_message(conn, r["id"])
-            if skip_link_crawl_cached(conn, msg, att_metas):
+            att_metas = _att_metas_for_message(conn, r["id"], user_id=active_user_id)
+            if skip_link_crawl_cached(conn, msg, att_metas, user_id=active_user_id):
                 continue
             for url in extract_crawlable_urls(r["body_text"] or "", labels=r["labels"]):
                 new_url_stubs += upsert_url_stub(conn, message_id=r["id"], url=url, user_id=active_user_id)
@@ -409,7 +417,7 @@ def extract(ctx, email):
         drive_failed = 0
 
         for row in tqdm(rows, desc="Extracting attachments"):
-            attachments = get_attachments_for_message(conn, row["id"])
+            attachments = get_attachments_for_message(conn, row["id"], user_id=active_user_id)
             for att in attachments:
                 if att.extracted_text or att.image_path:
                     continue
@@ -431,7 +439,7 @@ def extract(ctx, email):
                     try:
                         from gmail_search.store.queries import fill_drive_attachment
 
-                        fill_drive_attachment(conn, attachment_id=att.id, title=title, text=text, drive_id=drive_id)
+                        fill_drive_attachment(conn, attachment_id=att.id, title=title, text=text, drive_id=drive_id, user_id=active_user_id)
                         conn.commit()
                         drive_fetched += 1
                     except Exception as e:
@@ -460,8 +468,8 @@ def extract(ctx, email):
                 if updates:
                     set_clause = ", ".join(f"{k} = %s" for k in updates)
                     conn.execute(
-                        f"UPDATE attachments SET {set_clause} WHERE id = %s",
-                        (*updates.values(), att.id),
+                        f"UPDATE attachments SET {set_clause} WHERE id = %s AND user_id = %s",
+                        (*updates.values(), att.id, active_user_id),
                     )
                     conn.commit()
                     updated += 1
@@ -713,10 +721,11 @@ def _extract_pending_attachments(conn, att_config: dict, *, user_id: str | None 
     from gmail_search.extract import dispatch
     from gmail_search.store.queries import get_attachments_for_message, get_pending_extraction_message_ids
 
+    user_id = resolve_write_user_id(conn, user_id=user_id)
     message_ids = get_pending_extraction_message_ids(conn, user_id=user_id)
     extracted = 0
     for message_id in message_ids:
-        for att in get_attachments_for_message(conn, message_id):
+        for att in get_attachments_for_message(conn, message_id, user_id=user_id):
             if att.extracted_text or att.image_path:
                 continue
             if not att.raw_path or not Path(att.raw_path).exists():
@@ -740,8 +749,8 @@ def _extract_pending_attachments(conn, att_config: dict, *, user_id: str | None 
             if updates:
                 set_clause = ", ".join(f"{k} = %s" for k in updates)
                 conn.execute(
-                    f"UPDATE attachments SET {set_clause} WHERE id = %s",
-                    (*updates.values(), att.id),
+                    f"UPDATE attachments SET {set_clause} WHERE id = %s AND user_id = %s",
+                    (*updates.values(), att.id, user_id),
                 )
                 conn.commit()
                 extracted += 1
@@ -893,6 +902,7 @@ def update(ctx, max_messages, budget, batch_size, min_free_gb, loop, loop_sleep,
                     batch_size=cfg["download"]["batch_size"],
                     max_messages=current_limit,
                     max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+                    user_id=active_user_id,
                 )
                 total_downloaded += dl_count
 
@@ -1252,6 +1262,7 @@ def watch(ctx, interval, budget, max_cycles, email):
                     db_path=db_path,
                     data_dir=data_dir,
                     max_attachment_size=cfg["attachments"]["max_file_size_mb"] * 1024 * 1024,
+                    user_id=active_user_id,
                 )
                 _set_gmail_health(db_path, active_user_id, "healthy", None)
             except Exception as e:
@@ -1282,13 +1293,13 @@ def watch(ctx, interval, budget, max_cycles, email):
                     # attachments, which can OOM on a large peer backlog.
                     rows = conn.execute(
                         "SELECT DISTINCT m.id FROM messages m "
-                        "JOIN attachments a ON a.message_id = m.id "
+                        "JOIN attachments a ON a.message_id = m.id AND a.user_id = m.user_id "
                         "WHERE a.extracted_text IS NULL AND a.image_path IS NULL "
                         "AND a.raw_path IS NOT NULL AND m.user_id = %s",
                         (active_user_id,),
                     ).fetchall()
                     for row in rows:
-                        attachments = get_attachments_for_message(conn, row["id"])
+                        attachments = get_attachments_for_message(conn, row["id"], user_id=active_user_id)
                         for att in attachments:
                             if att.extracted_text or att.image_path or not att.raw_path:
                                 continue
@@ -1313,8 +1324,8 @@ def watch(ctx, interval, budget, max_cycles, email):
                             if updates:
                                 set_clause = ", ".join(f"{k} = %s" for k in updates)
                                 conn.execute(
-                                    f"UPDATE attachments SET {set_clause} WHERE id = %s",
-                                    (*updates.values(), att.id),
+                                    f"UPDATE attachments SET {set_clause} WHERE id = %s AND user_id = %s",
+                                    (*updates.values(), att.id, active_user_id),
                                 )
                                 conn.commit()
                 finally:
@@ -2052,7 +2063,7 @@ def status(ctx):
 
     from gmail_search.store.queries import get_sync_state
 
-    last_sync = get_sync_state(conn, "last_history_id")
+    last_sync = get_sync_state(conn, f"last_history_id:{resolve_write_user_id(conn)}")
 
     click.echo(f"Messages: {msg_count}")
     click.echo(f"Attachments: {att_count}")
