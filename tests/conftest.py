@@ -38,6 +38,14 @@ def test_config(tmp_path, data_dir):
 
 _PG_BASE_DSN = os.environ.get("GMS_TEST_PG_DSN", "")
 
+# Deliberately unconnectable. Port 1 is never a PostgreSQL server, and the
+# database name is the instruction — psycopg puts it in the error text, so a
+# test that needs a database says what to set instead of failing obscurely.
+_NO_TEST_DATABASE_DSN = (
+    "host=127.0.0.1 port=1 connect_timeout=1 user=none "
+    "dbname=set_GMS_TEST_PG_DSN_to_run_database_tests"
+)
+
 
 def _pg_server_reachable() -> bool:
     """Cheap TCP probe so we skip PG tests cleanly on dev machines
@@ -134,6 +142,17 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
     this one.
     """
     if not _pg_server_reachable():
+        # No disposable cluster configured. Crucially, do NOT leave `DB_DSN`
+        # alone here: its default in `store/db.py` is the *live* mailbox, so a
+        # test that opens a connection without this fixture's rewrite lands in
+        # production. That is not hypothetical — it left 28 `test_<uuid8>`
+        # schemas, 326 tables and 87 MB inside the production database before
+        # anyone noticed, because each one is isolated enough not to corrupt
+        # `public` and therefore never announced itself.
+        #
+        # Point at something that cannot connect and whose error names the fix.
+        monkeypatch.setenv("DB_BACKEND", "postgres")
+        monkeypatch.setenv("DB_DSN", _NO_TEST_DATABASE_DSN)
         yield None
         return
 
