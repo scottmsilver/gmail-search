@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from gmail_search.store import schema_profile
+
 # Make `import harness` resolve regardless of pytest import mode.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -54,4 +56,12 @@ def _perf_real_db(_isolated_pg_schema, monkeypatch):
     )
     monkeypatch.setenv("DB_DSN", real_dsn)
     monkeypatch.setenv("DB_BACKEND", "postgres")
+    # The top-level conftest declares `numeric-key-v1`, the shape a fresh
+    # install builds. The live corpus these tests measure is the TEXT shape —
+    # no `search_id`, BM25 keyed on `id` — so the declaration has to move with
+    # the DSN or `store/schema_profile.py` refuses the connection, which is
+    # exactly what it is there to do.
+    monkeypatch.setenv("GMS_SCHEMA_PROFILE", "text-key-v1")
+    schema_profile.reset_verification_cache()
     yield
+    schema_profile.reset_verification_cache()

@@ -66,11 +66,25 @@ def test_keyword_only_message_is_retained_and_missing_hydration_reported():
 def test_blend_retains_existing_weights_and_fresh_exact_subject_bonus():
     result=_rank(vector_scores={1:.8,2:.4},contact_frequency={'alice@test':.5})
     first=result.threads[0]
-    # Top semantic=1, BM25=1, recency~=1, IMPORTANT=.35, replied=1,
-    # one of four messages matches, size log(4)/log(50), contact=.5.
+    # Top semantic=1, BM25=1, IMPORTANT=.35, replied=1, one of four messages
+    # matches, size log(4)/log(50), contact=.5.
+    #
+    # Recency is computed rather than assumed to be 1. `NOW` is captured when
+    # this module is imported and `_recency_score` decays exponentially from the
+    # current time, so the gap between the two grows with however long the suite
+    # takes to reach this test. At ~1e-5 tolerance that is minutes: it passed
+    # per-file and failed in a 39-minute full run, which is the worst kind of
+    # flake because the signal looks like a ranking regression.
     import math
-    expected=.4+.15+.15+.12*.35+.08+.06*.25+.04*math.log(4)/math.log(50)+.08*.5+.18
+
+    from gmail_search.search.ranking import _recency_score
+    recency=_recency_score(NOW)
+    expected=(.4+.15+.15*recency+.12*.35+.08+.06*.25
+              +.04*math.log(4)/math.log(50)+.08*.5+.18*recency)
     assert first.score == pytest.approx(expected,abs=1e-5)
+    # The decay must stay the only moving part; if the blend itself changed,
+    # this bound would not save the test.
+    assert .99 < recency <= 1
 
 
 def test_malformed_private_summary_is_sanitized():
