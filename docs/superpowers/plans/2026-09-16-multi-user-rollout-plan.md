@@ -30,12 +30,14 @@ Verified today, not inferred:
 
 This is the track that decides whether "multi-user safe" is a claim we can make.
 
-- **A1. Fix the gateway failures and the hang.** 25 failures and one test that
-  hangs while holding `ACCESS EXCLUSIVE`, all pre-existing and reproduced on the
-  unpatched engine. One is `test_token_selects_only_its_owners_rows` — owner
-  isolation is the product's whole premise, so this ranks first. The hang also
-  makes the suite unrunnable as a single invocation, which is how it has been
-  eating hours. Effort: unknown until diagnosed; that uncertainty is the point.
+- **A1. ~~Fix the gateway failures and the hang.~~ WITHDRAWN 2026-09-16.**
+  There were no failures. The suite is **1189 passed, 0 failed, 0 errors**, and
+  `test_token_selects_only_its_owners_rows` passes — owner isolation holds. The
+  failures I reported came from running the disposable cluster with password
+  authentication where the fixtures require `trust`. This track no longer gates
+  anything; the only residue worth doing is bounding the unbounded wait in
+  `test_inflight_owner_revocation_closes_connection`, which turns any early
+  failure into a hang.
 - **A2. Finish the caller inventory.** Three of ten items done. Remaining: the
   SQL examples handed to the model still name `search_id`; the owner-qualified
   call sites; and the **TEXT installer** — fresh installs currently build the
@@ -125,6 +127,6 @@ gateway is not on the live read path today.
 
 ## What I would do next
 
-A1. Not because it is the most fun, but because a failing test named
-`test_token_selects_only_its_owners_rows` is the one result that would make
-every other green tick meaningless if it turns out to be real.
+A2 and A3 — finish the caller inventory and give the migration scripts a
+production mode. A1 is withdrawn: the failure that made it urgent was my test
+cluster, not the code.

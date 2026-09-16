@@ -50,7 +50,7 @@ searches returned correct, owner-isolated results.
 | The patch | `deploy/public/pg_search-patch/0001-fetch_tuple-validate-ctid-before-block-number.patch` |
 | Upstream issue draft (not filed) | `deploy/public/pg_search-patch/UPSTREAM_ISSUE.md` |
 | Findings artifact | https://claude.ai/artifact/H7XmpDoRCK4RTkQWzgVDCv |
-| Patched test container | `gms-parade-patched` on `127.0.0.1:55440`, password `synthetic-owner-test`, `RUST_BACKTRACE=full` |
+| Patched test container | `gms-parade-patched` on `127.0.0.1:55440`, **`POSTGRES_HOST_AUTH_METHOD=trust`**, `--shm-size=1g`, `RUST_BACKTRACE=full` — all three are required, see the Gate 0 document |
 
 Rebuild the image if lost:
 
@@ -136,44 +136,18 @@ passes. Phases 1–4 touch nothing live.
 
 ### Gate 0 — Confirm the patch is safe ✅ PASSED 2026-09-16
 
-**Scott approved the PostgreSQL 16.13 → 16.15 upgrade on 2026-09-16.** The two
-`160013` pins were moved to `160015` and the 35 errors became **35 passed**.
-Sweep totals: **1156 passed, 25 failed, 0 errors** — the 25 failures all
-pre-existing and confined to the gateway's own surface, reproduced identically
-on the original unpatched image.
+**1189 passed, 0 failed, 0 errors.** No hangs.
 
-Phase 4 now deploys the PostgreSQL minor upgrade together with the ctid fix, as
-an accepted, recorded change. Verify both after cutover:
+An earlier version of this section reported 25 pre-existing failures and a
+hanging test. That was wrong: the disposable cluster I built used password
+authentication, and the fixtures require `trust` — they strip the password
+deliberately. Corrected record and the exact `docker run` in
+[the Gate 0 document](../../qualification/gate-zero-preexisting-failures-2026-09-16.md).
+
+Scott approved the PostgreSQL 16.13 → 16.15 upgrade, so the two `160013` pins
+moved to `160015`. Verify after cutover:
 `SELECT current_setting('server_version_num')` → `160015`, and
 `SELECT extversion FROM pg_extension WHERE extname='pg_search'` → `0.23.0`.
-
-#### Detail (for reference)
-
-Full results and diagnosis: [Gate 0 record](../../qualification/gate-zero-preexisting-failures-2026-09-16.md).
-
-Per-file sweep (the suite cannot run as one invocation — it wedges on an
-exclusive lock): **54 files clean, 13 with problems; 1121 passed, 25 failed,
-35 errors.** Every migration suite passes, phase two included.
-
-- The 25 failures and the hang are **pre-existing**, reproduced identically on
-  the original unpatched image with stock settings. They sit in the gateway's
-  own surface, not the migration's.
-- The 35 errors are **caused by the patched image**: it ships PostgreSQL 16.15
-  where live runs 16.13, and two files pin `160013`.
-
-**Decision needed before Phase 4:** rebuild the patch against PostgreSQL 16.13
-(keeping the delta to the ctid fix alone), or accept the 16.15 minor upgrade and
-move the pins. Deploying the image as built bundles a PostgreSQL upgrade with a
-two-line bug fix.
-
-#### Original scope (for reference)
-
-- [ ] Re-run the wider regression suite above against `gms-parade-patched`.
-- [ ] All tests pass, or every failure is understood and pre-existing.
-- [ ] File the upstream issue from `UPSTREAM_ISSUE.md` (ask Scott first — it is
-      outward-facing). Add the "patched build passes 13/13" result to it.
-
-**Gate:** no regressions attributable to the patch.
 
 ### Phase 1 — Build and qualify phase two ✅ IMPLEMENTED 2026-09-15
 
