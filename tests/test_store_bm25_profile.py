@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-import conftest
 from gmail_search.store import queries, schema_profile
 from gmail_search.store.db import get_connection, init_db
 
@@ -48,20 +47,26 @@ def _seed(conn):
 
 
 @pytest.fixture(scope="module")
-def seeded():
+def seeded(pg_schema_tools):
     """One schema, one `init_db`, one seed for the whole module.
 
     Built without the autouse per-test fixture: the connection is opened here
     and held, so the per-test `DB_DSN` rebinding that happens later cannot
     redirect it.
+
+    The schema helpers arrive as a fixture rather than `import conftest`: that
+    bare name resolves to whichever conftest.py pytest registered first, which
+    in a full-suite run is `tests/perf/conftest.py`, and every test in this
+    module then errors at setup. A per-file run resolves it correctly and
+    passes, so the breakage appears only on the full sweep.
     """
-    if not conftest._pg_server_reachable():
+    if not pg_schema_tools.reachable():
         pytest.skip("Set GMS_TEST_PG_DSN to a disposable PostgreSQL instance")
     schema = f"test_bm25_{uuid.uuid4().hex[:8]}"
-    conftest._make_pg_schema(schema)
+    pg_schema_tools.make(schema)
     previous = {key: os.environ.get(key) for key in ("DB_BACKEND", "DB_DSN", "GMS_SCHEMA_PROFILE")}
     os.environ["DB_BACKEND"] = "postgres"
-    os.environ["DB_DSN"] = conftest._pg_dsn_for_schema(schema)
+    os.environ["DB_DSN"] = pg_schema_tools.dsn_for(schema)
     # Module-scoped, so it runs before conftest's per-test declaration; state
     # the shape `pg_schema.sql` installs or the connect-time check will refuse.
     os.environ["GMS_SCHEMA_PROFILE"] = "numeric-key-v1"
@@ -81,7 +86,7 @@ def seeded():
                 os.environ[key] = value
         if conn is not None:
             conn.close()
-        conftest._drop_pg_schema(schema)
+        pg_schema_tools.drop(schema)
 
 
 @pytest.fixture(autouse=True)

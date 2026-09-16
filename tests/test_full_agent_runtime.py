@@ -1,5 +1,6 @@
 """Separate synthetic full-agent image and bounded fixed guest bridge."""
 import importlib.util
+import socket
 from pathlib import Path
 import subprocess
 
@@ -42,6 +43,11 @@ def test_bridge_exact_limit_never_forwards_overrun(monkeypatch,chunks,expected):
     assert mod.LIMIT==12*1024**2
     monkeypatch.setattr(mod,'LIMIT',6)
     client=Peer();upstream=Peer(chunks)
+    # `AF_VSOCK` is absent from uv's portable CPython though present in the
+    # system one, so without this the test fails for the interpreter rather than
+    # the code — and this test is about byte accounting, not about vsock. The
+    # socket itself is a stub, so the value only has to exist.
+    monkeypatch.setattr(mod.socket,'AF_VSOCK',getattr(socket,'AF_VSOCK',40),raising=False)
     monkeypatch.setattr(mod.socket,'socket',lambda *args:upstream)
     monkeypatch.setattr(mod.select,'select',lambda *args:([upstream],[],[]))
     assert mod.SLOTS.acquire(blocking=False)
