@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -91,6 +92,24 @@ def _pg_dsn_for_schema(schema_name: str) -> str:
     return make_conninfo(
         _PG_BASE_DSN,
         options=f"-csearch_path={schema_name},public -cidle_in_transaction_session_timeout=60000",
+    )
+
+
+@pytest.fixture(scope="session")
+def pg_schema_tools():
+    """The disposable-schema helpers, handed to tests that build their own.
+
+    A fixture rather than `from conftest import _make_pg_schema`: in a
+    full-suite run the bare name `conftest` resolves to whichever conftest.py
+    pytest registered first, which is `tests/perf/conftest.py`, and collection
+    fails with a confusing ImportError. Per-file runs happen to work, so the
+    breakage only appears on the full sweep.
+    """
+    return SimpleNamespace(
+        reachable=_pg_server_reachable,
+        make=_make_pg_schema,
+        drop=_drop_pg_schema,
+        dsn_for=_pg_dsn_for_schema,
     )
 
 

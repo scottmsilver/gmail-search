@@ -27,13 +27,6 @@ from gmail_search.store import schema_profile
 from gmail_search.store.db import _read_pg_schema, get_connection, init_db
 from gmail_search.store.schema_profile import SELECTION_ENV, SchemaProfileMismatch
 
-from conftest import (  # noqa: F401  (module-level helpers, not fixtures)
-    _drop_pg_schema,
-    _make_pg_schema,
-    _pg_dsn_for_schema,
-    _pg_server_reachable,
-)
-
 _INSTALLABLE = ["text-key-v1", "numeric-key-v1"]
 
 
@@ -60,22 +53,22 @@ def _selected(profile_name: str, dsn: str):
 
 
 @pytest.fixture(scope="module")
-def installed():
+def installed(pg_schema_tools):
     """One freshly installed schema per profile. Returns {profile: dsn}."""
-    if not _pg_server_reachable():
+    if not pg_schema_tools.reachable():
         pytest.skip("Set GMS_TEST_PG_DSN to a disposable PostgreSQL instance")
 
     schemas = {name: f"install_{uuid.uuid4().hex[:8]}" for name in _INSTALLABLE}
-    dsns = {name: _pg_dsn_for_schema(schema) for name, schema in schemas.items()}
+    dsns = {name: pg_schema_tools.dsn_for(schema) for name, schema in schemas.items()}
     try:
         for name, dsn in dsns.items():
-            _make_pg_schema(schemas[name])
+            pg_schema_tools.make(schemas[name])
             with _selected(name, dsn):
                 init_db(None)
         yield dsns
     finally:
         for schema in schemas.values():
-            _drop_pg_schema(schema)
+            pg_schema_tools.drop(schema)
 
 
 def _column_exists(conn, name: str) -> bool:
@@ -137,20 +130,20 @@ def test_claiming_the_other_shape_is_refused_at_connect(installed):
     assert "database has key_field='id'" in message
 
 
-def test_an_empty_database_is_not_read_as_the_text_shape(installed):
+def test_an_empty_database_is_not_read_as_the_text_shape(installed, pg_schema_tools):
     """`observed_shape` used to default the key to `id` whenever it could not
     find a BM25 index, so a database with no `messages` table at all satisfied
     the TEXT profile. That is the exact failure this module exists to prevent,
     so it gets its own test rather than riding on the install cases."""
     schema = f"empty_{uuid.uuid4().hex[:8]}"
-    _make_pg_schema(schema)
+    pg_schema_tools.make(schema)
     try:
-        with _selected("text-key-v1", _pg_dsn_for_schema(schema)):
+        with _selected("text-key-v1", pg_schema_tools.dsn_for(schema)):
             with pytest.raises(SchemaProfileMismatch) as excinfo:
                 get_connection(None).close()
         assert "no BM25 index" in str(excinfo.value)
     finally:
-        _drop_pg_schema(schema)
+        pg_schema_tools.drop(schema)
 
 
 def test_the_installed_bm25_index_really_exists(installed):
@@ -172,7 +165,7 @@ def test_the_installed_bm25_index_really_exists(installed):
                 conn.close()
 
 
-def test_a_partitioned_install_is_seen_by_observed_shape(installed):
+def test_a_partitioned_install_is_seen_by_observed_shape(installed, pg_schema_tools):
     """`text-partitioned-v1` is the migration *target*, and nothing covered it.
 
     `observed_shape` looks for a BM25 index whose `indrelid` is `messages`. The
@@ -189,9 +182,9 @@ def test_a_partitioned_install_is_seen_by_observed_shape(installed):
     lands.
     """
     schema = f"partprobe_{uuid.uuid4().hex[:8]}"
-    _make_pg_schema(schema)
+    pg_schema_tools.make(schema)
     try:
-        with _selected("text-key-v1", _pg_dsn_for_schema(schema)):
+        with _selected("text-key-v1", pg_schema_tools.dsn_for(schema)):
             import psycopg
 
             from gmail_search.store.db import _pg_dsn
@@ -214,7 +207,7 @@ def test_a_partitioned_install_is_seen_by_observed_shape(installed):
                 with pytest.raises(SchemaProfileMismatch, match="partitioned=False"):
                     schema_profile.verify(conn, schema_profile.TEXT_KEY_V1, cache_key=None)
     finally:
-        _drop_pg_schema(schema)
+        pg_schema_tools.drop(schema)
 
 
 @pytest.mark.parametrize("profile_name", _INSTALLABLE)
