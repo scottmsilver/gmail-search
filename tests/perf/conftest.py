@@ -56,12 +56,16 @@ def _perf_real_db(_isolated_pg_schema, monkeypatch):
     )
     monkeypatch.setenv("DB_DSN", real_dsn)
     monkeypatch.setenv("DB_BACKEND", "postgres")
-    # The top-level conftest declares `numeric-key-v1`, the shape a fresh
-    # install builds. The live corpus these tests measure is the TEXT shape —
-    # no `search_id`, BM25 keyed on `id` — so the declaration has to move with
-    # the DSN or `store/schema_profile.py` refuses the connection, which is
-    # exactly what it is there to do.
-    monkeypatch.setenv("GMS_SCHEMA_PROFILE", "text-key-v1")
+    # These tests measure the *deployed* corpus, so the declaration has to match
+    # whatever production currently is — the top-level conftest declares
+    # `numeric-key-v1`, which a live database has never been.
+    #
+    # Production is owner-partitioned as of the 2026-09-16 migration. This is a
+    # deployment fact rather than a test choice, so it is overridable and it has
+    # to be updated when production's shape changes again; the binding refuses
+    # loudly rather than measuring the wrong thing, which is how this was caught.
+    monkeypatch.setenv("GMS_SCHEMA_PROFILE",
+                       os.environ.get("GMS_PERF_SCHEMA_PROFILE", "text-partitioned-v1"))
     schema_profile.reset_verification_cache()
     yield
     schema_profile.reset_verification_cache()
