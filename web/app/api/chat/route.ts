@@ -7,7 +7,7 @@ import { pickTwoRandomVariants } from "@/lib/battleVariants";
 import { battleQuestion, emptyBattleSide, runDeepBattleSide } from "@/lib/deepBattle";
 import { ChatLogger } from "@/lib/chatLog";
 
-import { authenticatedUserId, unauthenticated, privateHeaders } from "@/lib/requestSecurity";
+import { authenticatedCaller, unauthenticated, privateHeaders } from "@/lib/requestSecurity";
 
 import { rejectUnsafeOrigin, backendOriginHeaders } from "@/lib/originSecurity";
 
@@ -376,13 +376,18 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
 async function handlePOST(req: NextRequest) {
   const originDenied = rejectUnsafeOrigin(req);
   if (originDenied) return originDenied;
-  const ownerId = await authenticatedUserId(req);
-  if (!ownerId) return unauthenticated();
+  const caller = await authenticatedCaller(req);
+  if (!caller) return unauthenticated();
+  const ownerId = caller.id;
+  // Capability, not deployment. The public origin restricts by default; a caller
+  // the server reports as capable keeps model choice, battles and backend
+  // selection. Decided here from the authenticated probe, never from the body.
+  const restricted = isPublicMode() && !caller.fullRuntime;
   const body = await req.json() as {
     messages?: UIMessage[]; model?: string; battle?: boolean;
     deep_backend?: DeepBackend; conversation_id?: string;
   };
-  if (isPublicMode() && body.battle) return Response.json({error: "Battle mode is unavailable on the public app"}, {status: 400});
+  if (restricted && body.battle) return Response.json({error: "Battle mode is unavailable on the public app"}, {status: 400});
   const messages = body.messages;
   if (!Array.isArray(messages) || !messages.length) {
     return Response.json({error: "messages required"}, {status: 400});
@@ -393,10 +398,10 @@ async function handlePOST(req: NextRequest) {
   const question = lastUserText(messages);
   if (!question.trim()) return Response.json({error: "question required"}, {status: 400});
   if (isPublicMode() && (question.length > 16000 || messages.length > 100)) return Response.json({error: "Chat request too large"}, {status: 413});
-  const backend: DeepBackend = isPublicMode() ? "pi" : ["claude_code", "pi"].includes(body.deep_backend ?? "")
+  const backend: DeepBackend = restricted ? "pi" : ["claude_code", "pi"].includes(body.deep_backend ?? "")
     ? body.deep_backend! : "pi";
   const models = availableModelsFor(backend);
-  const model = isPublicMode() ? undefined : backend === "pi" ? piModelForRequest(body.model)
+  const model = restricted ? undefined : backend === "pi" ? piModelForRequest(body.model)
     : models.includes(body.model ?? "") ? body.model : models[0];
   const logger = new ChatLogger(undefined, ownerId);
   const conversationId = body.conversation_id || null;

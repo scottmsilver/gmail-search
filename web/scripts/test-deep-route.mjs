@@ -332,3 +332,51 @@ test('worker-owned transcript is never replaced when its stream loses completion
     } finally {globalThis.fetch=originalFetch;}
   }
 });
+
+// ── capability, not deployment ───────────────────────────────────────────────
+// The route used to refuse battles whenever GMS_PUBLIC_ORIGIN was set, so the
+// public build was locked down for everyone on it. It now follows the same
+// server-reported capability the UI renders from: /api/auth/me's
+// capabilities.full_runtime, which is derived from the authenticated session
+// and never from the request body.
+
+// With GMS_PUBLIC_ORIGIN set, publicRoute enforces same-origin, so these
+// requests must carry the matching Origin or they are refused before the
+// capability check is ever reached.
+const PUBLIC_ORIGIN = 'https://public.example.test';
+const publicRequest = body => new Request('http://localhost/api/chat', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json', cookie: 'session=owner',
+            origin: PUBLIC_ORIGIN, host: 'public.example.test'},
+  body: JSON.stringify(body),
+});
+
+const capableIdentity = (id='owner') => Response.json({
+  multi_tenant: true, user: {id, email: `${id}@example.test`},
+  capabilities: {full_runtime: true},
+});
+
+test('public deployment still refuses battles for an ordinary caller', async () => {
+  process.env.GMS_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
+  globalThis.fetch = async url => String(url).endsWith('/api/auth/me') ? identity() : new Response(sse('single'));
+  try {
+    const response = await POST(publicRequest({messages, battle: true, conversation_id: 'conv-restricted'}));
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), /Battle mode is unavailable/);
+  } finally {
+    delete process.env.GMS_PUBLIC_ORIGIN;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('public deployment allows battles for a caller the server reports as capable', async () => {
+  process.env.GMS_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
+  globalThis.fetch = async url => String(url).endsWith('/api/auth/me') ? capableIdentity() : new Response(sse('single'));
+  try {
+    const response = await POST(publicRequest({messages, battle: true, conversation_id: 'conv-capable'}));
+    assert.notEqual(response.status, 400);
+  } finally {
+    delete process.env.GMS_PUBLIC_ORIGIN;
+    globalThis.fetch = originalFetch;
+  }
+});
