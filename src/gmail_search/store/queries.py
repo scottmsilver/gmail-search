@@ -1206,10 +1206,19 @@ def _pg_bm25_scores(
     user_clause = " AND user_id = %s" if user_id else ""
     user_param: list = [user_id] if user_id else []
     candidate_clause = f" AND {candidate_column} = ANY(%s::text[])" if candidate_ids is not None else ""
+    # Match on the key field, not on the table. `WHERE <table> @@@ 'q'` is the
+    # whole-table form, and it cannot run against a partitioned parent: the
+    # parent index has no storage of its own, and pg_search fails with
+    # `could not open file "pg_tblspc/0/..."`. The key-field form resolves
+    # through the partition's own index and returns identical rows and scores on
+    # an unpartitioned table, so this is correct before the owner-partition
+    # migration as well as after it — which is the only reason it can ship
+    # separately from the migration rather than inside its window.
+    key = _bm25_score_key(conn, table)
     sql = (
-        f"SELECT {select_id}, paradedb.score({_bm25_score_key(conn, table)}) AS rank "
+        f"SELECT {select_id}, paradedb.score({key}) AS rank "
         f"FROM {table} "
-        f"WHERE {table} @@@ %s{candidate_clause}{user_clause} "
+        f"WHERE {key} @@@ %s{candidate_clause}{user_clause} "
         "ORDER BY rank DESC LIMIT %s"
     )
     params: list = [bm25_query]

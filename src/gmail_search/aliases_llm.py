@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
+from gmail_search.store.schema_profile import bm25_key
+
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -151,7 +153,9 @@ def _phrase_in_corpus(conn, phrase: str, uid: str) -> bool:
     tantivy_query = f"subject:{quoted} OR body_text:{quoted}"
     try:
         row = conn.execute(
-            "SELECT 1 FROM messages WHERE messages @@@ %s AND user_id = %s LIMIT 1",
+            # Key-field match, not whole-table: the latter cannot run against a
+            # partitioned parent. See `store/queries._pg_bm25_scores`.
+            f"SELECT 1 FROM messages WHERE {bm25_key(conn)} @@@ %s AND user_id = %s LIMIT 1",
             (tantivy_query, uid),
         ).fetchone()
     except Exception as e:  # noqa: BLE001 — no index -> no grounding, not no aliases

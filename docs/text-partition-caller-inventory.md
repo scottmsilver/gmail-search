@@ -141,6 +141,35 @@ catches the next example added by copy-paste.
   NUMERIC partition path, which the mixed-owner plan abandoned; the production
   target was added to the TEXT path that will actually run.
 
+### The branch and the migration are one deployment, 2026-09-16
+
+Verified against the live database, not inferred. `public.messages` has exactly
+one unique index — `messages_pkey` on `(id)` — and nothing else.
+
+| | message upsert |
+| --- | --- |
+| Live daemons (main checkout) | `ON CONFLICT(id)` |
+| This branch (`store/queries.py:15`) | `ON CONFLICT(user_id, id)` |
+
+Partitioning by `user_id` requires the partition key in every unique constraint,
+so the post-migration table is keyed `(user_id, id)` and this branch is written
+for it. The consequence is symmetric and neither half is optional:
+
+- **Deploying this branch before the migration breaks ingestion on the first
+  write**, with `InvalidColumnReference: there is no unique or exclusion
+  constraint matching the ON CONFLICT specification`. Not a degradation — every
+  message write fails.
+- **Migrating without deploying this branch breaks it the other way**: the live
+  `ON CONFLICT(id)` no longer matches a table keyed `(user_id, id)`.
+
+So they ship together, migration first, in one window. This is the concrete form
+of B3 in the rollout plan, which said readers and writers must move together but
+never named the statement that makes it true.
+
+The same reasoning is why `tests/` pointed at production produced this error
+earlier today: the test fixtures build from `pg_schema.sql`, which already
+declares the composite key, against a database that does not have it.
+
 ### Security audit, 2026-09-16
 
 CLAUDE.md's two-track audit ran. Track 2 could not use codex (out of credits
