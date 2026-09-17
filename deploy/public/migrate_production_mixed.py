@@ -28,6 +28,7 @@ from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import sys
 import time
 
@@ -97,15 +98,24 @@ def report(dsn):
             requirement = str(error)
 
     dominant = owners[0][0] if owners else None
-    blocking = []
+    blocking, resumable = [], []
     if not version.startswith('16.'):
         blocking.append(f'PostgreSQL 16 required, found {version}')
     if extension != '0.23.0':
         blocking.append(f'pg_search 0.23.0 required, found {extension}')
     if not superuser or not owns:
         blocking.append('a database-owning superuser is required')
-    if relkind != 'r':
-        blocking.append(f'messages is already relkind={relkind!r}, not a plain table')
+    # `relkind='p'` with the owner-qualified key means phase one already
+    # committed its layout — a *resumable* migration, not a broken one. The two
+    # look identical to a check that only asks "is this a plain table", and
+    # conflating them turns a half-finished migration into one that cannot be
+    # finished. Anything else partitioned is genuinely unexpected.
+    layout_committed = relkind == 'p' and primary_key == 'user_id,id'
+    if relkind != 'r' and not layout_committed:
+        blocking.append(f'messages is relkind={relkind!r} with pk=({primary_key}), '
+                        'which is neither a plain table nor a committed phase-one layout')
+    elif relkind != 'r':
+        resumable.append('phase one has already committed its layout; finish with --resume')
     if orphans:
         blocking.append(f'{orphans} message rows have no matching users row')
     if not 2 <= len(owners) <= 16:
@@ -123,7 +133,9 @@ def report(dsn):
         'orphan_rows': orphans,
         'connection_requirement': requirement,
         'blocking': blocking,
-        'ready': not blocking,
+        'resumable': resumable,
+        'layout_committed': layout_committed,
+        'ready': not blocking and not resumable,
     }
 
 
@@ -142,7 +154,11 @@ def _print_report(data):
     print(f"rows to move    : {data['redistributed_rows']:,}")
     print(f"orphan rows     : {data['orphan_rows']}")
     print(f"connection      : {data['connection_requirement']}")
-    if data['ready']:
+    if data['resumable']:
+        print('\nRESUMABLE:')
+        for reason in data['resumable']:
+            print(f'  - {reason}')
+    elif data['ready']:
         print('\nREADY — the database satisfies the structural preconditions.')
         print('This says nothing about whether the application can run against the')
         print('migrated shape, which is a separate gate.')
@@ -184,10 +200,24 @@ class ProductionFence:
         self._connect = connect
 
     def _foreign(self):
+        """Client backends only.
+
+        `pg_stat_activity` also lists PostgreSQL's own background processes —
+        autovacuum workers, the logical replication launcher — with a null
+        `usename` and no application name. They are not application writers and
+        cannot be stopped by stopping daemons, so counting them makes the fence
+        impossible to satisfy.
+
+        This is not hypothetical: phase one's table rewrite *provokes*
+        autovacuum, so the first attempt at a real migration blocked its own
+        gate check moments after doing the work. A freshly created test
+        database never has autovacuum running, which is why the tests missed it.
+        """
         with self._connect() as conn:
             return conn.execute(
                 """SELECT pid, application_name, state, usename FROM pg_stat_activity
                    WHERE datname = current_database() AND pid <> pg_backend_pid()
+                     AND backend_type = 'client backend'
                      AND coalesce(application_name,'') <> %s""", (APPLICATION_NAME,)).fetchall()
 
     def _require_closed(self, when):
@@ -234,13 +264,29 @@ def apply(dsn, *, registry_path, store_id, migration_id, release_epoch, dominant
 
     connect = _connector(dsn)
     registry = Path(registry_path)
+    # The registry's parent must be exactly 0700 and owned by us — the
+    # maintenance gate refuses anything looser, and `mkdir(exist_ok=True)` does
+    # not tighten a directory that already exists. Say so plainly rather than
+    # letting it surface as a bare AccessDenied from inside the lock.
     registry.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    mode = stat.S_IMODE(registry.parent.lstat().st_mode)
+    if mode != 0o700:
+        raise ValueError(
+            f'{registry.parent} is mode {mode:04o}; the maintenance registry requires 0700. '
+            f'Use a dedicated directory rather than loosening a shared one.')
 
     identity = ReleaseIdentity(store_id, TEXT, release_epoch)
+    # The plan binding requires the owner set sorted and deduplicated — it
+    # digests the tuple, so order is part of the identity it commits to. The
+    # report hands owners back largest-first because that is how the dominant
+    # one is chosen, and passing that order straight through is refused.
+    owners = tuple(sorted(set(expected_owners)))
+    if dominant_owner not in owners:
+        raise ValueError(f'dominant owner {dominant_owner!r} is not in the owner set')
     with connect() as conn:
         plan = MECHANISM.capture_plan(conn, identity=identity, migration_id=migration_id,
                                       dominant_owner=dominant_owner,
-                                      expected_owners=tuple(expected_owners))
+                                      expected_owners=owners)
     checkpoint(f'plan captured: database={plan.database_name} oid={plan.database_oid} '
                f'system_identifier={plan.system_identifier}')
 
@@ -283,6 +329,8 @@ def main():
     parser.add_argument('--migration-id', help='identifies this migration in the registry')
     parser.add_argument('--release-epoch', type=int, default=1)
     parser.add_argument('--receipt', help='write a JSON receipt here')
+    parser.add_argument('--resume', action='store_true',
+                        help='finish a migration whose phase-one layout is already committed')
     arguments = parser.parse_args()
 
     if not (arguments.report or arguments.apply):
@@ -296,9 +344,12 @@ def main():
             _print_report(data)
         return 0 if data['ready'] else 1
 
-    if not data['ready']:
+    if not data['ready'] and not (arguments.resume and data['layout_committed'] and not data['blocking']):
         _print_report(data)
         print('\nRefusing to apply: the report is not clean.', file=sys.stderr)
+        if data['resumable']:
+            print('Pass --resume to finish a migration whose layout is already committed.',
+                  file=sys.stderr)
         return 1
     missing = [name for name in ('registry', 'store_id', 'migration_id')
                if not getattr(arguments, name)]

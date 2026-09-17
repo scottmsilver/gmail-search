@@ -22,7 +22,14 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 LEGACY_SCHEMA = ROOT / 'tests/fixtures/legacy_text_owner_schema.sql'
-OWNERS = ('owner_dominant', 'owner_minority')
+# Deliberately ordered so that largest-first is NOT alphabetical: `zz_dominant`
+# holds the most rows but sorts last. The plan binding digests the owner tuple
+# and requires it sorted, so passing the report's largest-first order straight
+# through is refused — which is exactly what happened against production the
+# first time, because both test owners here used to be alphabetical *and* in
+# count order, and the bug had nowhere to show itself.
+OWNERS = ('aa_minority', 'zz_dominant')
+DOMINANT, MINORITY = 'zz_dominant', 'aa_minority'
 
 
 @pytest.fixture(scope='module')
@@ -69,7 +76,7 @@ def database():
                              (owner, owner + '@example.test'))
             rows = [(f'{owner}-{index}', owner, 'thread', 'a@x', 'b@x',
                      f'subject {index}', f'body text {index} invoice', '2026-01-01')
-                    for owner, count in ((OWNERS[0], 40), (OWNERS[1], 5))
+                    for owner, count in ((DOMINANT, 40), (MINORITY, 5))
                     for index in range(count)]
             conn.cursor().executemany(
                 'INSERT INTO public.messages (id,user_id,thread_id,from_addr,to_addr,'
@@ -127,7 +134,7 @@ def test_apply_refuses_without_a_declared_target(driver, database, monkeypatch, 
     with pytest.raises(ValueError, match='not a known apply target'):
         driver.apply(database, registry_path=tmp_path / 'registry.sqlite',
                      store_id='test-store', migration_id='m1', release_epoch=1,
-                     dominant_owner=OWNERS[0], expected_owners=OWNERS,
+                     dominant_owner=DOMINANT, expected_owners=OWNERS,
                      checkpoint=lambda _message: None)
 
 
@@ -144,7 +151,7 @@ def test_the_driver_migrates_a_database_it_did_not_create(driver, database, tmp_
 
     receipt = driver.apply(database, registry_path=tmp_path / 'registry.sqlite',
                            store_id='test-store', migration_id='m1', release_epoch=1,
-                           dominant_owner=OWNERS[0], expected_owners=OWNERS,
+                           dominant_owner=DOMINANT, expected_owners=OWNERS,
                            checkpoint=lambda _message: None)
 
     assert receipt['phases']['phase_one']['state'] == 'INDEX_PENDING'
@@ -171,6 +178,56 @@ def test_the_registry_is_left_on_a_durable_path(driver, database, tmp_path):
     to leave one behind, or there is no record that the migration happened."""
     registry = tmp_path / 'nested' / 'registry.sqlite'
     driver.apply(database, registry_path=registry, store_id='test-store',
-                 migration_id='m1', release_epoch=1, dominant_owner=OWNERS[0],
+                 migration_id='m1', release_epoch=1, dominant_owner=DOMINANT,
                  expected_owners=OWNERS, checkpoint=lambda _message: None)
     assert registry.is_file() and registry.stat().st_size > 0
+
+
+def test_apply_accepts_owners_in_report_order(driver, database, tmp_path):
+    """The report returns owners largest-first so the dominant one can be
+    picked; the plan binding digests the tuple and requires it sorted. The
+    driver has to reconcile those, and it did not — production refused with
+    "Unsupported synthetic TEXT migration plan" at plan capture.
+
+    Passing the largest-first order here is the regression check.
+    """
+    largest_first = (DOMINANT, MINORITY)
+    assert largest_first != tuple(sorted(largest_first)), 'this test is pointless if they coincide'
+    receipt = driver.apply(database, registry_path=tmp_path / 'registry.sqlite',
+                           store_id='test-store', migration_id='m1', release_epoch=1,
+                           dominant_owner=DOMINANT, expected_owners=largest_first,
+                           checkpoint=lambda _message: None)
+    assert receipt['phases']['phase_two']['state'] == 'READY'
+
+
+def test_a_dominant_owner_outside_the_set_is_refused(driver, database, tmp_path):
+    with pytest.raises(ValueError, match='not in the owner set'):
+        driver.apply(database, registry_path=tmp_path / 'registry.sqlite',
+                     store_id='test-store', migration_id='m1', release_epoch=1,
+                     dominant_owner='someone-else', expected_owners=OWNERS,
+                     checkpoint=lambda _message: None)
+
+
+def test_the_fence_ignores_postgres_background_workers(driver, database):
+    """Autovacuum is not a writer and cannot be stopped by stopping daemons.
+
+    `pg_stat_activity` lists PostgreSQL's own background processes alongside
+    client connections, with a null `usename` and no application name. Counting
+    them makes the fence impossible to satisfy — and phase one's table rewrite
+    provokes autovacuum, so a real migration blocks its own gate check moments
+    after doing the work. That is exactly what happened on the first production
+    attempt.
+
+    A fresh test database has no autovacuum activity to observe, so this asserts
+    the filter directly rather than trying to race one into existence.
+    """
+    import re
+
+    source = (ROOT / 'deploy/public/migrate_production_mixed.py').read_text()
+    query = source[source.index('def _foreign'):source.index('def _require_closed')]
+    assert "backend_type = 'client backend'" in query, (
+        'the fence must count only client backends, or an autovacuum worker '
+        'will be mistaken for a writer that nobody can stop')
+    # And the filter has to be in the SQL, not applied afterwards in Python,
+    # because the count is what the refusal message reports.
+    assert re.search(r"WHERE[^\"]*backend_type = 'client backend'", query, re.S)
