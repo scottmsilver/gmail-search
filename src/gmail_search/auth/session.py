@@ -128,9 +128,9 @@ def broker_url() -> str:
 
 
 def _session_ttl_seconds() -> int:
-    if public_auth.public_enabled():
-        return public_auth.SESSION_TTL
-    return int(os.environ.get("GMS_SESSION_TTL_DAYS", "30")) * 86400
+    # Both deployments read the same setting now; the public path used to pin a
+    # fixed hour here and ignore it.
+    return public_auth.session_ttl_seconds()
 
 
 def normalize_email(email: str) -> str:

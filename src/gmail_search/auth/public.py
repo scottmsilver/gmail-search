@@ -23,7 +23,34 @@ from starlette.responses import JSONResponse, RedirectResponse
 
 SESSION_COOKIE = "__Host-gms_session"
 NONCE_COOKIE = "__Host-gms_oauth_nonce"
-SESSION_TTL = 3600
+DEFAULT_SESSION_TTL_DAYS = 30
+# Kept for callers that import it; the live value comes from
+# `session_ttl_seconds()`, which honours GMS_SESSION_TTL_DAYS.
+SESSION_TTL = DEFAULT_SESSION_TTL_DAYS * 86400
+
+
+def session_ttl_seconds() -> int:
+    """How long a public session lives, renewed on each use.
+
+    This was pinned to one hour and never extended -- `read_session` checked the
+    expiry without moving it, so an actively-used session ended exactly an hour
+    after sign-in. The private app already honoured GMS_SESSION_TTL_DAYS; the
+    public path ignored it.
+
+    A missing or nonsensical setting falls back to the default rather than
+    raising: a bad value must not make sign-in impossible.
+    """
+    import os as _os
+
+    try:
+        days = int(_os.environ.get('GMS_SESSION_TTL_DAYS', '') or DEFAULT_SESSION_TTL_DAYS)
+    except ValueError:
+        return DEFAULT_SESSION_TTL_DAYS * 86400
+    return days * 86400 if days > 0 else DEFAULT_SESSION_TTL_DAYS * 86400
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 NONCE_TTL = 600
 MAX_ENTRIES = 4096
 _lock = threading.Lock()
@@ -225,23 +252,30 @@ def issue_session(payload: dict) -> str:
         _prune()
         if len(_sessions) >= MAX_ENTRIES:
             raise HTTPException(503, "session capacity reached")
-        _sessions[hashlib.sha256(token.encode()).hexdigest()] = (
-            time.time() + SESSION_TTL,
-            dict(payload),
-        )
+        _sessions[_digest(token)] = (time.time() + session_ttl_seconds(), dict(payload))
     return token
 
 
 def read_session(token: str) -> dict | None:
+    """Return the session payload, extending its lifetime.
+
+    Renewal is what makes the window a period of inactivity rather than a hard
+    cap measured from sign-in. An abandoned session still lapses; `_prune` has
+    already dropped anything past its expiry before this reads.
+    """
     with _lock:
         _prune()
-        entry = _sessions.get(hashlib.sha256(token.encode()).hexdigest())
-        return dict(entry[1]) if entry else None
+        key = _digest(token)
+        entry = _sessions.get(key)
+        if not entry:
+            return None
+        _sessions[key] = (time.time() + session_ttl_seconds(), entry[1])
+        return dict(entry[1])
 
 
 def revoke_session(token: str) -> None:
     with _lock:
-        _sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
+        _sessions.pop(_digest(token), None)
 
 
 def trusted_service(headers) -> bool:
