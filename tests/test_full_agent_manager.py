@@ -218,3 +218,40 @@ def test_conservative_host_deadline_allows_worker_clock_one_second_behind(tmp_pa
             assert call(m,h,p)['status']=='running';assert s.entered.wait(1)
         assert m.jobs[h['handle']]['context']['deadline']-(now-1)==176
     finally:m.close()
+
+
+@pytest.mark.parametrize('mode', [0o750, 0o700])
+def test_manager_directories_get_their_exact_mode_under_a_restrictive_umask(tmp_path, mode):
+    """`mkdir(mode=...)` cannot set a mode; only chmod can.
+
+    The manager unit runs with `UMask=0077`, so a requested 0750 lands as 0700,
+    and `private()` demands the mode exactly. That is what stopped the manager
+    on the enrolled worker:
+
+        RuntimeError: Unsafe manager state   (full_agent_manager.py:271)
+
+    `exist_ok=True` makes it unrecoverable rather than merely wrong: a re-run
+    adopts the existing directory's mode instead of correcting it, so the
+    manager can never start again once one run has created it wrong.
+    """
+    import os
+
+    previous = os.umask(0o077)
+    try:
+        fresh = tmp_path / f'fresh-{mode:o}'
+        mod.private_dir(fresh, mode)
+        assert stat_mode(fresh) == mode, 'umask must not decide the mode'
+
+        # The unrecoverable half: an existing directory with the wrong mode.
+        stale = tmp_path / f'stale-{mode:o}'
+        stale.mkdir()
+        stale.chmod(0o777)
+        mod.private_dir(stale, mode)
+        assert stat_mode(stale) == mode, 'an existing wrong mode must be corrected, not adopted'
+    finally:
+        os.umask(previous)
+
+
+def stat_mode(path):
+    import stat as stat_module
+    return stat_module.S_IMODE(path.lstat().st_mode)

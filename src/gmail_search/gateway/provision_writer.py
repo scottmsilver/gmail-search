@@ -12,6 +12,7 @@ from pglast import parser
 from psycopg import sql
 
 from .browser_conversations import validate_receipt_schema
+from .schema import EXTENSION_METADATA
 from .writer import application_writer_role,writer_binding
 
 # Explicit current columns and built-in types; no whole-table SELECT/INSERT/UPDATE.
@@ -175,6 +176,9 @@ def verify_writer_access(conn,role,owner_id=None):
         WHERE c.relkind IN('r','p','v','m','f') AND n.nspname NOT LIKE 'pg_%%' AND n.nspname<>'information_schema'
         AND has_column_privilege(%s,c.oid,a.attnum,p.priv)""",(role,)):
         allowed=_COLUMNS if privilege=='SELECT' else _INSERT if privilege=='INSERT' else _UPDATE if privilege=='UPDATE' else {}
+        # Extension catalogues are PUBLIC-readable in this image; see EXTENSION_METADATA.
+        if privilege=='SELECT' and (schema,table) in EXTENSION_METADATA:
+            continue
         if schema!='public' or column not in allowed.get(table,{}):
             raise ValueError('Unexpected effective writer column grant: '+schema+'.'+table+'.'+column)
     for schema,table,privilege in conn.execute("""SELECT n.nspname,c.relname,p.priv FROM pg_class c
@@ -182,8 +186,12 @@ def verify_writer_access(conn,role,owner_id=None):
         CROSS JOIN(VALUES('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER'))p(priv)
         WHERE c.relkind IN('r','p','v','m','f') AND n.nspname NOT LIKE 'pg_%%' AND n.nspname<>'information_schema'
         AND has_table_privilege(%s,c.oid,p.priv)""",(role,)):
+        if privilege=='SELECT' and (schema,table) in EXTENSION_METADATA:
+            continue
         if not(schema=='public' and table in _DELETE and privilege=='DELETE'):
-            raise ValueError('Unexpected whole-table writer grant')
+            # Name the object: this refusal used to say only that something was
+            # wrong, which is no help against a database with extension baggage.
+            raise ValueError('Unexpected whole-table writer grant: '+schema+'.'+table+' '+privilege)
     for schema,sequence,privilege in conn.execute("""SELECT n.nspname,c.relname,p.priv FROM pg_class c
         JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN(VALUES('USAGE'),('SELECT'),('UPDATE'))p(priv)
         WHERE CASE WHEN c.relkind='S' THEN has_sequence_privilege(%s,c.oid,p.priv) ELSE false END""",(role,)):

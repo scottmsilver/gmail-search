@@ -23,7 +23,7 @@ import { AuthProvider, type AuthUser } from "@/components/AuthContext";
 type AuthState =
   | { kind: "checking" }
   | { kind: "open" } // multi-tenant off — anyone can use the app
-  | { kind: "signed-in"; user: AuthUser }
+  | { kind: "signed-in"; user: AuthUser; fullRuntime: boolean }
   | { kind: "signed-out" }
   | { kind: "error"; detail: string };
 
@@ -53,6 +53,10 @@ export function AuthGate({ children, publicMode = false, fullWorkerMode = false 
           const u = body.user;
           setState({
             kind: "signed-in",
+            // Reported per user by the server. `publicMode` only says which
+            // deployment this build is serving; it cannot say what this
+            // particular signed-in user is allowed to run.
+            fullRuntime: body.capabilities?.full_runtime === true,
             user: {
               id: u.id,
               email: u.email,
@@ -98,7 +102,7 @@ export function AuthGate({ children, publicMode = false, fullWorkerMode = false 
   const ctxSignedIn = useMemo(
     () =>
       state.kind === "signed-in"
-        ? { multiTenant: true, user: {...state.user, is_admin: publicMode ? false : state.user.is_admin}, signOut, publicMode, fullWorkerMode }
+        ? { multiTenant: true, user: {...state.user, is_admin: publicMode ? false : state.user.is_admin}, signOut, publicMode, fullWorkerMode, fullRuntime: state.fullRuntime }
         : null,
     [state, signOut, publicMode, fullWorkerMode],
   );

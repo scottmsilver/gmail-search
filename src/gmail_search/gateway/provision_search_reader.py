@@ -7,8 +7,20 @@ from psycopg import sql
 
 from .partitions import PARTITION_SCHEMA, partition_binding, partition_name, verify_owner_partitions, _operation as partition_operation
 from .search_reader import ROLE_SETTINGS, reader_binding, search_role, search_columns, search_functions
+from .schema import EXTENSION_METADATA
 from .partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 as NUMERIC, TEXT_OWNER_PARTITIONS_V1 as TEXT, require_profile
 
+
+
+def _extension_pairs():
+    """EXTENSION_METADATA as two parallel text arrays.
+
+    PostgreSQL cannot bind an array of anonymous composites as a parameter
+    ("input of anonymous composite types is not implemented"), so the pair is
+    split and rejoined with `unnest(a, b)` in the query.
+    """
+    pairs=sorted(EXTENSION_METADATA)
+    return [schema for schema,_ in pairs],[table for _,table in pairs]
 
 def _checks(owner_id, *, profile=NUMERIC):
     """Catalog-only generator shared by synchronous admin and async runtime.
@@ -47,7 +59,9 @@ def _checks(owner_id, *, profile=NUMERIC):
         if rows:raise ValueError('Unexpected effective grant option')
     rows=yield ('''SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT LIKE 'pg_%%' AND n.nspname<>'information_schema'
-        AND NOT(n.nspname='public' AND c.relname=ANY(%s)) AND has_table_privilege(%s,c.oid,'SELECT') LIMIT 1''',(list(columns_profile),role))
+        AND NOT(n.nspname='public' AND c.relname=ANY(%s))
+        AND NOT EXISTS(SELECT 1 FROM unnest(%s::text[],%s::text[]) AS e(s,t) WHERE e.s=n.nspname AND e.t=c.relname)
+        AND has_table_privilege(%s,c.oid,'SELECT') LIMIT 1''',(list(columns_profile),*_extension_pairs(),role))
     if rows:raise ValueError('Unexpected relation SELECT privilege')
     rows=yield ("SELECT 1 FROM pg_namespace WHERE nspname NOT LIKE 'pg_%%' AND (has_schema_privilege(%s,oid,'CREATE') OR (nspname NOT IN ('public','paradedb','pdb','information_schema') AND has_schema_privilege(%s,oid,'USAGE'))) LIMIT 1",(role,role))
     if rows:raise ValueError('Unexpected schema privilege')
@@ -57,7 +71,10 @@ def _checks(owner_id, *, profile=NUMERIC):
         WHERE c.relkind IN ('r','p','v','m','f') AND n.nspname NOT LIKE 'pg_%%' AND n.nspname<>'information_schema'
         AND has_column_privilege(%s,c.oid,a.attnum,p.priv)''',(role,))
     expected={('public',table,column,'SELECT') for table,columns in columns_profile.items() for column in columns}
-    if set(rows)!=expected:raise ValueError('Unexpected effective search column privilege')
+    # Extension catalogues are PUBLIC-readable in this image and carry no mail;
+    # see EXTENSION_METADATA. Everything else must match the profile exactly.
+    observed={row for row in rows if (row[0],row[1]) not in EXTENSION_METADATA}
+    if observed!=expected:raise ValueError('Unexpected effective search column privilege')
     rows=yield ('''SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname NOT LIKE 'pg_%%' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','v','m','f')
         AND has_table_privilege(%s,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') LIMIT 1''',(role,))
@@ -136,6 +153,17 @@ def _checks(owner_id, *, profile=NUMERIC):
 
 
 def verify_search_reader_access(conn,owner_id, *, profile=NUMERIC):
+    # The pinned pg_search signatures below compare `prorettype::regtype::text`,
+    # and regtype omits a type's schema whenever that type is visible on the
+    # caller's search_path. The pins assume the qualified spelling, so they
+    # resolve differently per caller: this database's session default is
+    # `public, paradedb`, under which paradedb types render bare and the pin can
+    # never match -- for the administrator role that performs provisioning, and
+    # only there. Tests passed because their database has no paradedb on the
+    # path. Fix the path for the duration instead of inheriting one, and put the
+    # caller's back afterwards even when a check refuses.
+    previous=conn.execute('SHOW search_path').fetchall()[0][0]
+    conn.execute("SELECT set_config('search_path','pg_catalog',false)")
     checks=_checks(owner_id, profile=profile)
     try:
         request=next(checks)
@@ -144,6 +172,8 @@ def verify_search_reader_access(conn,owner_id, *, profile=NUMERIC):
             request=checks.send(conn.execute(statement,params).fetchall())
     except StopIteration:
         return
+    finally:
+        conn.execute("SELECT set_config('search_path',%s,false)",(previous,))
 
 
 def provision_search_reader(conn,owner_id,password, *, profile=NUMERIC):

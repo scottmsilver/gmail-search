@@ -38,6 +38,46 @@ def test_config(tmp_path, data_dir):
 
 _PG_BASE_DSN = os.environ.get("GMS_TEST_PG_DSN", "")
 
+# The production mailbox lives in a database with this name. The isolation
+# fixture pins `search_path` to `<schema>,public`, so any relation the
+# disposable schema does not have resolves to `public` instead of failing --
+# harmless against a scratch cluster, and how the live database twice ended up
+# with test writes in it: 28 stray schemas one night, and the production owner's
+# ScaNN index pointer redirected to a pytest temp directory the next, which
+# disabled semantic search for the main mailbox until it was noticed.
+#
+# The fallback is only dangerous because the base DSN can be production. Refuse
+# that, and a missing relation becomes an ordinary error instead of a write to
+# real mail.
+_PRODUCTION_DBNAME = "gmail_search"
+
+
+def reject_production_dsn(dsn: str) -> None:
+    """Raise if `dsn` names the production mailbox database.
+
+    Matches the database name rather than host or port: the same cluster is
+    reachable as localhost, 127.0.0.1, a container name and a unix socket, and
+    any of those would otherwise slip through.
+    """
+    if not dsn:
+        return
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+
+        dbname = conninfo_to_dict(dsn).get("dbname")
+    except Exception:
+        # An unparseable DSN is not a production DSN; let psycopg report it.
+        return
+    if dbname == _PRODUCTION_DBNAME:
+        raise RuntimeError(
+            f"GMS_TEST_PG_DSN names the production database ({_PRODUCTION_DBNAME!r}). "
+            "Point it at a disposable cluster instead -- the isolation fixture falls "
+            "back to the `public` schema, so tests would write into real mail."
+        )
+
+
+reject_production_dsn(_PG_BASE_DSN)
+
 # Deliberately unconnectable. Port 1 is never a PostgreSQL server, and the
 # database name is the instruction — psycopg puts it in the error text, so a
 # test that needs a database says what to set instead of failing obscurely.

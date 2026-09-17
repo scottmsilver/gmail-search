@@ -115,3 +115,37 @@ def test_production_ssh_policy_parses_with_real_sshd(account, expected, tmp_path
     for option, value in (expected | {'permituserenvironment': 'no',
                                     'passwordauthentication': 'no'}).items():
         assert effective[option] == value
+
+
+def test_ssh_policy_parses_when_included_inside_an_open_match_block(tmp_path):
+    """The drop-in must survive being included at non-global scope.
+
+    `Include` does not close an enclosing `Match`, so a fragment inherits
+    whatever scope was open where it was included. Any earlier-sorting file in
+    `sshd_config.d/` that leaves a `Match` open therefore decides whether this
+    one parses. A global-only directive here is rejected in that scope and
+    takes the *whole* server config down with it, which is what stopped worker
+    enrolment on 2026-09-15:
+
+        sshd -t failed PermitUserEnvironment inside Match
+
+    The test above parses the fragment standalone and cannot see this; only
+    inclusion under an open Match reproduces it.
+    """
+    import shutil
+    import subprocess
+
+    sshd = shutil.which('sshd')
+    if sshd is None:
+        pytest.skip('OpenSSH server is required for effective-policy validation')
+    host_key = tmp_path / 'host-key'
+    subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(host_key)], check=True)
+    main = tmp_path / 'sshd_config'
+    main.write_text(
+        f'HostKey {host_key}\n'
+        'Match User someone-else\n'
+        '    PermitTTY no\n'
+        f'Include {WORKER / "production/sshd-worker.conf"}\n'
+    )
+    result = subprocess.run([sshd, '-t', '-f', str(main)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

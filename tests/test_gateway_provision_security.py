@@ -1,9 +1,12 @@
 """Adversarial reader qualification against disposable synthetic databases only."""
+from pathlib import Path
 import secrets
 
 import psycopg
 from psycopg import sql
 import pytest
+
+ROOT = Path(__file__).parents[1]
 
 from test_gateway_database_integration import database as database_fixture, reader_dsn
 from gmail_search.gateway.database import reader_role
@@ -115,3 +118,132 @@ def test_effective_public_grants_fail_closed(database, grant):
             admin.execute('GRANT UPDATE (subject) ON public.messages TO PUBLIC')
         with pytest.raises(ValueError, match='grant|CREATE/TEMP'):
             provision_reader(admin, alice, secrets.token_urlsafe(40))
+
+
+# ── the extension-metadata allowlist ─────────────────────────────────────────
+
+def _public_provisioner():
+    """`deploy/public/provision_database.py` is a standalone admin script with no
+    package import, so it cannot share a constant by importing one. Load it by
+    path instead and compare, rather than letting two copies drift apart."""
+    import importlib.util
+
+    path = ROOT / 'deploy/public/provision_database.py'
+    spec = importlib.util.spec_from_file_location('provision_database', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_extension_allowlist_matches_the_public_provisioner():
+    """Two provisioning paths, one judgement. They disagreed before: the public
+    login allowlisted this metadata as harmless while `verify_reader_access`
+    rejected it, so a per-owner reader could not be provisioned at all against
+    the live database."""
+    from gmail_search.gateway.schema import EXTENSION_METADATA
+
+    assert set(EXTENSION_METADATA) == set(_public_provisioner().EXTENSION_METADATA)
+
+
+def test_the_allowlist_can_never_cover_mail():
+    """The allowlist exists for extension catalogues. If a mail relation ever
+    appears in it, a per-owner reader silently gains cross-owner read access —
+    which is the whole thing readers exist to prevent."""
+    from gmail_search.gateway.schema import ANALYTICAL_SCHEMA, EXTENSION_METADATA
+
+    mail_schemas = {'public'}
+    for schema, table in EXTENSION_METADATA:
+        assert table not in ANALYTICAL_SCHEMA, f'{schema}.{table} is a mail relation'
+        if schema in mail_schemas:
+            # Only PostGIS's own views live in `public`; nothing else may.
+            assert table in {'geography_columns', 'geometry_columns', 'spatial_ref_sys'}, \
+                f'unexpected public relation allowlisted: {table}'
+
+
+def test_the_allowlist_excludes_the_view_definition_catalogue():
+    """`pgivm.pg_ivm_immv.viewdef` stores the SQL of any incremental materialised
+    view. It is empty today, but an IMMV built over mail would put mail column
+    and predicate text in a PUBLIC-readable catalogue. It is deliberately not
+    allowlisted; PUBLIC access to it is revoked instead."""
+    from gmail_search.gateway.schema import EXTENSION_METADATA
+
+    assert ('pgivm', 'pg_ivm_immv') not in EXTENSION_METADATA
+
+
+def test_search_reader_allowlist_is_the_same_one():
+    """`verify_search_reader_access` had no allowlist at all and rejected the
+    same extension catalogues, so provisioning stopped a second time after the
+    reader role already existed. One judgement, applied in both verifiers."""
+    from gmail_search.gateway import provision_search_reader
+    from gmail_search.gateway.schema import EXTENSION_METADATA
+
+    assert provision_search_reader.EXTENSION_METADATA is EXTENSION_METADATA
+
+
+# ── search_path determinism ──────────────────────────────────────────────────
+
+class _Recorder:
+    """A connection that records statements and stops the check sequence early."""
+
+    class _Stop(Exception):
+        pass
+
+    def __init__(self, stop_after):
+        self.statements, self.stop_after = [], stop_after
+
+    def execute(self, statement, params=None):
+        self.statements.append(statement)
+        # Raise exactly once, so the restore in the `finally` still records.
+        if len(self.statements) == self.stop_after + 1:
+            raise self._Stop()
+        return self
+
+    def fetchall(self):
+        return [('public, paradedb',)]
+
+
+def test_search_verification_pins_search_path_and_restores_it():
+    """`regtype::text` omits a type's schema when that type is visible on the
+    caller's search_path. The pinned pg_search signatures therefore resolved
+    differently per caller: against this database, whose session default is
+    `public, paradedb`, the administrator saw
+
+        'searchqueryinput'  where the pin expects  'paradedb.searchqueryinput'
+
+    so provisioning could never succeed for the one role that performs it, while
+    passing in tests whose database has no `paradedb` on the path. Verification
+    must therefore fix the path itself rather than inherit one.
+    """
+    from gmail_search.gateway import provision_search_reader as module
+
+    recorder = _Recorder(stop_after=2)
+    with pytest.raises(_Recorder._Stop):
+        module.verify_search_reader_access(recorder, 'u_owner')
+
+    joined = ' | '.join(str(s) for s in recorder.statements)
+    assert 'search_path' in recorder.statements[0], 'must read the caller path first'
+    assert any('pg_catalog' in str(s) for s in recorder.statements[:2]), \
+        f'must pin the path before any pinned lookup: {joined}'
+
+
+def test_search_verification_restores_the_caller_path_on_failure():
+    """A refused provision must not leave the administrator connection with a
+    rewritten search_path; later statements in the same session would resolve
+    against the wrong schemas."""
+    from gmail_search.gateway import provision_search_reader as module
+
+    recorder = _Recorder(stop_after=2)
+    with pytest.raises(_Recorder._Stop):
+        module.verify_search_reader_access(recorder, 'u_owner')
+    assert any('set_config' in str(s) or 'search_path' in str(s)
+               for s in recorder.statements[-1:]), 'the path must be restored even on failure'
+
+
+def test_writer_shares_the_same_allowlist():
+    """The fourth verifier with the same defect. `provision_application_writer`
+    rejected `pdb.index_layer_info` exactly as the reader and search verifiers
+    did, for the same reason and with the same remedy."""
+    from gmail_search.gateway import provision_writer
+    from gmail_search.gateway.schema import EXTENSION_METADATA
+
+    assert provision_writer.EXTENSION_METADATA is EXTENSION_METADATA

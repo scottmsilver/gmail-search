@@ -8,7 +8,7 @@ from __future__ import annotations
 from psycopg import sql
 
 from .database import reader_role
-from .schema import ANALYTICAL_SCHEMA
+from .schema import ANALYTICAL_SCHEMA, EXTENSION_METADATA
 
 
 def _binding(owner_id):
@@ -60,7 +60,10 @@ def verify_reader_access(conn, role):
         AND n.nspname NOT LIKE 'pg_%%' AND n.nspname <> 'information_schema'
         AND has_column_privilege(%s,c.oid,a.attnum,p.priv)
     """, (role,)):
-        if not (schema == 'public' and privilege == 'SELECT' and column in ANALYTICAL_SCHEMA.get(table, {})):
+        analytical = schema == 'public' and column in ANALYTICAL_SCHEMA.get(table, {})
+        # Extension catalogues are PUBLIC-readable in this image; see EXTENSION_METADATA.
+        extension = (schema, table) in EXTENSION_METADATA
+        if not (privilege == 'SELECT' and (analytical or extension)):
             raise ValueError('Unexpected effective column grant: ' + schema + '.' + table + '.' + column)
     if conn.execute("""SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname NOT LIKE 'pg_%%' AND n.nspname <> 'information_schema'

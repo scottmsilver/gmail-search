@@ -31,6 +31,10 @@ export type AuthContextValue = {
   multiTenant: boolean;
   publicMode?: boolean;
   fullWorkerMode?: boolean;
+  // Server-reported: may this signed-in user drive the unrestricted runtimes
+  // (model choice, battles, Pi/Claude backends)? Always true on the private
+  // app; on the public origin it follows GMS_FULL_RUNTIME_EMAILS.
+  fullRuntime?: boolean;
   user: AuthUser | null;
   signOut: () => Promise<void>;
 };

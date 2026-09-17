@@ -243,6 +243,32 @@ async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncItera
 _VALID_BACKENDS = ("adk", "claude_code", "claude_native", "pi")
 
 
+def _owner_has_full_runtime(user_id: str | None) -> bool:
+    """Is this owner exempt from the public deployment's bounded runtime?
+
+    The email is resolved from the users table for the authenticated owner id,
+    never taken from the request: the exemption is a server-side capability and
+    a caller-supplied address would let anyone claim it. A lookup failure is not
+    an exemption.
+    """
+    from gmail_search.auth.public import has_full_runtime
+
+    if not user_id:
+        return False
+    try:
+        from gmail_search.store.db import get_connection
+
+        conn = get_connection(None)
+        try:
+            row = conn.execute('SELECT email FROM users WHERE id = %s', (user_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception('full-runtime owner lookup failed for %s; using the bounded runtime', user_id)
+        return False
+    return has_full_runtime(row['email'] if row else None)
+
+
 def _deep_backend(override: str | None = None) -> str:
     """Pick the runtime adapter for the deep pipeline.
 
@@ -817,7 +843,9 @@ async def _real_run(
     # path that owns its own event emission + finalization.
     from gmail_search.auth.public import public_enabled
 
-    if public_enabled():
+    # Allowlisted owners keep the private app's runtimes on the public origin;
+    # everyone else gets the bounded retrieval loop. See auth.public.
+    if public_enabled() and not _owner_has_full_runtime(user_id):
         from gmail_search.agents.runtime_public import public_run
 
         public_task = asyncio.create_task(public_run(

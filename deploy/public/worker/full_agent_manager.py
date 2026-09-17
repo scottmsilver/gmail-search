@@ -42,11 +42,24 @@ def private(path,mode,directory=False):
         (not directory and info.st_nlink!=1)):raise RuntimeError('Unsafe manager state')
 
 
+def private_dir(path,mode):
+    """Create or adopt `path` at exactly `mode`, then assert it.
+
+    `mkdir(mode=...)` only requests a mode; umask subtracts from it, and this
+    manager runs under `UMask=0077`, so 0750 lands as 0700. `exist_ok=True`
+    leaves an existing directory's mode alone entirely. `private()` demands the
+    exact mode, so chmod is the only step that actually satisfies it -- and it
+    is what lets a directory created wrong by an earlier run be corrected
+    instead of adopted forever.
+    """
+    path.mkdir(mode=mode,exist_ok=True);path.chmod(mode);private(path,mode,True)
+
+
 class Manager:
     def __init__(self,state_dir,backend,*,controller_uid,session_factory):
         self.backend,self.controller_uid,self.session_factory=backend,controller_uid,session_factory
         self.lock=threading.RLock();self.jobs={};self.db=None;self.fd=None;self.closed=False
-        root=Path(state_dir);root.mkdir(mode=0o700,exist_ok=True);private(root,0o700,True)
+        root=Path(state_dir);private_dir(root,0o700)
         try:
             self.fd=os.open(root/'manager.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
             private(root/'manager.lock',0o600);fcntl.flock(self.fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -268,7 +281,7 @@ def main(backend_factory=None):
         boundary();backend_factory=SyntheticFullAgentBackend
     backend=backend_factory()
     account=pwd.getpwnam(ACCOUNT);root=Path(SOCKET_PATH).parent
-    root.mkdir(mode=0o750,exist_ok=True);private(root,0o750,True);os.chown(root,0,account.pw_gid)
+    private_dir(root,0o750);os.chown(root,0,account.pw_gid)
     manager=Manager(STATE_PATH,backend,controller_uid=account.pw_uid,session_factory=RuntimeSession)
     server=None
     try:

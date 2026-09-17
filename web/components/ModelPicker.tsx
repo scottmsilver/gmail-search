@@ -33,7 +33,7 @@ const SHORT_NAME: Record<string, string> = {
 const shortModel = (m: string) => SHORT_NAME[m] ?? m;
 
 export const ModelPicker = () => {
-  const { publicMode } = useAuth();
+  const { publicMode, fullRuntime } = useAuth();
   const settings = useChatSettings();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -55,7 +55,9 @@ export const ModelPicker = () => {
     };
   }, [open]);
 
-  if (publicMode) return <span className="text-xs text-muted-foreground" title="Gemini searches your Gmail archive with retrieval tools. Shell execution and model battles are unavailable.">Gemini · Gmail retrieval only</span>;
+  // Capability, not deployment: an allowlisted owner gets the full picker on
+  // the public origin, and everyone else keeps the bounded retrieval loop.
+  if (publicMode && !fullRuntime) return <span className="text-xs text-muted-foreground" title="Gemini searches your Gmail archive with retrieval tools. Shell execution and model battles are unavailable.">Gemini · Gmail retrieval only</span>;
 
   const battleOn = settings.battleMode;
   const deepBackend = settings.deepBackend;

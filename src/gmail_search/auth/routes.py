@@ -350,6 +350,12 @@ def register_auth_routes(app: FastAPI, db_path: Path) -> None:
                 "picture": user.picture,
                 "is_admin": not public_auth.public_enabled() and is_admin_email(user.email),
             },
+            # Feature presentation follows capability, not deployment. The
+            # frontend used to infer this from a build-time origin flag, which
+            # meant one build per deployment and no way to vary it per user.
+            "capabilities": {
+                "full_runtime": not public_auth.public_enabled() or public_auth.has_full_runtime(user.email),
+            },
         }
 
     @app.post("/api/auth/logout")

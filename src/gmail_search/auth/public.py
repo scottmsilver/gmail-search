@@ -91,6 +91,44 @@ def validate_public_auth_config() -> PublicConfig | None:
     return PublicConfig(origin, broker, secret, emails)
 
 
+def full_runtime_emails() -> frozenset[str]:
+    """Owners cleared for the unrestricted agent runtimes on the public origin.
+
+    The public deployment routes every run to a bounded retrieval loop before the
+    requested backend is read (`agents/service.py`), because arbitrary execution
+    is not cleared for shared use. That stays the default.
+
+    An address listed here is exempt: it gets the private app's runtimes -- Pi
+    with Gemini and OpenRouter, model choice, battles -- on the public origin.
+    The setting is a capability, never an admission: it must name addresses that
+    are already admitted, so it can only narrow who gets the extra power.
+
+    Empty by default, and inert on the private app, where there is no
+    short-circuit to relax.
+    """
+    configured = frozenset(
+        e.strip().lower() for e in os.environ.get("GMS_FULL_RUNTIME_EMAILS", "").split(",") if e.strip()
+    )
+    if not configured:
+        return frozenset()
+    config = validate_public_auth_config()
+    if config is None:
+        return frozenset()
+    if not configured <= config.emails:
+        raise RuntimeError(
+            "GMS_FULL_RUNTIME_EMAILS must be a subset of GMS_PUBLIC_ALLOWED_EMAILS; "
+            "it grants capability to admitted users and cannot admit anyone"
+        )
+    return configured
+
+
+def has_full_runtime(email: str | None) -> bool:
+    """True when `email` may use the unrestricted runtimes on this deployment."""
+    if not isinstance(email, str) or not email:
+        return False
+    return email.strip().lower() in full_runtime_emails()
+
+
 def _prune() -> None:
     now = time.time()
     for mapping in (_nonces, _sessions):

@@ -44,11 +44,13 @@ const newConversationId = () =>
     .join("");
 
 export default function Page() {
-  const { publicMode, fullWorkerMode } = useAuth();
+  const { publicMode, fullWorkerMode, fullRuntime } = useAuth();
   const fullWorkerModeRef = useRef(fullWorkerMode);
   fullWorkerModeRef.current = fullWorkerMode;
-  const publicModeRef = useRef(publicMode);
-  publicModeRef.current = publicMode;
+  // Restricted only when the deployment is public AND the server has not
+  // reported this user as capable.
+  const publicModeRef = useRef(publicMode && !fullRuntime);
+  publicModeRef.current = publicMode && !fullRuntime;
   const router = useRouter();
   const params = useSearchParams();
   const urlC = params.get("c");
