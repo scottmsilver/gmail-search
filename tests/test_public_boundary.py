@@ -52,3 +52,33 @@ def test_anonymous_flood_does_not_exhaust_signed_in_capacity(public_env,monkeypa
     assert c.get('/api/auth/login').status_code==429
     monkeypatch.setattr(boundary,'request_user',lambda req:'owner')
     assert c.get('/api/search').status_code==200
+
+
+# ── battles ──────────────────────────────────────────────────────────────────
+
+def test_battle_endpoints_authenticate_rather_than_404(public_env, monkeypatch):
+    """Battles are available to owners the server reports as capable.
+
+    This is the server-side twin of `web/lib/publicBoundary.ts`. Both are
+    default-deny allowlists and both had to learn about battles: the browser one
+    404'd the vote, and fixing only that moved the 404 here, because POST was
+    permitted for exactly `/api/auth/logout` and `/api/agent/analyze`.
+
+    Reaching the endpoint is not permission to battle -- the chat route still
+    gates that on capability, and both endpoints remain per-owner scoped. What
+    must change is the failure: authentication, not "no such route".
+    """
+    client = make_client(monkeypatch)
+    assert client.post('/api/battle/vote', json={}, headers={'origin': 'https://gms.example'}).status_code == 401
+    assert client.get('/api/battle/stats').status_code == 401
+
+
+@pytest.mark.parametrize('method,path', [
+    ('get', '/api/battle/vote'),
+    ('post', '/api/battle/stats'),
+])
+def test_battle_endpoints_still_refuse_the_wrong_method(public_env, monkeypatch, method, path):
+    client = make_client(monkeypatch)
+    call = getattr(client, method)
+    response = call(path, **({'json': {}, 'headers': {'origin': 'https://gms.example'}} if method == 'post' else {}))
+    assert response.status_code == 404

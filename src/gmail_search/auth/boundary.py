@@ -18,6 +18,9 @@ _READ = {
     '/api/auth/me', '/api/auth/gmail-status', '/api/search', '/api/query', '/api/find_facts',
     '/api/inbox', '/api/priority-inbox', '/api/status', '/api/users/me/sync-status',
     '/api/thread_lookup', '/api/conversations', '/api/conversations/live',
+    # Battles are available to owners the server reports as capable; the chat
+    # route gates that. Both battle endpoints are per-owner scoped.
+    '/api/battle/stats',
 }
 _READ_PATTERN = re.compile(r'^/api/(?:thread/[^/]+|message/[^/]+|attachment/[^/]+(?:/(?:meta|raw|text))?|artifact/\d+|conversations/[^/]+|agent/analyze/[^/]+/events)$')
 _CONVERSATION = re.compile(r'^/api/conversations/[^/]+$')
@@ -33,7 +36,7 @@ def allowed(path: str, method: str) -> bool:
     if method == 'GET':
         return path in _PUBLIC or path in _READ or bool(_READ_PATTERN.fullmatch(path))
     if method == 'POST':
-        return path in {'/api/auth/logout', '/api/agent/analyze'}
+        return path in {'/api/auth/logout', '/api/agent/analyze', '/api/battle/vote'}
     return method in {'PUT', 'DELETE'} and bool(_CONVERSATION.fullmatch(path))
 
 

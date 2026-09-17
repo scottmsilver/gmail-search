@@ -24,8 +24,11 @@ WRITE_GRANTS = {
     'agent_sessions': 'SELECT, INSERT, UPDATE',
     'agent_events': 'SELECT, INSERT',
     'costs': 'SELECT, INSERT',
+    # Battles are available to owners the server reports as capable. Both battle
+    # endpoints are per-owner scoped; the vote inserts, the leaderboard reads.
+    'model_battles': 'SELECT, INSERT',
 }
-SEQUENCES = ('conversation_messages_id_seq', 'agent_events_id_seq', 'costs_id_seq')
+SEQUENCES = ('conversation_messages_id_seq', 'agent_events_id_seq', 'costs_id_seq', 'model_battles_id_seq')
 ALL_TABLES = (*READ_TABLES, *WRITE_GRANTS)
 # Preexisting PUBLIC read-only extension metadata; none contains mail or queries.
 EXTENSION_METADATA = {

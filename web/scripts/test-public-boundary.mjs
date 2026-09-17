@@ -25,7 +25,11 @@ test('OAuth return navigations reach UI pages while cross-site API and fetch req
 });
 test('public boundary defaults deny, exact origin/host and internal headers; private unchanged', async()=>{
  process.env.GMS_PUBLIC_ORIGIN=origin;
- for(const path of ['/api/admin/users','/api/jobs/frontfill','/api/log/abc','/api/auth/whoami','/api/agent/analyze','/api/battle/stats','/api/unknown']) assert.equal(publicRequestDenied(request(path)).status,404);
+ // '/api/battle/stats' was in this deny list while battles were unavailable on
+ // the public origin. Capable owners may battle now, so the two user-scoped
+ // battle endpoints are allowlisted and asserted separately below; everything
+ // else here still defaults to denied.
+ for(const path of ['/api/admin/users','/api/jobs/frontfill','/api/log/abc','/api/auth/whoami','/api/agent/analyze','/api/unknown']) assert.equal(publicRequestDenied(request(path)).status,404);
  assert.equal(publicRequestDenied(request('/api/chat','GET')).status,404);
  assert.equal(publicRequestDenied(request('/api/search','GET',{host:'evil.test'})).status,403);
  assert.equal(publicRequestDenied(request('/api/search','GET',{origin:'https://evil.test'})).status,403);
@@ -82,4 +86,30 @@ test('full-worker control routes require explicit rollout flag and retain authen
   assert.equal((await route(request('/api/agent/analyze','DELETE',{},'{}'))).status,401);
   assert.equal(called,false);
  } finally {globalThis.fetch=original;delete process.env.GMS_FULL_WORKER_ROUTES;delete process.env.GMS_PUBLIC_ORIGIN;}
+});
+
+// Battles became available to capable owners on the public origin, but their
+// vote and stats endpoints were never added to the boundary allowlist, so a
+// battle could run and then 404 the moment anyone voted on it. Reaching the
+// endpoint is not the same as being allowed to battle: the chat route still
+// gates that on capability, and both endpoints still require a session.
+//
+// These set GMS_PUBLIC_ORIGIN themselves. The tests above delete it in their
+// finally blocks, and without it publicRequestDenied returns null immediately,
+// so an allowlist test written without it passes whether or not the route is
+// actually permitted.
+test('battle vote and stats are reachable on the public origin', () => {
+  process.env.GMS_PUBLIC_ORIGIN = origin;
+  try {
+    assert.equal(publicRequestDenied(request('/api/battle/vote', 'POST')), null);
+    assert.equal(publicRequestDenied(request('/api/battle/stats')), null);
+  } finally { delete process.env.GMS_PUBLIC_ORIGIN; }
+});
+
+test('battle endpoints still refuse the wrong method', () => {
+  process.env.GMS_PUBLIC_ORIGIN = origin;
+  try {
+    assert.equal(publicRequestDenied(request('/api/battle/vote'))?.status, 404);
+    assert.equal(publicRequestDenied(request('/api/battle/stats', 'POST'))?.status, 404);
+  } finally { delete process.env.GMS_PUBLIC_ORIGIN; }
 });

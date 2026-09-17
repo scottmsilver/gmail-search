@@ -238,14 +238,18 @@ test('API middleware denies unsafe foreign or missing public origins and marks p
     }
   } finally {if(prior===undefined)delete process.env.GMS_PUBLIC_ORIGIN;else process.env.GMS_PUBLIC_ORIGIN=prior;}
 });
-test('public vote proxy is unavailable before backend or body reads',async()=>{
+// Battles were unavailable on the public origin, so the vote proxy was denied
+// outright at the boundary. Capable owners may battle now, so the boundary
+// admits the route and authentication becomes the gate instead -- an
+// unauthenticated vote must still never reach the backend or read a body.
+test('public vote proxy still authenticates before backend or body reads',async()=>{
   const m=await tsImport(new URL('../app/api/battle/vote/route.ts',import.meta.url).pathname,import.meta.url);
   const vote=(m.default??m).POST;
   process.env.GMS_PUBLIC_ORIGIN='https://mail.example.test';
   try {
     globalThis.fetch=async()=>{throw new Error('must not reach backend');};
     const req=new Request('https://mail.example.test/api/battle/vote',{method:'POST',headers:{host:'mail.example.test',origin:'https://mail.example.test'},body:'{}'});
-    assert.equal((await vote(req)).status,404);
+    assert.equal((await vote(req)).status,401);
   } finally {delete process.env.GMS_PUBLIC_ORIGIN;globalThis.fetch=originalFetch;}
 });
 test('private HTTPS proxy origin uses forwarded scheme while public origin ignores it',async()=>{
