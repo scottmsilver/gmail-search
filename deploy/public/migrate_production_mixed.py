@@ -24,10 +24,12 @@ retained leaf is reindexed and searched
 (docs/qualification/retained-reader-root-cause.md).
 """
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
 import sys
+import time
 
 import psycopg
 from psycopg.rows import tuple_row
@@ -150,26 +152,175 @@ def _print_report(data):
             print(f'  - {reason}')
 
 
+# ── the fence ────────────────────────────────────────────────────────────────
+
+APPLICATION_NAME = 'gms-migration'
+
+
+class ForeignWritersPresent(RuntimeError):
+    """Something other than the migration is connected to the database."""
+
+
+class ProductionFence:
+    """Proves the writers are already stopped. Never stops them itself.
+
+    The mechanism asks a fence to confirm access is closed on entry and still
+    closed on exit. `RehearsalFence` asserts a boolean it set itself, which is
+    right for a synthetic database and worthless for a real one.
+
+    What is actually observable is who is connected. Every connection this
+    driver opens carries `application_name=gms-migration`; if any *other*
+    backend is attached to the database, a writer survived and the migration
+    must not proceed. That is evidence rather than trust: it does not matter
+    whether the daemons were stopped by systemd, a supervisor, or by hand, and
+    it catches the case the operator forgot — a stray psql, a cron job, an
+    agent run holding a connection.
+
+    Deliberately not a stopper. A tool that can both silence the writers and
+    rewrite the tables can do the second without the first.
+    """
+
+    def __init__(self, connect):
+        self._connect = connect
+
+    def _foreign(self):
+        with self._connect() as conn:
+            return conn.execute(
+                """SELECT pid, application_name, state, usename FROM pg_stat_activity
+                   WHERE datname = current_database() AND pid <> pg_backend_pid()
+                     AND coalesce(application_name,'') <> %s""", (APPLICATION_NAME,)).fetchall()
+
+    def _require_closed(self, when):
+        foreign = self._foreign()
+        if foreign:
+            detail = ', '.join(f'pid {row[0]} ({row[1] or "unnamed"}, {row[3]})' for row in foreign[:5])
+            raise ForeignWritersPresent(
+                f'{len(foreign)} connection(s) other than the migration are attached '
+                f'{when}: {detail}. Stop every writer before applying.')
+
+    @contextmanager
+    def hold(self, plan, *, deadline):
+        self._require_closed('before the fence was taken')
+        yield
+        # On the way out too: a daemon that restarted mid-migration would have
+        # written against a half-migrated table, and the receipt must not claim
+        # a clean run.
+        self._require_closed('while the fence was held')
+
+
+# ── the apply path ───────────────────────────────────────────────────────────
+
+def _connector(dsn):
+    """Fresh autocommit connections, each identifying itself to the fence."""
+    def connect():
+        conn = psycopg.connect(dsn, autocommit=True,
+                               application_name=APPLICATION_NAME, row_factory=tuple_row)
+        return conn
+    return connect
+
+
+def apply(dsn, *, registry_path, store_id, migration_id, release_epoch, dominant_owner,
+          expected_owners, checkpoint=print):
+    """Phase one then phase two, against a database that already exists.
+
+    Every guard the rehearsal has, plus the two it cannot have: a fence that
+    checks who is connected rather than a boolean it set itself, and a registry
+    on a durable path rather than a temp directory. The declared-target checks
+    in `migrate_text_owner_partitions` run inside `capture_plan` — this function
+    cannot reach production without them.
+    """
+    from gmail_search.gateway.maintenance import MaintenanceAdmin, ReleaseIdentity
+    from gmail_search.gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
+
+    connect = _connector(dsn)
+    registry = Path(registry_path)
+    registry.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+
+    identity = ReleaseIdentity(store_id, TEXT, release_epoch)
+    with connect() as conn:
+        plan = MECHANISM.capture_plan(conn, identity=identity, migration_id=migration_id,
+                                      dominant_owner=dominant_owner,
+                                      expected_owners=tuple(expected_owners))
+    checkpoint(f'plan captured: database={plan.database_name} oid={plan.database_oid} '
+               f'system_identifier={plan.system_identifier}')
+
+    admin = MaintenanceAdmin(registry)
+    snapshot = admin.initialize_closed(identity, migration_id=plan.migration_id,
+                                       owner_set_digest=plan.owner_set_digest,
+                                       procedure_digest=plan.procedure_digest)
+    checkpoint(f'registry initialised at {registry} (state={snapshot.state})')
+
+    controller = MECHANISM.MixedTextPhaseOne(connect, registry, plan,
+                                             fence=ProductionFence(connect))
+
+    receipt = {'migration_id': migration_id, 'database': plan.database_name,
+               'system_identifier': plan.system_identifier, 'phases': {}}
+    for label, call, expected in (('phase_one', controller.advance, 'INDEX_PENDING'),
+                                  ('phase_two', controller.publish, 'READY')):
+        # The gate caps verification at 30s, so the slow work is done outside it.
+        started = time.monotonic()
+        prepared = controller.prepare(snapshot, seconds=86400)
+        snapshot = call(snapshot)
+        elapsed = round(time.monotonic() - started, 2)
+        if snapshot.state != expected:
+            raise RuntimeError(f'{label} ended in {snapshot.state}, expected {expected}')
+        receipt['phases'][label] = {'seconds': elapsed, 'prepare_seconds': prepared,
+                                    'state': snapshot.state}
+        checkpoint(f'{label}: {elapsed}s -> {snapshot.state}')
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dsn', required=True, help='the database to inspect or migrate')
     parser.add_argument('--report', action='store_true', help='read-only; change nothing')
     parser.add_argument('--json', action='store_true', help='machine-readable report')
+    parser.add_argument('--apply', action='store_true',
+                        help='perform the migration; requires every condition below')
+    parser.add_argument('--registry', help='durable path for the maintenance registry')
+    parser.add_argument('--store-id', help='release store id recorded in the registry')
+    parser.add_argument('--migration-id', help='identifies this migration in the registry')
+    parser.add_argument('--release-epoch', type=int, default=1)
+    parser.add_argument('--receipt', help='write a JSON receipt here')
     arguments = parser.parse_args()
 
-    if not arguments.report:
-        parser.error(
-            'only --report is implemented. Applying needs a durable registry, an external '
-            'fence proving the writers are stopped, and a verified post-migration application '
-            'gate; none of those should be improvised at the point of use.')
+    if not (arguments.report or arguments.apply):
+        parser.error('choose --report or --apply')
 
     data = report(arguments.dsn)
-    if arguments.json:
-        print(json.dumps(data, indent=2, sort_keys=True))
-    else:
+    if arguments.report:
+        if arguments.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            _print_report(data)
+        return 0 if data['ready'] else 1
+
+    if not data['ready']:
         _print_report(data)
-    return 0 if data['ready'] else 1
+        print('\nRefusing to apply: the report is not clean.', file=sys.stderr)
+        return 1
+    missing = [name for name in ('registry', 'store_id', 'migration_id')
+               if not getattr(arguments, name)]
+    if missing:
+        parser.error('--apply needs ' + ', '.join('--' + name.replace('_', '-') for name in missing))
+
+    owners = [owner['owner_id'] for owner in data['owners']]
+    print(f"about to migrate {data['database']} ({data['database_size']}): "
+          f"{len(owners)} owners, {data['redistributed_rows']:,} rows move, "
+          f"dominant {data['dominant_owner']} keeps its heap")
+    receipt = apply(arguments.dsn, registry_path=arguments.registry,
+                    store_id=arguments.store_id, migration_id=arguments.migration_id,
+                    release_epoch=arguments.release_epoch,
+                    dominant_owner=data['dominant_owner'], expected_owners=owners)
+    if arguments.receipt:
+        path = Path(arguments.receipt)
+        path.write_text(json.dumps(receipt, indent=2, sort_keys=True))
+        path.chmod(0o600)
+        print(f'receipt written to {path}')
+    else:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == '__main__':
