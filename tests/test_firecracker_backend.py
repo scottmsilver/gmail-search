@@ -92,3 +92,30 @@ def test_agent_pi_mcp_has_its_own_fixed_readonly_profile_and_preserves_claude_pi
     assert backend.SyntheticAgentPiMCPBackend.profile=='agent_pi_mcp'
     assert backend.AGENT_MCP_PIN=='54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba'
     assert backend.AGENT_PI_MCP_PIN not in (backend.RUNTIME_PIN,backend.ATTACHMENT_PIN,backend.AGENT_TOOLS_PIN,backend.AGENT_MCP_PIN)
+
+
+def test_stop_does_not_erase_a_recorded_failure(tmp_path, monkeypatch):
+    """Teardown must not destroy why the run failed.
+
+    `supervise()` records its verdict as {'status': 'failed', 'error': ...}.
+    `stop()` then wrote {'status': 'stopped'} over it unconditionally, so every
+    failed guest looked identical to a clean exit -- which is why a guest that
+    exited before using any capability could not be diagnosed at all: the
+    production worker discards serial output by design, and the one remaining
+    record was being overwritten during teardown.
+    """
+    path = tmp_path / 'run'
+    path.mkdir()
+    backend.atomic_json(path / 'state.json', {'status': 'failed', 'error': 'jailer launch failed: boom'})
+    backend.finalize_stopped_state(path)
+    kept = backend.read_json(path / 'state.json')
+    assert kept['status'] == 'failed'
+    assert 'boom' in kept['error']
+
+
+def test_stop_still_marks_a_clean_run_stopped(tmp_path):
+    path = tmp_path / 'run'
+    path.mkdir()
+    backend.atomic_json(path / 'state.json', {'status': 'running', 'pid': 1})
+    backend.finalize_stopped_state(path)
+    assert backend.read_json(path / 'state.json') == {'status': 'stopped'}

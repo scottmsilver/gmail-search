@@ -190,6 +190,20 @@ class FirecrackerBackend:
             handles.update(checked_handle(p.name) for p in CGROUP.iterdir() if p.is_dir())
         return handles
 
+def finalize_stopped_state(path):
+    """Mark a torn-down run stopped without erasing why it failed.
+
+    `supervise()` records {'status': 'failed', 'error': ...}; teardown used to
+    write {'status': 'stopped'} over it unconditionally, so a failed guest was
+    indistinguishable from a clean exit. Production discards guest serial output
+    by design, which left no record of the failure at all.
+    """
+    state = read_json(path/'state.json') if (path/'state.json').exists() else {}
+    if state.get('status') == 'failed':
+        return
+    atomic_json(path/'state.json', {'status': 'stopped'})
+
+
     def stop(self, handle):
         checked_handle(handle)
         with self.lock(handle) as path:
@@ -210,7 +224,7 @@ class FirecrackerBackend:
             except ChildProcessError:
                 pass  # Original controller died; outer init adopts/reaps it.
         with self.lock(handle) as path:
-            atomic_json(path/'state.json', {'status': 'stopped'})
+            finalize_stopped_state(path)
 
 
 class SyntheticAgentBackend(FirecrackerBackend):
@@ -347,7 +361,13 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
             if re.search(r'^Seccomp:\s+2$', status, re.MULTILINE):
                 break
             if time.monotonic() >= ready_by:
-                raise RuntimeError('VMM seccomp readiness check failed')
+                # Say what was observed. "readiness check failed" alone cannot
+                # distinguish a VMM that never applies its filter from one that
+                # died, and the production worker keeps no console output.
+                seen = next((line for line in status.splitlines() if line.startswith('Seccomp')), 'Seccomp: absent')
+                name = next((line for line in status.splitlines() if line.startswith('Name:')), 'Name: ?')
+                raise RuntimeError(f'VMM seccomp readiness check failed (pid={child} {name.strip()} '
+                                   f'{seen.strip()}; waited {time.monotonic() - (ready_by - 5):.1f}s)')
             time.sleep(.02)
         evidence = {key: line for key in ('Uid:', 'Seccomp:', 'NSpid:') for line in status.splitlines() if line.startswith(key)}
         evidence.update({name: (CGROUP/handle/name).read_text().strip() for name in ('memory.max', 'memory.swap.max', 'pids.max', 'cpu.max')})
