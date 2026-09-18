@@ -95,7 +95,17 @@ def ensure_table(conn) -> None:
 
     Canonical DDL now lives in pg_schema.sql (applied by init_db, where the
     RLS loop covers it); this self-provisioning copy must stay in sync and
-    exists so standalone runs work before init_db has been applied."""
+    exists so standalone runs work before init_db has been applied.
+
+    Check the catalog before issuing any DDL. PostgreSQL verifies CREATE
+    privilege on the schema before it notices the table already exists, so an
+    unconditional `CREATE TABLE IF NOT EXISTS` fails for any role without schema
+    CREATE -- which is every non-owner role, including the public API's. That is
+    why facts search failed on every public request while working privately,
+    where the connection is a superuser. `to_regclass` needs no privilege.
+    """
+    if conn.execute("SELECT to_regclass('public.propositions')").fetchone()[0] is not None:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS propositions (
@@ -477,7 +487,12 @@ def _shares_entity(a: str, b: str) -> bool:
 def ensure_bm25_index(conn) -> None:
     """ParadeDB BM25 index over proposition text — the keyword half of hybrid.
     This is what rescues bare alphanumeric facts (plates/VINs/codes) that
-    embeddings rank near-zero."""
+    embeddings rank near-zero.
+
+    Checked first for the same reason as ensure_table: CREATE INDEX needs table
+    ownership before it notices the index already exists."""
+    if conn.execute("SELECT to_regclass(%s)", ("public.props_bm25_idx",)).fetchone()[0] is not None:
+        return
     conn.execute(
         "CREATE INDEX IF NOT EXISTS props_bm25_idx ON propositions USING bm25 (id, text) WITH (key_field='id')"
     )
