@@ -35,13 +35,13 @@ def _token(request):
     return authorization[0][7:]
 
 
-async def _json_body(request):
+async def _json_body(request, limit=_MAX_BODY):
     size, chunks = 0, []
     try:
         async with asyncio.timeout(3):
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > _MAX_BODY:
+                if size > limit:
                     raise HTTPException(413, 'Query request exceeds its byte limit')
                 chunks.append(chunk)
     except TimeoutError:
@@ -137,7 +137,10 @@ def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=No
 
     if events is not None:
         from .event_http import add_event_routes
-        add_event_routes(app, events, _token, _json_body)
+        # An event may be as large as the event store accepts; the guest bounds
+        # tool displays to that, not to the query body limit.
+        add_event_routes(app, events, _token,
+                         lambda request: _json_body(request, limit=events.max_event_bytes))
 
     # Raw payload admission must enclose application-boundary sends, outside
     # BaseHTTPMiddleware's buffered response channel. Keep this registration last.

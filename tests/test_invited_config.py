@@ -243,7 +243,7 @@ def test_rejects_provider_rates_outside_fixed_profile_reservations(tmp_path, fie
         load_runtime_config(_write(tmp_path, config))
 
 
-@pytest.mark.parametrize("key", ["anthropic_key", "gemini_key"])
+@pytest.mark.parametrize("key", ["anthropic_key", "claude_oauth_token", "gemini_key"])
 def test_rejects_provider_keys_outside_printable_ascii_contract(tmp_path, key):
     value = _value(tmp_path)
     value["provider"][key] = "x" * 513
@@ -338,3 +338,44 @@ def test_rejects_wrong_file_owner(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: path.stat().st_uid + 1)
     with pytest.raises(ConfigError):
         load_runtime_config(path)
+
+
+@pytest.mark.parametrize("credentials", [
+    {"anthropic_key"}, {"claude_oauth_token"}, {"anthropic_key", "claude_oauth_token"}])
+def test_accepts_either_anthropic_credential(tmp_path, credentials):
+    """A Claude login alone is enough to run Claude Code; it is not a Pi credential."""
+    value = _value(tmp_path)
+    value["provider"].pop("anthropic_key")
+    for name in credentials:
+        value["provider"][name] = "credential-secret-" + name
+    config = load_runtime_config(_write(tmp_path, value))
+    assert (config.provider.anthropic_key is not None) == ("anthropic_key" in credentials)
+    assert (config.provider.claude_oauth_token is not None) == ("claude_oauth_token" in credentials)
+    assert "credential-secret" not in repr(config)
+
+
+def test_rejects_provider_without_any_anthropic_credential(tmp_path):
+    value = _value(tmp_path)
+    value["provider"].pop("anthropic_key")
+    with pytest.raises(ConfigError):
+        load_runtime_config(_write(tmp_path, value))
+
+
+def test_accepts_a_borrowed_claude_login_file(tmp_path):
+    value = _value(tmp_path)
+    value["provider"].pop("anthropic_key")
+    value["provider"]["claude_login_file"] = str(tmp_path / "credentials.json")
+    config = load_runtime_config(_write(tmp_path, value))
+    assert config.provider.claude_login_file == tmp_path / "credentials.json"
+
+
+@pytest.mark.parametrize("login", ["relative/credentials.json", None])
+def test_rejects_a_bad_or_doubled_claude_login(tmp_path, login):
+    """A relative path is refused; so is naming both a token and a login file."""
+    value = _value(tmp_path)
+    if login is None:
+        value["provider"]["claude_oauth_token"] = "credential-secret"
+        login = str(tmp_path / "credentials.json")
+    value["provider"]["claude_login_file"] = login
+    with pytest.raises(ConfigError):
+        load_runtime_config(_write(tmp_path, value))

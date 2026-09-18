@@ -13,7 +13,7 @@ import signal
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-from guest_agent_bootstrap import receive, validate_config
+from guest_agent_bootstrap import PROFILE, receive, validate_config
 from guest_mail_tools import GuestMailTools, _drain, _object, _invalid_constant
 from guest_tool_config import READ_TOOLS, write_capability_file
 
@@ -67,13 +67,24 @@ def normalize(record,secrets=()):
     elif kind=='extension_error' or (kind=='response' and record.get('success') is False):
         raise RunnerError()
     else:return None
+    return bound_event(event,secrets)
+
+
+_DISPLAY_FIELD={'tool_start':'args','tool_result':'result'}
+
+
+def bound_event(event,secrets=()):
+    """Redact credentials, shorten an oversized tool display, enforce the record bound.
+
+    Runtime-agnostic, so the Pi and Claude runners share one reviewed path. Only
+    the display copy is shortened; the agent retains its original result.
+    Redaction precedes shortening so a token cannot leak as a prefix.
+    """
     raw=json.dumps(event,ensure_ascii=False,allow_nan=False,separators=(',',':'))
     for token in secrets:raw=raw.replace(token,'[REDACTED]')
     size=len(raw.encode('utf-8'))
-    if size>MAX_RECORD and kind in ('tool_execution_start','tool_execution_end'):
-        # Only the display copy is shortened; Pi retains its original result.
-        # Redaction precedes shortening so a token cannot leak as a prefix.
-        field='args' if kind=='tool_execution_start' else 'result'
+    field=_DISPLAY_FIELD.get(event.get('type'))
+    if size>MAX_RECORD and field:
         safe=json.loads(raw)
         name=safe.get('name')
         if type(name) is not str or len(name)>128:raise RunnerError()
@@ -175,12 +186,21 @@ def unprivileged():
     resource.setrlimit(resource.RLIMIT_NPROC,(128,128))
 
 
-def prepare(config):
-    config=validate_config(config)
+def make_run_dirs(config):
+    """The private run tree both runners start from: a uid-1000 home and work
+    directory, and this run's capability file. Returns (home, cwd)."""
     RUN.mkdir(mode=0o700)
     home,cwd=RUN/'home',RUN/'work'
     home.mkdir(mode=0o700);cwd.mkdir(mode=0o700)
     write_capability_file(RUN,config['tool_config'])
+    for path in (RUN,home,cwd,RUN/'capabilities.json'):os.chown(path,1000,1000)
+    return home,cwd
+
+
+def prepare(config):
+    config=validate_config(config)
+    if config['profile']!=PROFILE:raise RunnerError()
+    home,cwd=make_run_dirs(config)
     pi=home/'pi';pi.mkdir(mode=0o700)
     models={'providers':{'gateway':{'baseUrl':'http://127.0.0.1:18080','api':'anthropic-messages',
         'apiKey':'${ANTHROPIC_API_KEY}','models':[{'id':MODEL,'reasoning':False,'input':['text'],
@@ -188,7 +208,7 @@ def prepare(config):
         'compat':{'supportsEagerToolInputStreaming':False,'supportsCacheControlOnTools':False}}]}}}
     fd=os.open(pi/'models.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'w') as stream:json.dump(models,stream)
-    for path in (RUN,home,cwd,RUN/'capabilities.json',pi,pi/'models.json'):os.chown(path,1000,1000)
+    for path in (pi,pi/'models.json'):os.chown(path,1000,1000)
     env={'HOME':str(home),'PATH':'/tmp/runtime/bin:/usr/bin:/bin','LANG':'C.UTF-8','TERM':'dumb',
          'ANTHROPIC_API_KEY':config['inference_capability'],'ANTHROPIC_BASE_URL':'http://127.0.0.1:18080',
          'DISABLE_PROMPT_CACHING':'1','PI_CODING_AGENT_DIR':str(pi),

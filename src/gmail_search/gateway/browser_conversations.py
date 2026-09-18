@@ -372,12 +372,12 @@ def compose_browser_runs(workers,events,*,connect,is_active,prepare_input,budget
     conversations = BrowserConversations(connect,is_active=is_active,
         authorize_persistence=authorize,read_events=read_events,can_edit=can_edit,
         transaction_factory=transaction_factory)
-    def prepare_with_history(lease,question):
+    def prepare_with_history(lease,question,runtime='pi'):
         from .browser_prompt import build_prompt
         saved = conversations.get(lease.owner_id,lease.conversation_id)
         if saved is None:
             raise AccessDenied()
-        prepare_input(lease,build_prompt(saved['messages'],question))
+        prepare_input(lease,build_prompt(saved['messages'],question),runtime)
 
     runs = BrowserRuns(workers,events,prepare_input=prepare_with_history,
         persist_answer=conversations.persist,budget_for=budget_for,poll_seconds=poll_seconds)

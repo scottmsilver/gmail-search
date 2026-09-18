@@ -41,7 +41,10 @@ def app_state(tmp_path):
         claim(owner,conversation)
         saved.append((owner,conversation,run,answer))
         return True
-    runs = BrowserRuns(workers,events,prepare_input=lambda lease,prompt:backend.prompts.__setitem__(lease.run_id,prompt),
+    def prepare(lease,prompt,runtime):
+        backend.prompts[lease.run_id] = prompt
+        backend.runtimes[lease.run_id] = runtime
+    runs = BrowserRuns(workers,events,prepare_input=prepare,
         persist_answer=persist,budget_for=budgets.__getitem__,poll_seconds=.01)
     @asynccontextmanager
     async def lifespan(app):
@@ -96,12 +99,24 @@ def test_browser_question_replay_and_cross_owner_denial(app_state):
     {'question':'hello','conversation_id':'../elsewhere'},
     {'question':'é'*8193,'conversation_id':'conversation'},
     {'question':'hello','conversation_id':'conversation','backend':'shell'},
-    {'question':'hello','conversation_id':'conversation','model':'arbitrary'},
+    {'question':'hello','conversation_id':'conversation','model':7},
+    {'question':'hello','conversation_id':'conversation','model':'x'*129},
 ])
 def test_invalid_start_never_launches(app_state,body):
     response = app_state.client.post('/api/agent/analyze',headers=headers(app_state),json=body)
     assert response.status_code in (400,413)
     assert not app_state.backend.prompts
+
+
+@pytest.mark.parametrize('backend,runtime',[(None,'pi'),('pi','pi'),('claude_code','claude')])
+def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,runtime):
+    """The picker's model name is accepted and dropped: the gateway pins its own."""
+    body = {'question':'hello','conversation_id':'conversation','model':'sonnet'}
+    if backend is not None:
+        body['backend'] = backend
+    response = app_state.client.post('/api/agent/analyze',headers=headers(app_state),json=body)
+    assert response.status_code == 200
+    assert list(app_state.backend.runtimes.values()) == [runtime]
 
 
 def test_mutation_requires_cookie_and_exact_origin(app_state):

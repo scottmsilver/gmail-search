@@ -213,7 +213,7 @@ async def test_full_controller_persists_real_postgres_transcript(store,tmp_path)
     budget = registry.create_budget('alice',1000)
     runs,conversations = compose_browser_runs(workers,events,
         connect=lambda:psycopg.connect(target),is_active=lambda owner:owner in active,
-        prepare_input=lambda lease,prompt:backend.prompts.__setitem__(lease.run_id,prompt),
+        prepare_input=lambda lease,prompt,runtime:backend.prompts.__setitem__(lease.run_id,prompt),
         budget_for=lambda owner:budget,poll_seconds=.01)
     conversations.claim('alice','conversation')
     try:

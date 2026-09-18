@@ -19,6 +19,7 @@
   },
   "provider": {
     "anthropic_key": "REPLACE_WITH_ANTHROPIC_KEY",
+    "claude_oauth_token": "REPLACE_WITH_CLAUDE_SETUP_TOKEN_OUTPUT",
     "gemini_key": "REPLACE_WITH_GEMINI_KEY",
     "input_units_per_token": 1,
     "output_units_per_token": 1,

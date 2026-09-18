@@ -39,9 +39,23 @@ def test_event_route_bounds_body_and_wrong_audience(tmp_path):
     other = caps.issue(run.run_id, audience='sql', operations={'query'}).secret
     with TestClient(create_gateway_app(None, events=events)) as client:
         assert client.post('/v1/events', headers={'Authorization':'Bearer '+other}, json={'type':'text'}).status_code == 403
-        result = client.post('/v1/events', headers={'Authorization':'Bearer '+token}, json={'type':'text', 'text':'x'*32768})
+        result = client.post('/v1/events', headers={'Authorization':'Bearer '+token}, json={'type':'text', 'text':'x'*65536})
         assert result.status_code == 413
     assert events.read('alice','conversation',run.run_id) == []
+
+
+def test_event_route_admits_what_the_event_store_admits(tmp_path):
+    """A 40 KiB tool result was refused by the 32 KiB query body limit though
+    both the guest and the store allow 64 KiB; the Claude run died on it."""
+    registry = Registry(tmp_path/'registry', is_active=lambda owner: owner == 'alice')
+    caps = Capabilities(registry)
+    events = Events(caps)
+    run = registry.start_run('alice', 'conversation', request_key='request')
+    token = caps.issue(run.run_id, audience='events', operations={'append'}).secret
+    event = {'type':'text', 'text':'x'*40000}
+    with TestClient(create_gateway_app(None, events=events)) as client:
+        assert client.post('/v1/events', headers={'Authorization':'Bearer '+token}, json=event).status_code == 200
+    assert [row['event'] for row in events.read('alice','conversation',run.run_id)] == [event]
 
 
 @pytest.mark.asyncio

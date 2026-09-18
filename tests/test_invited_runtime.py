@@ -1,5 +1,6 @@
 """Production assembly invariants using synthetic controller state only."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,7 @@ from gmail_search.gateway.full_agent_remote import validate_bootstrap
 from gmail_search.gateway.registry import AccessDenied, Registry
 
 
-def test_envelope_has_full_tool_profile_and_only_run_scoped_authority(tmp_path):
+def _envelope(tmp_path):
     from gmail_search.invited_runtime import envelope_factory
     tmp_path.chmod(0o700)
     registry=Registry(tmp_path/'registry.sqlite',is_active=lambda owner:owner=='alice')
@@ -18,19 +19,37 @@ def test_envelope_has_full_tool_profile_and_only_run_scoped_authority(tmp_path):
     bound=[]
     provider=SimpleNamespace(bind_profile=lambda run,profile:bound.append((run,profile)))
     rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
-    caps=Capabilities(registry)
-    packet=envelope_factory(caps,provider,rates)(lease,'Find my receipts')
-    validate_bootstrap(packet,'Find my receipts')
+    return SimpleNamespace(registry=registry,lease=lease,bound=bound,
+        envelope=envelope_factory(Capabilities(registry),provider,rates))
+
+
+@pytest.mark.parametrize('runtime,profile,client',[
+    ('pi','mail-agent-pi-v1','pi-0.84.4'),('claude','mail-agent-claude-v1','claude-2.1.272')])
+def test_envelope_has_full_tool_profile_and_only_run_scoped_authority(tmp_path,runtime,profile,client):
+    s=_envelope(tmp_path)
+    packet=s.envelope(s.lease,'Find my receipts',runtime)
+    validate_bootstrap(packet,'Find my receipts',runtime)
     value=json.loads(packet[4:])
+    assert value['profile']==profile
     assert value['tool_config']['tool_profile']=='mail-raw-mcp-v3'
     assert set(value['tool_config']['capabilities'])=={'sql','retrieval','artifact','attachment'}
-    assert bound[0][0]==lease.run_id
-    assert bound[0][1].client_profile=='pi-0.84.4'
-    assert bound[0][1].model=='claude-sonnet-4-6'
-    with registry._transaction() as db:
+    assert s.bound[0][0]==s.lease.run_id
+    assert s.bound[0][1].client_profile==client
+    assert s.bound[0][1].model=='claude-sonnet-4-6'
+    with s.registry._transaction() as db:
         rows=db.execute('SELECT run_id,audience FROM capabilities').fetchall()
         assert {row['audience'] for row in rows}=={'sql','retrieval','artifact','attachment','inference','events'}
-        assert {row['run_id'] for row in rows}=={lease.run_id}
+        assert {row['run_id'] for row in rows}=={s.lease.run_id}
+
+
+def test_a_packet_is_refused_under_another_runtime(tmp_path):
+    """A Pi envelope must not boot the Claude runner, nor the reverse."""
+    s=_envelope(tmp_path)
+    packet=s.envelope(s.lease,'Find my receipts','pi')
+    with pytest.raises(AccessDenied):
+        validate_bootstrap(packet,'Find my receipts','claude')
+    with pytest.raises(AccessDenied):
+        s.envelope(s.lease,'Find my receipts','shell')
 
 
 def test_runtime_lock_excludes_second_process_and_releases(tmp_path):
@@ -100,7 +119,7 @@ def assembled(tmp_path,monkeypatch):
         release=SimpleNamespace(store_id='test-store',release_epoch=1),
         worker=SimpleNamespace(host='worker.test',port=22,private_key=tmp_path/'key',known_hosts=tmp_path/'hosts'),
         broker=SimpleNamespace(origin='https://broker.test',bearer='b'*48,signing_secret='h'*48),
-        provider=SimpleNamespace(anthropic_key='a'*40,gemini_key='g'*40,input_units_per_token=1,
+        provider=SimpleNamespace(anthropic_key='a'*40,claude_oauth_token=None,claude_login_file=None,gemini_key='g'*40,input_units_per_token=1,
             output_units_per_token=1,embedding_units_per_token=1,rerank_input_units_per_token=1,
             rerank_output_units_per_token=1,fact_model_tag='facts-v1'))
     for key,value in {'GMAIL_MULTI_TENANT':'1','GMS_PUBLIC_ORIGIN':'https://gms.example.test',
@@ -260,3 +279,33 @@ async def test_gmail_consent_secrets_cannot_reuse_identity_secrets(assembled):
         async with open_runtime(assembled.config):
             pytest.fail('independent credentials required')
     assert assembled.observed=={}
+
+
+def _provider(anthropic_key=None,claude_oauth_token=None,claude_login_file=None):
+    return SimpleNamespace(anthropic_key=anthropic_key,claude_oauth_token=claude_oauth_token,
+                           claude_login_file=claude_login_file)
+
+
+@pytest.mark.parametrize('credentials,expected',[
+    (dict(anthropic_key='k'),{'pi-0.84.4':'api_key','claude-2.1.272':'api_key'}),
+    (dict(claude_oauth_token='t'),{'claude-2.1.272':'oauth'}),
+    (dict(anthropic_key='k',claude_oauth_token='t'),{'pi-0.84.4':'api_key','claude-2.1.272':'oauth'}),
+    (dict(claude_login_file=Path('/home/owner/.claude/.credentials.json')),{'claude-2.1.272':'oauth'}),
+])
+def test_each_runtime_gets_only_a_credential_it_may_use(credentials,expected):
+    """Claude Code prefers the login; Pi never receives it."""
+    from gmail_search.invited_runtime import anthropic_transports
+    routes=anthropic_transports(_provider(**credentials))
+    assert {client:transport._kind for client,transport in routes.items()}==expected
+
+
+def test_a_runtime_without_a_credential_is_refused_before_launch(tmp_path):
+    from gmail_search.invited_runtime import envelope_factory
+    s=_envelope(tmp_path)
+    provider=SimpleNamespace(bind_profile=lambda run,profile:None,
+        transports_by_client={'claude-2.1.272':object()})
+    rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
+    envelope=envelope_factory(Capabilities(s.registry),provider,rates)
+    envelope(s.lease,'Find my receipts','claude')
+    with pytest.raises(AccessDenied):
+        envelope(s.lease,'Find my receipts','pi')

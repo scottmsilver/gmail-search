@@ -52,6 +52,24 @@ def client_for(wire, *, status=200, headers=None, requests=None):
 
 
 @pytest.mark.asyncio
+async def test_a_claude_login_is_sent_as_an_oauth_bearer_not_an_api_key(setup):
+    requests=[]
+    async with client_for(Wire(response_events()),requests=requests) as client:
+        transport=AnthropicHTTPTransport('synthetic-login',kind='oauth',client=client)
+        await collect(service(setup,transport),setup[3])
+    headers=requests[0].headers
+    assert headers['authorization']=='Bearer synthetic-login'
+    assert headers['anthropic-beta']=='oauth-2025-04-20'
+    assert 'x-api-key' not in headers
+    assert 'synthetic-login' not in repr(transport)
+
+
+def test_an_unknown_credential_kind_is_refused():
+    with pytest.raises(ValueError):
+        AnthropicHTTPTransport('synthetic-key',kind='cookie')
+
+
+@pytest.mark.asyncio
 async def test_mock_http_stream_uses_fixed_headers_and_settles_actual_usage(setup):
     frames = response_events(); raw = b''.join(frames).replace(b'\n',b'\r\n')
     wire = Wire([raw[i:i+7] for i in range(0,len(raw),7)])
@@ -144,11 +162,12 @@ async def test_injected_client_must_disable_environment_proxies():
 
 
 @pytest.mark.asyncio
-async def test_standard_optional_usage_and_cumulative_input_settlement(setup):
+@pytest.mark.parametrize('geo',[None,'not_available'])
+async def test_standard_optional_usage_and_cumulative_input_settlement(setup,geo):
     frames=response_events()
     start=json.loads(frames[0].split(b'data: ',1)[1])
     start['message'].update(container=None,stop_details=None)
-    start['message']['usage'].update(cache_creation=None,server_tool_use=None,service_tier='standard',inference_geo=None,output_tokens_details=None)
+    start['message']['usage'].update(cache_creation=None,server_tool_use=None,service_tier='standard',inference_geo=geo,output_tokens_details=None)
     frames[0]=event('message_start',message=start['message'])
     frames[1]=event('content_block_start',index=0,content_block={'type':'text','text':'','citations':None})
     frames[-2]=event('message_delta',delta={'stop_reason':'end_turn','stop_sequence':None,'container':None,'stop_details':None},
@@ -219,3 +238,47 @@ async def test_extra_protocol_and_billing_rejections(setup,mutation):
             await collect(service(setup,AnthropicHTTPTransport('synthetic-key',client=client)),setup[3])
     assert 'private upstream' not in str(error.value)
     assert wire.closed and spend(setup[0])==(0,230)
+
+
+
+def _login(path, token, expires_at):
+    path.write_text(json.dumps({'claudeAiOauth': {'accessToken': token, 'expiresAt': expires_at * 1000,
+                                                  'refreshToken': 'never-read'}}))
+
+
+@pytest.mark.asyncio
+async def test_a_borrowed_login_is_reread_for_every_request_and_never_written(setup, tmp_path):
+    """The owner's Claude Code refreshes the file; each request must see the new token."""
+    from gmail_search.gateway.provider_http import ClaudeLoginFile
+    path = tmp_path / 'credentials.json'
+    _login(path, 'first-token', 2000)
+    source = ClaudeLoginFile(path, clock=lambda: 1000)
+    requests = []
+    async with client_for(Wire(response_events()), requests=requests) as client:
+        transport = AnthropicHTTPTransport(source, kind='oauth', client=client)
+        await collect(service(setup, transport), setup[3])
+    _login(path, 'refreshed-token', 2000)
+    before = path.read_bytes()
+    assert source.read() == 'refreshed-token'
+    assert path.read_bytes() == before
+    assert requests[0].headers['authorization'] == 'Bearer first-token'
+    assert 'first-token' not in repr(transport) and 'token' not in repr(source)
+
+
+@pytest.mark.parametrize('write', [
+    lambda path: _login(path, 'expiring-token', 1030),   # inside the 60 s margin
+    lambda path: path.write_text('{"claudeAiOauth": {}}'),
+    lambda path: None,                                     # no file at all
+])
+def test_a_borrowed_login_that_is_expiring_or_unreadable_is_refused(tmp_path, write):
+    from gmail_search.gateway.provider_http import ClaudeLoginFile, ProviderProtocolError
+    path = tmp_path / 'credentials.json'
+    write(path)
+    with pytest.raises(ProviderProtocolError):
+        ClaudeLoginFile(path, clock=lambda: 1000).read()
+
+
+def test_a_borrowed_login_is_never_sent_as_an_api_key(tmp_path):
+    from gmail_search.gateway.provider_http import ClaudeLoginFile
+    with pytest.raises(ValueError):
+        AnthropicHTTPTransport(ClaudeLoginFile(tmp_path / 'credentials.json'))

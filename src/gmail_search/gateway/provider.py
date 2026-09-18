@@ -103,8 +103,11 @@ class AnthropicRunService:
     def _output_limit(self, body):
         return body['max_tokens']
 
-    def __init__(self, capabilities: Capabilities, transport):
+    def __init__(self, capabilities: Capabilities, transport, *, transports_by_client=None):
+        """`transports_by_client` routes each client profile to its own upstream
+        credential; a profile with no entry is refused rather than defaulted."""
         self.capabilities, self.transport = capabilities, transport
+        self.transports_by_client = transports_by_client
         self.registry = capabilities.registry
         with self.registry._transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS provider_profiles (run_id TEXT PRIMARY KEY, profile TEXT NOT NULL)')
@@ -150,7 +153,7 @@ class AnthropicRunService:
         return usage.input_tokens*profile.input_units_per_token + usage.output_tokens*profile.output_units_per_token
 
     async def _produce(self, token, body, profile, queue):
-        async with self.transport.stream(url=self._endpoint(profile), body=body, follow_redirects=False) as response:
+        async with self._transport_for(profile).stream(url=self._endpoint(profile), body=body, follow_redirects=False) as response:
             if response.status_code != 200:
                 raise AccessDenied()
             total = 0
@@ -164,6 +167,14 @@ class AnthropicRunService:
                 await queue.put(chunk)
             await self._authorize(token)
             return response.usage
+
+    def _transport_for(self, profile):
+        if self.transports_by_client is None:
+            return self.transport
+        transport = self.transports_by_client.get(profile.client_profile)
+        if transport is None:
+            raise AccessDenied()
+        return transport
 
     async def _drive(self, token, lease, request_key, body, profile, units, queue):
         producer = watch = None

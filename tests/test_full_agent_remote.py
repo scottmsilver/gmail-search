@@ -22,7 +22,7 @@ def fixture(tmp_path):
     registry=Registry(directory/'registry.sqlite',is_active=lambda owner:owner=='alice')
     budget=registry.create_budget('alice',1000000)
     lease=registry.start_run('alice','conversation',request_key='first',budget_id=budget,deadline_ttl=120)
-    t=Transport(m);backend=SSHFullAgentBackend(registry,transport=t,envelope_for=lambda lease,prompt:packet())
+    t=Transport(m);backend=SSHFullAgentBackend(registry,transport=t,envelope_for=lambda lease,prompt,runtime:packet())
     return registry,lease,backend,m,b,s,t
 
 
@@ -63,7 +63,7 @@ def test_input_binding_fresh_authorization_and_no_rebind(tmp_path):
 def test_restart_refuses_caps_replay_and_reconciles_remote(tmp_path):
     registry,lease,backend,m,b,s,t=fixture(tmp_path)
     backend.prepare_input(lease,'Actual arbitrary question');backend.launch('1'*32,lease,FULL_LIMITS)
-    other=SSHFullAgentBackend(registry,transport=t,envelope_for=lambda lease,prompt:packet())
+    other=SSHFullAgentBackend(registry,transport=t,envelope_for=lambda lease,prompt,runtime:packet())
     try:
         assert '1'*32 in other.inventory()
         other.stop('1'*32);assert not other.inventory()

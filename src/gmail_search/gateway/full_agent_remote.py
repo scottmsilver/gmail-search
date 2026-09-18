@@ -11,18 +11,21 @@ from .registry import AccessDenied,RunLease
 from .worker import WorkerLimits
 
 FULL_LIMITS=WorkerLimits(vcpus=1,memory_mib=1024,pids=128,disk_bytes=1024**3,output_bytes=8*1024**2,wall_seconds=180)
+# The runtime a browser may choose, and the guest profile each one boots.
+GUEST_PROFILES={'pi':'mail-agent-pi-v1','claude':'mail-agent-claude-v1'}
 
 
 def context(lease):
     result={key:getattr(lease,key) for key in rpc.CONTEXT};rpc.context_digest(result);return result
 
 
-def validate_bootstrap(packet,prompt):
+def validate_bootstrap(packet,prompt,runtime='pi'):
+    if runtime not in GUEST_PROFILES:raise AccessDenied()
     if type(packet) is not bytes or not 4<len(packet)<=rpc.MAX_INPUT or int.from_bytes(packet[:4],'big')!=len(packet)-4:raise AccessDenied()
     try:
         value=json.loads(packet[4:],object_pairs_hook=rpc.pairs)
         if (type(value) is not dict or set(value)!={'version','profile','prompt','tool_config','inference_capability','events_capability'} or
-            type(value['version']) is not int or value['version']!=1 or value['profile']!='mail-agent-pi-v1' or value['prompt']!=prompt):raise ValueError()
+            type(value['version']) is not int or value['version']!=1 or value['profile']!=GUEST_PROFILES[runtime] or value['prompt']!=prompt):raise ValueError()
         if type(prompt) is not str or not prompt.strip() or '\x00' in prompt or len(prompt.encode())>16384:raise ValueError()
         cfg=value['tool_config']
         if type(cfg) is not dict or set(cfg)!={'version','tool_profile','capabilities'} or type(cfg['version']) is not int or cfg['version']!=3 or cfg['tool_profile']!='mail-raw-mcp-v3':raise ValueError()
@@ -65,9 +68,9 @@ class SSHFullAgentBackend:
             try:self._active(entry['lease'])
             except AccessDenied:self._inputs.pop(run_id,None)
 
-    def prepare_input(self,lease,prompt):
+    def prepare_input(self,lease,prompt,runtime='pi'):
         self._active(lease)
-        payload=self.envelope_for(lease,prompt);validate_bootstrap(payload,prompt)
+        payload=self.envelope_for(lease,prompt,runtime);validate_bootstrap(payload,prompt,runtime)
         self._active(lease)
         with self._lock:
             if self._closed:raise AccessDenied()

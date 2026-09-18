@@ -29,13 +29,13 @@ from .gateway.data_admission import DataAdmission
 from .gateway.database import QueryGateway, QueryLimits, ReaderCredential, ReaderRegistry
 from .gateway.events import Events
 from .gateway.facts_service import FactsOwnerContext, RunFactsService
-from .gateway.full_agent_remote import FULL_LIMITS, SSHFullAgentBackend, SSHTransport, validate_bootstrap
+from .gateway.full_agent_remote import FULL_LIMITS, GUEST_PROFILES, SSHFullAgentBackend, SSHTransport, validate_bootstrap
 from .gateway.http import create_gateway_app
 from .gateway.maintenance import GateReader, ReleaseIdentity
 from .gateway.metadata_service import RunMetadataService
 from .gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from .gateway.provider import AnthropicRunService, ProviderProfile, _finish
-from .gateway.provider_http import AnthropicHTTPTransport
+from .gateway.provider_http import AnthropicHTTPTransport, ClaudeLoginFile
 from .gateway.provision_writer import verify_writer_access
 from .gateway.registry import AccessDenied, Registry
 from .gateway.retrieval import RunRetrievalService
@@ -101,12 +101,37 @@ def verify_identities(identities,owners):
                 raise AccessDenied()
 
 
+# Each guest runtime speaks to the gateway through its own qualified CLI profile.
+CLIENT_PROFILES={'pi':'pi-0.84.4','claude':'claude-2.1.272'}
+# Guests are told this cap; the gateway refuses anything above it.
+OUTPUT_TOKEN_LIMIT=4096
+
+
+def anthropic_transports(provider):
+    """One upstream credential per client profile; a runtime without one is refused.
+
+    Claude Code prefers the subscription login and falls back to the API key.
+    Pi never uses the login: Anthropic accepts it only from Claude Code.
+    """
+    key=AnthropicHTTPTransport(provider.anthropic_key) if provider.anthropic_key else None
+    login_source=provider.claude_oauth_token or (
+        ClaudeLoginFile(provider.claude_login_file) if provider.claude_login_file else None)
+    login=AnthropicHTTPTransport(login_source,kind='oauth') if login_source else None
+    routes={CLIENT_PROFILES['pi']:key,CLIENT_PROFILES['claude']:login or key}
+    return {client:transport for client,transport in routes.items() if transport is not None}
+
+
 def envelope_factory(capabilities,provider,rates):
-    profile=ProviderProfile(model='claude-sonnet-4-6',input_token_limit=200000,
-        output_token_limit=4096,input_units_per_token=rates.input_units_per_token,
-        output_units_per_token=rates.output_units_per_token,client_profile='pi-0.84.4',effort='high')
-    def envelope(lease,prompt):
-        provider.bind_profile(lease.run_id,profile)
+    profiles={runtime:ProviderProfile(model='claude-sonnet-4-6',input_token_limit=200000,
+        output_token_limit=OUTPUT_TOKEN_LIMIT,input_units_per_token=rates.input_units_per_token,
+        output_units_per_token=rates.output_units_per_token,client_profile=client,effort='high')
+        for runtime,client in CLIENT_PROFILES.items()}
+    routed=getattr(provider,'transports_by_client',None)
+    def envelope(lease,prompt,runtime='pi'):
+        # Refuse before launch, not on the guest's first inference call.
+        if runtime not in profiles or (routed is not None and CLIENT_PROFILES[runtime] not in routed):
+            raise AccessDenied()
+        provider.bind_profile(lease.run_id,profiles[runtime])
         tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,ttl=180).secret
             for audience,operations in (
                 ('sql',{'schema','query'}),
@@ -114,13 +139,13 @@ def envelope_factory(capabilities,provider,rates):
                 ('attachment',{'meta','text','raw'}),
                 ('artifact',{'artifact.commit','artifact.read'}),
                 ('inference',{'generate'}),('events',{'append'}))}
-        value={'version':1,'profile':'mail-agent-pi-v1','prompt':prompt,
+        value={'version':1,'profile':GUEST_PROFILES[runtime],'prompt':prompt,
             'tool_config':{'version':3,'tool_profile':'mail-raw-mcp-v3',
                 'capabilities':{key:tokens[key] for key in ('sql','retrieval','artifact','attachment')}},
             'inference_capability':tokens['inference'],'events_capability':tokens['events']}
         raw=json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         packet=len(raw).to_bytes(4,'big')+raw
-        validate_bootstrap(packet,prompt)
+        validate_bootstrap(packet,prompt,runtime)
         return packet
     return envelope
 
@@ -210,8 +235,9 @@ async def open_runtime(config):
         broker=BoundGmailBroker(config.broker.origin,bearer=config.broker.bearer,
             signing_secret=config.broker.signing_secret,client=broker_http)
         consent=GmailConsent(identities)
-        inference_transport=AnthropicHTTPTransport(config.provider.anthropic_key)
-        stack.push_async_callback(_close_async,inference_transport)
+        inference_transports=anthropic_transports(config.provider)
+        for transport in {id(t):t for t in inference_transports.values()}.values():
+            stack.push_async_callback(_close_async,transport)
         embedding_transport=GeminiEmbeddingHTTPTransport(config.provider.gemini_key)
         stack.push_async_callback(_close_async,embedding_transport)
         rerank_transport=GeminiRerankerHTTPTransport(config.provider.gemini_key)
@@ -222,7 +248,7 @@ async def open_runtime(config):
         reranker=GeminiThreadReranker(registry,rerank_transport,
             profile=GeminiRerankerProfile(config.provider.rerank_input_units_per_token,
                 config.provider.rerank_output_units_per_token,'full-model-ceilings-v1'),admission=provider_admission)
-        provider=AnthropicRunService(caps,inference_transport)
+        provider=AnthropicRunService(caps,None,transports_by_client=inference_transports)
         attachment_reader=OwnerAttachmentReader(gateway)
         locator=QueryAttachmentLocator(gateway,config.attachment_root)
         source=OwnerAttachmentSource(config.attachment_root,locate=locator.locate_raw)

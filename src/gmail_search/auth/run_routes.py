@@ -20,6 +20,15 @@ from .public import SESSION_COOKIE
 from .result_routes import _ResultRoute
 
 
+# The browser's deep-backend names, mapped to the guest runtime each one boots.
+BACKENDS = {None: 'pi', 'pi': 'pi', 'claude_code': 'claude'}
+
+
+def _model_hint(value):
+    """The picker always sends a model; the gateway pins its own, so accept and drop it."""
+    return value is None or (type(value) is str and 0 < len(value) <= 128)
+
+
 def _frame(kind, payload):
     return f'event: {kind}\ndata: '+json.dumps(payload,ensure_ascii=False)+'\n\n'
 
@@ -143,8 +152,9 @@ def create_run_router(identities, runs, *, origin, claim_conversation):
         account = await session(request)
         value = await body(request,account)
         if (set(value)-{'question','conversation_id','backend','model'}
-                or value.get('backend') not in (None,'pi') or value.get('model') is not None):
+                or value.get('backend') not in BACKENDS or not _model_hint(value.get('model'))):
             raise HTTPException(400,'Unsupported run parameters')
+        runtime = BACKENDS[value.get('backend')]
         conversation = _conversation(value.get('conversation_id'))
         question = value.get('question')
         try:
@@ -157,7 +167,7 @@ def create_run_router(identities, runs, *, origin, claim_conversation):
         if claimed is not True:
             raise PermissionError()
         await recheck(request,account)
-        run = await runs.start(account.owner_id,conversation,question)
+        run = await runs.start(account.owner_id,conversation,question,runtime)
         try:
             initial = await snapshot(request,account,conversation,run,0)
         except BaseException:

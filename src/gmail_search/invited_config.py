@@ -70,7 +70,10 @@ class BrokerConfig:
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    anthropic_key: str = field(repr=False)
+    # At least one Anthropic credential. The OAuth token (`claude setup-token`)
+    # serves only Claude Code runs; Pi runs need the API key.
+    anthropic_key: str | None = field(repr=False)
+    claude_oauth_token: str | None = field(repr=False)
     gemini_key: str = field(repr=False)
     input_units_per_token: int
     output_units_per_token: int
@@ -78,6 +81,8 @@ class ProviderConfig:
     rerank_input_units_per_token: int
     rerank_output_units_per_token: int
     fact_model_tag: str
+    # Or borrow the host's Claude Code login read-only (never refreshed here).
+    claude_login_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -297,7 +302,6 @@ def _provider_secret(value: Any) -> str:
 
 def _provider(value: Any) -> ProviderConfig:
     fields = {
-        "anthropic_key",
         "gemini_key",
         "input_units_per_token",
         "output_units_per_token",
@@ -306,8 +310,16 @@ def _provider(value: Any) -> ProviderConfig:
         "rerank_output_units_per_token",
         "fact_model_tag",
     }
-    value = _object(value, fields)
-    anthropic_key = _provider_secret(value["anthropic_key"])
+    credentials = ({"anthropic_key", "claude_oauth_token", "claude_login_file"} & set(value)
+                   if type(value) is dict else set())
+    if not credentials or {"claude_oauth_token", "claude_login_file"} <= credentials:
+        raise _invalid()
+    value = _object(value, fields | credentials)
+    anthropic_key = _provider_secret(value["anthropic_key"]) if "anthropic_key" in value else None
+    claude_oauth_token = (_provider_secret(value["claude_oauth_token"])
+                          if "claude_oauth_token" in value else None)
+    claude_login_file = (_absolute_path(value["claude_login_file"])
+                         if "claude_login_file" in value else None)
     gemini_key = _provider_secret(value["gemini_key"])
     input_rate = _positive_int(value["input_units_per_token"], maximum=10**8)
     output_rate = _positive_int(value["output_units_per_token"], maximum=10**8)
@@ -338,6 +350,8 @@ def _provider(value: Any) -> ProviderConfig:
     )
     return ProviderConfig(
         anthropic_key=anthropic_key,
+        claude_oauth_token=claude_oauth_token,
+        claude_login_file=claude_login_file,
         gemini_key=gemini_key,
         input_units_per_token=input_rate,
         output_units_per_token=output_rate,

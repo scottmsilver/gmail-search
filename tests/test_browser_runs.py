@@ -19,6 +19,7 @@ class Backend:
         self.complete = True
         self.stop_fails = False
         self.prompts = {}
+        self.runtimes = {}
 
     def launch(self, handle, lease, limits):
         self.handles.add(handle)
@@ -50,8 +51,9 @@ def bundle(tmp_path):
     workers = WorkerController(registry,backend,limits=WorkerLimits(wall_seconds=1800))
     budgets = {owner:registry.create_budget(owner,1000) for owner in ('alice','bob')}
     saved = []
-    def prepare(lease,prompt):
+    def prepare(lease,prompt,runtime):
         backend.prompts[lease.run_id] = prompt
+        backend.runtimes[lease.run_id] = runtime
     def persist(*args):
         saved.append(args)
         return True

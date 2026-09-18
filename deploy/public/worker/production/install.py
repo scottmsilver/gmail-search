@@ -68,8 +68,10 @@ def main():
     for name in ('firecracker','jailer'):
         install(assets/name,Path('/usr/local/bin')/name,0o755)
     install(enrollment,Path('/etc/gmail-worker/production.json'),0o600)
-    install(source/'production/gmail-full-agent-manager.service',
-            Path('/etc/systemd/system/gmail-full-agent-manager.service'),0o644)
+    for unit in ('gmail-full-agent-manager.service','gmail-worker-clock-sync.service'):
+        install(source/'production'/unit,Path('/etc/systemd/system')/unit,0o644)
+    # The worker cannot reach NTP; lease deadlines depend on this clock.
+    install(source/'production/phc_clock_sync.py',target/'phc_clock_sync.py',0o644)
     # SSH policy is staged for explicit effective-policy validation before reload.
     install(source/'production/sshd-worker.conf',Path('/etc/gmail-worker/sshd-worker.conf.pending'),0o644)
     subprocess.run(['/usr/bin/python3','-I',str(target/'production_worker_profile.py'),'--check'],check=True)

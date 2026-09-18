@@ -9,6 +9,10 @@ from guest_run_bootstrap import _pairs
 from guest_tool_config import RAW_PROFILE, parse_tool_config
 
 PROFILE='mail-agent-pi-v1'
+CLAUDE_PROFILE='mail-agent-claude-v1'
+# Closed set: which agent runs is chosen by the trusted controller, never by
+# the guest or the model. Anything else is refused before a runner starts.
+PROFILES=frozenset({PROFILE,CLAUDE_PROFILE})
 MAX_FRAME=32768
 MAX_PROMPT=16384
 _TOKEN=re.compile(r'[a-f0-9]{64}\Z',re.ASCII)
@@ -18,7 +22,7 @@ def validate_config(value):
     try:
         if (type(value) is not dict or set(value)!={'version','profile','prompt','tool_config',
                 'inference_capability','events_capability'} or type(value['version']) is not int
-                or value['version']!=1 or value['profile']!=PROFILE):
+                or value['version']!=1 or value['profile'] not in PROFILES):
             raise ValueError()
         prompt=value['prompt']
         if (type(prompt) is not str or not prompt.strip() or '\x00' in prompt

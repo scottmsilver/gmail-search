@@ -1,0 +1,20 @@
+[Unit]
+Description=Step the worker wall clock to the hypervisor's KVM PTP clock
+# timesyncd cannot reach a server from this VM; never let two daemons step the clock.
+Conflicts=systemd-timesyncd.service
+Before=gmail-full-agent-manager.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/modprobe ptp_kvm
+ExecStart=/usr/bin/python3 -I /opt/gmail-worker/phc_clock_sync.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_TIME CAP_SYS_MODULE
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

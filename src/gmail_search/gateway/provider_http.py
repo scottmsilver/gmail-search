@@ -11,9 +11,12 @@ closed pending qualification. This is intentionally stricter than SDK forward
 compatibility. Pinned Pi/native Claude single-tool exchanges passed a synthetic upstream;
 complete sessions and live provider behavior remain unqualified.
 """
+import asyncio
 from contextlib import asynccontextmanager
 import json
+from pathlib import Path
 import re
+import time
 
 import httpx
 
@@ -77,7 +80,9 @@ def _usage(value, *, start):
                 raise ProviderProtocolError()
         elif key=='service_tier' and number not in (None,'standard'):
             raise ProviderProtocolError()
-        elif key=='inference_geo' and number is not None:
+        # Informational, not billed. Upstream began sending 'not_available'
+        # (2026-09-18); a region name is the other documented shape.
+        elif key=='inference_geo' and number is not None and not 0<len(_text(number))<=64:
             raise ProviderProtocolError()
     return value
 
@@ -260,10 +265,64 @@ class _SSE:
             raise ProviderProtocolError() from None
 
 
-class AnthropicHTTPTransport:
-    def __init__(self,api_key,*,client=None,max_frame_bytes=262144,max_body_bytes=16*1024*1024):
-        if type(api_key) is not str or not 1<=len(api_key)<=512 or any(not 33<=ord(char)<=126 for char in api_key):
+# How each upstream credential is presented. An OAuth token is a Claude
+# subscription login (`claude setup-token`); Anthropic accepts it only from
+# Claude Code, so callers route only the Claude runtime to it.
+_CREDENTIAL_HEADERS={
+    'api_key':lambda secret:{'x-api-key':secret},
+    'oauth':lambda secret:{'authorization':'Bearer '+secret,'anthropic-beta':'oauth-2025-04-20'},
+}
+
+
+def _printable_secret(value):
+    return type(value) is str and 1<=len(value)<=512 and all(33<=ord(char)<=126 for char in value)
+
+
+class ClaudeLoginFile:
+    """Borrow the host's Claude Code login, read-only.
+
+    The file is re-read for every request and never refreshed or written:
+    refreshing rotates the refresh token, which would sign the owner's own
+    Claude Code out. The owner's sessions keep it fresh; a token near expiry
+    is refused rather than used.
+    """
+    EXPIRY_MARGIN_SECONDS=60
+    MAX_BYTES=1024*1024
+
+    def __init__(self,path,*,clock=time.time):
+        path=Path(path)
+        if not path.is_absolute():
             raise ValueError('Invalid provider credential configuration.')
+        self._path,self._clock=path,clock
+
+    def __repr__(self):
+        return f'ClaudeLoginFile({str(self._path)!r})'
+
+    def read(self):
+        try:
+            with self._path.open('rb') as handle:
+                raw=handle.read(self.MAX_BYTES+1)
+            if len(raw)>self.MAX_BYTES:
+                raise ValueError()
+            login=json.loads(raw)['claudeAiOauth']
+            token,expires=login['accessToken'],login['expiresAt']
+            if not _printable_secret(token) or type(expires) not in (int,float):
+                raise ValueError()
+        except (OSError,ValueError,KeyError,TypeError):
+            raise ProviderProtocolError() from None
+        if expires/1000-self.EXPIRY_MARGIN_SECONDS<=self._clock():
+            raise ProviderProtocolError()
+        return token
+
+
+class AnthropicHTTPTransport:
+    def __init__(self,api_key,*,kind='api_key',client=None,max_frame_bytes=262144,max_body_bytes=16*1024*1024):
+        borrowed=isinstance(api_key,ClaudeLoginFile)
+        if not (_printable_secret(api_key) or (borrowed and kind=='oauth')):
+            raise ValueError('Invalid provider credential configuration.')
+        if kind not in _CREDENTIAL_HEADERS:
+            raise ValueError('Invalid provider credential configuration.')
+        self._kind=kind
         if any(type(n) is not int for n in (max_frame_bytes,max_body_bytes)) or not 128<=max_frame_bytes<=1024*1024 or not max_frame_bytes<=max_body_bytes<=64*1024*1024:
             raise ValueError('Invalid provider response limits.')
         if client is not None and (not isinstance(client,httpx.AsyncClient) or client.trust_env):
@@ -285,8 +344,9 @@ class AnthropicHTTPTransport:
         encoded=json.dumps(body,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         if len(encoded)>MAX_REQUEST_BYTES:
             raise ValueError('Provider request exceeds configured limits.')
+        secret=await asyncio.to_thread(self._key.read) if isinstance(self._key,ClaudeLoginFile) else self._key
         request=httpx.Request('POST',_ENDPOINT,content=encoded,headers={
-            'x-api-key':self._key,'anthropic-version':'2023-06-01','content-type':'application/json',
+            **_CREDENTIAL_HEADERS[self._kind](secret),'anthropic-version':'2023-06-01','content-type':'application/json',
             'accept':'text/event-stream','accept-encoding':'identity',
         },extensions={'timeout':httpx.Timeout(connect=5,read=30,write=10,pool=5).as_dict()})
         response=None

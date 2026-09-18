@@ -28,7 +28,7 @@ CGROUP = Path('/sys/fs/cgroup/gmail-worker')
 MODULE = Path('/opt/gmail-worker/firecracker_backend.py')
 ATTACHMENT_PIN = '89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068'
 # Separately built full-agent image; historical pins remain unchanged.
-AGENT_FULL_PIN = '968d41e5875b18044282901c6848f1a257833f2f875ec4ac2cddf83bf29da703'
+AGENT_FULL_PIN = '2b16ee2db771f49b635d3a836cb8090f321beff2483454556f184c0bb891e062'
 AGENT_PI_MCP_PIN = '478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc'
 AGENT_MCP_PIN = '54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba'
 AGENT_TOOLS_PIN = '4b981cd6a2e1eb2f28acad2d02ac6c365b4ef48b03345eb098578b9a1dd71402'
@@ -451,7 +451,7 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
                                    b'/usr/bin/ip link set lo up; /usr/bin/python3 -I /tmp/runtime/' +
                                    {'agent_tools': b'guest-mail-tools-smoke.py\n', 'agent_mcp': b'guest-mail-mcp-smoke.py\n',
                                     'agent_pi_mcp': b'guest-pi-mail-mcp-smoke.py\n',
-                                    'agent_full': b'guest_agent_pi.py\n',
+                                    'agent_full': b'guest_agent.py\n',
                                     'agent': b'guest-agent-smoke.py\n'}[profile])
                     else:
                         command = b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; echo GMAIL_BACKEND_SYNTHETIC_HELLO; cat /proc/net/dev; cat /proc/mounts\n'

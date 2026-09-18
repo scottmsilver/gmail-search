@@ -17,6 +17,8 @@ from .maintenance import require_ready_in
 from .registry import AccessDenied
 
 _TERMINAL=frozenset(('completed','failed','cancelled'))
+# Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
+RUNTIMES=frozenset(('pi','claude'))
 
 
 def _conversation(value):
@@ -82,7 +84,7 @@ class BrowserRuns:
             raise
         return lease
 
-    async def _admit(self,owner,conversation,question):
+    async def _admit(self,owner,conversation,question,runtime):
         lease=await asyncio.to_thread(self._open,owner,conversation)
         self._runs.add(lease.run_id)
         if self._closed:
@@ -90,7 +92,7 @@ class BrowserRuns:
             await _settled_call(self._state,lease.run_id,'cancelled')
             raise AccessDenied()
         entered=asyncio.Event()
-        task=asyncio.create_task(self._drive(lease,question,entered))
+        task=asyncio.create_task(self._drive(lease,question,entered,runtime))
         self._tasks[lease.run_id]=task
         def done(finished):
             self._tasks.pop(lease.run_id,None)
@@ -101,12 +103,13 @@ class BrowserRuns:
         await entered.wait()
         return lease.run_id
 
-    async def start(self,owner,conversation,question):
+    async def start(self,owner,conversation,question,runtime='pi'):
         if self._closed:raise AccessDenied()
+        if runtime not in RUNTIMES:raise ValueError('Unsupported agent runtime')
         if (type(question) is not str or not question.strip() or '\x00' in question
                 or len(question.encode('utf-8'))>16384):
             raise ValueError('Question must contain at most 16 KiB of text')
-        admission=asyncio.create_task(self._admit(owner,conversation,question))
+        admission=asyncio.create_task(self._admit(owner,conversation,question,runtime))
         self._admissions.add(admission)
         try:
             interrupted=await _wait(admission)
@@ -187,12 +190,12 @@ class BrowserRuns:
             db.execute('UPDATE browser_runs SET state=?,answer=? WHERE run_id=?',(desired,'',run_id))
             return desired
 
-    async def _drive(self,lease,question,entered):
+    async def _drive(self,lease,question,entered,runtime='pi'):
         desired='failed'
         answer=''
         try:
             entered.set()
-            await _settled_call(self.prepare_input,lease,question)
+            await _settled_call(self.prepare_input,lease,question,runtime)
             await self._worker(self.workers.start,lease.run_id)
             await _settled_call(self._state,lease.run_id,'running')
             cursor,heartbeat=0,time.monotonic()
