@@ -110,6 +110,57 @@ def fixed_config(limits, *, profile='shell'):
 
 
 
+def prepare_jail(jail, config):
+    """Create the jail root and the VMM's config so the jailed VMM can read them.
+
+    The VMM runs as uid 65534 once the jailer drops privileges, and the manager
+    unit runs under UMask=0077: mkdir(mode=0o755) lands as 0700 and write_text()
+    as 0600, both root-only, and Firecracker panicked reading its own config
+    ("Unable to open or read from the configuration file: Permission denied").
+    mkdir and write_text only request a mode; chmod sets it. The config holds
+    paths and machine limits, no secrets.
+    """
+    jail.mkdir(parents=True, mode=0o755)
+    jail.chmod(0o755)
+    path = jail/'config.json'
+    path.write_text(json.dumps(config))
+    path.chmod(0o644)
+    return path
+
+
+def vmm_exit_report(child, output):
+    """Why the VMM died, or None while it is alive.
+
+    A VMM that dies early becomes a zombie of this subreaper. Its /proc entry
+    persists, still named `firecracker`, reporting Seccomp 0 -- so a readiness
+    loop that only reads /proc spent its whole window polling a corpse and
+    blamed seccomp. Reap it and report its exit status and its own log instead.
+    """
+    try:
+        pid, status = os.waitpid(child, os.WNOHANG)
+    except ChildProcessError:
+        return None
+    if pid == 0:
+        return None
+    os.set_blocking(output.fileno(), False)
+    log = (output.read() or b'').decode(errors='replace')[-2000:].strip()
+    return f'VMM exited before readiness (exit code {os.waitstatus_to_exitcode(status)}): {log}'
+
+
+def finalize_stopped_state(path):
+    """Mark a torn-down run stopped without erasing why it failed.
+
+    `supervise()` records {'status': 'failed', 'error': ...}; teardown used to
+    write {'status': 'stopped'} over it unconditionally, so a failed guest was
+    indistinguishable from a clean exit. Production discards guest serial output
+    by design, which left no record of the failure at all.
+    """
+    state = read_json(path/'state.json') if (path/'state.json').exists() else {}
+    if state.get('status') == 'failed':
+        return
+    atomic_json(path/'state.json', {'status': 'stopped'})
+
+
 class FirecrackerBackend:
     namespace = 'synthetic-firecracker'
     profile = 'shell'
@@ -189,20 +240,6 @@ class FirecrackerBackend:
         if CGROUP.exists():
             handles.update(checked_handle(p.name) for p in CGROUP.iterdir() if p.is_dir())
         return handles
-
-def finalize_stopped_state(path):
-    """Mark a torn-down run stopped without erasing why it failed.
-
-    `supervise()` records {'status': 'failed', 'error': ...}; teardown used to
-    write {'status': 'stopped'} over it unconditionally, so a failed guest was
-    indistinguishable from a clean exit. Production discards guest serial output
-    by design, which left no record of the failure at all.
-    """
-    state = read_json(path/'state.json') if (path/'state.json').exists() else {}
-    if state.get('status') == 'failed':
-        return
-    atomic_json(path/'state.json', {'status': 'stopped'})
-
 
     def stop(self, handle):
         checked_handle(handle)
@@ -322,7 +359,8 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
         if (path/'stop.json').exists():
             raise RuntimeError('Cancelled before launch')
         jail = JAILS/handle/'root'
-        jail.mkdir(parents=True, mode=0o755)
+        # Before any image is linked in: the jail must exist, with modes the VMM can read.
+        prepare_jail(jail, fixed_config(limits, profile=profile))
         names = ['vmlinux', 'rootfs.squashfs']
         if profile in ('agent', 'attachment', 'agent_tools', 'agent_mcp', 'agent_pi_mcp', 'agent_full'):
             filename, pin = {'attachment': ('attachment.squashfs', ATTACHMENT_PIN),
@@ -339,7 +377,6 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
             if (ROOT/'images'/name).stat().st_size > limits['disk_bytes']:
                 raise RuntimeError('Fixed image exceeds disk limit')
             os.link(ROOT/'images'/name, jail/name)
-        (jail/'config.json').write_text(json.dumps(fixed_config(limits, profile=profile)))
         subprocess.run(['/usr/sbin/ip', 'netns', 'add', 'gms-' + handle], check=True, timeout=5)
         if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
             raise RuntimeError('subreaper unavailable')
@@ -357,6 +394,9 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
         # /proc diagnostics describe the real VMM, not the exited jailer parent.
         ready_by = time.monotonic() + 5
         while True:
+            died = vmm_exit_report(child, proc.stdout)
+            if died:
+                raise RuntimeError(died)
             status = Path(f'/proc/{child}/status').read_text()
             if re.search(r'^Seccomp:\s+2$', status, re.MULTILINE):
                 break

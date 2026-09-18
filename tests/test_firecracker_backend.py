@@ -119,3 +119,71 @@ def test_stop_still_marks_a_clean_run_stopped(tmp_path):
     backend.atomic_json(path / 'state.json', {'status': 'running', 'pid': 1})
     backend.finalize_stopped_state(path)
     assert backend.read_json(path / 'state.json') == {'status': 'stopped'}
+
+
+@pytest.mark.parametrize('cls_name', [n for n in dir(backend)
+                                      if isinstance(getattr(backend, n), type)
+                                      and issubclass(getattr(backend, n), backend.FirecrackerBackend)])
+def test_every_backend_can_stop(cls_name):
+    """Teardown is a class method, not a module function.
+
+    The change that added finalize_stopped_state() put it at column 0 directly
+    above `def stop`, which closed the class: stop() became a nested function
+    and every backend silently lost it. The worker could then neither cancel nor
+    reap a guest, and the manager crashed at startup trying to reap one. The
+    helper's own tests passed throughout, because they never touched stop().
+    """
+    assert callable(getattr(getattr(backend, cls_name), 'stop', None)), f'{cls_name} has no stop()'
+
+
+# ── a VMM that cannot read its own config ────────────────────────────────────
+
+def test_the_jail_is_readable_by_the_vmm_under_a_restrictive_umask(tmp_path):
+    """The VMM runs as uid 65534 once the jailer drops privileges, and the
+    manager unit runs under UMask=0077. `mkdir(mode=0o755)` therefore landed as
+    0700 and `write_text()` as 0600 -- both root-only -- and every guest died at
+    once: "Firecracker panicked ... Unable to open or read from the
+    configuration file: Permission denied". Proven by running the same launch
+    under umask 022 (boots, seccomp filter in one second) and 077 (panics).
+    """
+    import os
+    import stat
+
+    previous = os.umask(0o077)
+    try:
+        config = backend.prepare_jail(tmp_path / 'jail', {'machine-config': {'vcpu_count': 1}})
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / 'jail').stat().st_mode) == 0o755
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert '"vcpu_count": 1' in config.read_text()
+
+
+def test_a_vmm_that_dies_early_is_reported_as_dead_not_as_unfiltered():
+    """An early-dying VMM is a zombie of this subreaper. Its /proc entry persists,
+    still named `firecracker`, with Seccomp 0 -- so the readiness loop spent its
+    whole window reading a corpse and blamed seccomp. It must say the VMM died,
+    with its exit status and its own last words."""
+    import subprocess
+    import sys
+    import time
+
+    child = subprocess.Popen([sys.executable, '-c', "print('Firecracker panicked: nope'); raise SystemExit(3)"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    report = None
+    for _ in range(100):
+        report = backend.vmm_exit_report(child.pid, child.stdout)
+        if report:
+            break
+        time.sleep(0.02)
+    assert report and 'exit code 3' in report and 'Firecracker panicked: nope' in report, report
+
+
+def test_a_live_vmm_is_not_reported_as_dead():
+    import subprocess
+
+    child = subprocess.Popen(['sleep', '5'], stdout=subprocess.PIPE)
+    try:
+        assert backend.vmm_exit_report(child.pid, child.stdout) is None
+    finally:
+        child.kill(); child.wait()
