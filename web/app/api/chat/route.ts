@@ -10,6 +10,7 @@ import { ChatLogger } from "@/lib/chatLog";
 import { authenticatedCaller, unauthenticated, privateHeaders } from "@/lib/requestSecurity";
 
 import { rejectUnsafeOrigin, backendOriginHeaders } from "@/lib/originSecurity";
+import { servedChoice } from "@/lib/deepModels";
 
 export const runtime = "nodejs";
 export const maxDuration = 1800;
@@ -387,7 +388,8 @@ async function handlePOST(req: NextRequest) {
     messages?: UIMessage[]; model?: string; battle?: boolean;
     deep_backend?: DeepBackend; conversation_id?: string;
   };
-  if (restricted && body.battle) return Response.json({error: "Battle mode is unavailable on the public app"}, {status: 400});
+  const served = caller.deepModels;
+  if ((restricted || served) && body.battle) return Response.json({error: "Battle mode is unavailable on the public app"}, {status: 400});
   const messages = body.messages;
   if (!Array.isArray(messages) || !messages.length) {
     return Response.json({error: "messages required"}, {status: 400});
@@ -398,10 +400,12 @@ async function handlePOST(req: NextRequest) {
   const question = lastUserText(messages);
   if (!question.trim()) return Response.json({error: "question required"}, {status: 400});
   if (isPublicMode() && (question.length > 16000 || messages.length > 100)) return Response.json({error: "Chat request too large"}, {status: 413});
-  const backend: DeepBackend = restricted ? "pi" : ["claude_code", "pi"].includes(body.deep_backend ?? "")
+  // The server-reported served table wins: its choice is what actually runs.
+  const servedPick = served && servedChoice(served, body.deep_backend, body.model);
+  const backend: DeepBackend = servedPick ? servedPick.backend : restricted ? "pi" : ["claude_code", "pi"].includes(body.deep_backend ?? "")
     ? body.deep_backend! : "pi";
   const models = availableModelsFor(backend);
-  const model = restricted ? undefined : backend === "pi" ? piModelForRequest(body.model)
+  const model = servedPick ? servedPick.model : restricted ? undefined : backend === "pi" ? piModelForRequest(body.model)
     : models.includes(body.model ?? "") ? body.model : models[0];
   const logger = new ChatLogger(undefined, ownerId);
   const conversationId = body.conversation_id || null;

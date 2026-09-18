@@ -108,15 +108,39 @@ def test_invalid_start_never_launches(app_state,body):
     assert not app_state.backend.prompts
 
 
-@pytest.mark.parametrize('backend,runtime',[(None,'pi'),('pi','pi'),('claude_code','claude')])
-def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,runtime):
-    """The picker's model name is accepted and dropped: the gateway pins its own."""
-    body = {'question':'hello','conversation_id':'conversation','model':'sonnet'}
-    if backend is not None:
-        body['backend'] = backend
+@pytest.mark.parametrize('backend,model,runtime',[
+    (None,None,'pi_gemini'),('pi','google/gemini-3.8-flash','pi_gemini'),
+    ('pi','openrouter/google/gemini-3.8-flash','pi_gemini'),
+    ('claude_code',None,'claude'),('claude_code','sonnet','claude')])
+def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,model,runtime):
+    body = {'question':'hello','conversation_id':'conversation'}
+    for key,value in (('backend',backend),('model',model)):
+        if value is not None:
+            body[key] = value
     response = app_state.client.post('/api/agent/analyze',headers=headers(app_state),json=body)
     assert response.status_code == 200
     assert list(app_state.backend.runtimes.values()) == [runtime]
+
+
+@pytest.mark.parametrize('backend,model',[
+    ('pi','openrouter/meta/muse-spark-1.3'),('pi','anthropic/claude-opus-5'),
+    ('claude_code','opus'),('claude_code','haiku'),('shell',None)])
+def test_a_model_without_a_gateway_route_is_refused_not_substituted(app_state,backend,model):
+    """The gateway pins Claude Code to Sonnet 4.6; running Sonnet for an 'opus' pick would lie."""
+    body = {'question':'hello','conversation_id':'conversation','backend':backend}
+    if model is not None:
+        body['model'] = model
+    response = app_state.client.post('/api/agent/analyze',headers=headers(app_state),json=body)
+    assert response.status_code == 400
+    assert not app_state.backend.prompts
+
+
+def test_every_reported_model_is_served():
+    """The picker offers what /api/auth/me reports; each of those must start a run."""
+    from gmail_search.auth.run_routes import _runtime, deep_models
+    for backend,models in deep_models().items():
+        for model in models:
+            assert _runtime(backend,model) is not None
 
 
 def test_mutation_requires_cookie_and_exact_origin(app_state):

@@ -26,7 +26,7 @@ configured production worker SSH alias. This is not a comprehensive infrastructu
 inventory. Its `microvm` staging directory has the base Firecracker, jailer,
 kernel and rootfs assets; it does **not** contain `agent-full.squashfs`. The
 qualified image (Pi and Claude Code runners, dispatched by `guest_agent.py`) is SHA-256
-`2b16ee2db771f49b635d3a836cb8090f321beff2483454556f184c0bb891e062`.
+`ebed416c98c2dcd169508668c414929898779e25e3334f07d853a254329afaa3`.
 A separately provisioned persistent VM and a verified export of that existing
 runtime image remain deployment prerequisites. Do not relabel the disposable VM
 or copy its disk, home, temporary identity keys, or qualification services.

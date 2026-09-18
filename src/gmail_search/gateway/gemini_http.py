@@ -69,17 +69,27 @@ class _GeminiEvents:
                 if rating['probability'] not in ('NEGLIGIBLE', 'LOW', 'MEDIUM', 'HIGH', 'HARM_PROBABILITY_UNSPECIFIED') or type(rating.get('blocked', False)) is not bool:
                     raise ProviderProtocolError()
         if 'usageMetadata' in value:
-            usage = _object(value['usageMetadata'], 'promptTokenCount candidatesTokenCount totalTokenCount',
-                            'thoughtsTokenCount cachedContentTokenCount toolUsePromptTokenCount promptTokensDetails candidatesTokensDetails')
+            # A thought-only frame omits candidatesTokenCount; totals must still add up.
+            usage = _object(value['usageMetadata'], 'promptTokenCount totalTokenCount',
+                            'candidatesTokenCount thoughtsTokenCount cachedContentTokenCount toolUsePromptTokenCount promptTokensDetails candidatesTokensDetails cacheTokensDetails serviceTier')
+            # Upstream began reporting the tier (2026-09-18). Only standard is
+            # billed at the configured rates; any other tier fails closed.
+            if usage.get('serviceTier', 'standard') != 'standard':
+                raise ProviderProtocolError()
             inputs = _integer(usage['promptTokenCount'])
-            outputs = _integer(usage['candidatesTokenCount']) + _integer(usage.get('thoughtsTokenCount', 0))
+            outputs = _integer(usage.get('candidatesTokenCount', 0)) + _integer(usage.get('thoughtsTokenCount', 0))
             if (_integer(usage['totalTokenCount']) != inputs + outputs or outputs > self.limit
-                    or _integer(usage.get('cachedContentTokenCount', 0)) != 0
+                    # Implicit caching is automatic upstream (2026-09-18). Cached
+                    # tokens are inside promptTokenCount and cost less, so charging
+                    # the whole prompt at the input rate over-counts, never under.
+                    or _integer(usage.get('cachedContentTokenCount', 0)) > inputs
                     or _integer(usage.get('toolUsePromptTokenCount', 0)) != 0
-                    or (self.input_tokens is not None and inputs != self.input_tokens)
+                    # Live streams report a larger prompt count on the final frame
+                    # after a function call (2026-09-18); the terminal frame settles.
+                    or (self.input_tokens is not None and inputs < self.input_tokens)
                     or (self.output_tokens is not None and outputs < self.output_tokens)):
                 raise ProviderProtocolError()
-            for key in ('promptTokensDetails', 'candidatesTokensDetails'):
+            for key in ('promptTokensDetails', 'candidatesTokensDetails', 'cacheTokensDetails'):
                 if key in usage:
                     details = usage[key]
                     if type(details) is not list or len(details) > 1:

@@ -10,9 +10,10 @@ from guest_tool_config import RAW_PROFILE, parse_tool_config
 
 PROFILE='mail-agent-pi-v1'
 CLAUDE_PROFILE='mail-agent-claude-v1'
+PI_GEMINI_PROFILE='mail-agent-pi-gemini-v1'
 # Closed set: which agent runs is chosen by the trusted controller, never by
 # the guest or the model. Anything else is refused before a runner starts.
-PROFILES=frozenset({PROFILE,CLAUDE_PROFILE})
+PROFILES=frozenset({PROFILE,CLAUDE_PROFILE,PI_GEMINI_PROFILE})
 MAX_FRAME=32768
 MAX_PROMPT=16384
 _TOKEN=re.compile(r'[a-f0-9]{64}\Z',re.ASCII)

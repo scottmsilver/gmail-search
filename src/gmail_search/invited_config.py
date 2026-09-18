@@ -45,7 +45,9 @@ class IndexConfig:
 class OwnerConfig:
     id: str
     email: str
-    google_subject: str = field(repr=False)
+    # None: the owner's first verified sign-in binds it in the identity store
+    # (which then enforces it). Pin it here once known.
+    google_subject: str | None = field(repr=False)
     reader_dsn: str = field(repr=False)
     search_dsn: str = field(repr=False)
     writer_dsn: str = field(repr=False)
@@ -225,7 +227,9 @@ def _email(value: Any) -> str:
     return value
 
 
-def _google_subject(value: Any) -> str:
+def _google_subject(value: Any) -> str | None:
+    if value is None:
+        return None
     value = _string(value)
     if len(value) > 255 or any(character.isspace() or ord(character) < 33 for character in value):
         raise _invalid()
@@ -417,7 +421,7 @@ def _owners(value: Any) -> tuple[OwnerConfig, ...]:
     if (
         len({owner.id for owner in owners}) != len(owners)
         or len({owner.email.casefold() for owner in owners}) != len(owners)
-        or len({owner.google_subject for owner in owners}) != len(owners)
+        or len(pinned := [owner.google_subject for owner in owners if owner.google_subject]) != len(set(pinned))
     ):
         raise _invalid()
     return owners

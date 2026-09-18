@@ -211,3 +211,56 @@ async def test_revoked_google_run_never_opens_transport(setup):
         with pytest.raises(AccessDenied):
             [part async for part in svc.stream(token, 'req', body())]
         assert spend(registry) == (0, 0)
+
+
+def live_frame(usage, *, finish=False, thought=False):
+    """Shapes Gemini 3.8 Flash actually streamed on 2026-09-18."""
+    part = {'text': 'thinking', 'thought': True} if thought else {'text': '42'}
+    result = {'modelVersion': MODEL, 'responseId': 'live', 'candidates': [
+        {'index': 0, 'content': {'role': 'model', 'parts': [part]}}], 'usageMetadata': usage}
+    if finish:
+        result['candidates'][0]['finishReason'] = 'STOP'
+    return b'data: ' + json.dumps(result).encode() + b'\n\n'
+
+
+LIVE_STREAM = (
+    # Thought-only first frame: no candidatesTokenCount; the tier is reported.
+    live_frame({'promptTokenCount': 7, 'totalTokenCount': 7, 'serviceTier': 'standard'}, thought=True)
+    # Terminal frame: a larger prompt count, and implicit cache usage inside it.
+    + live_frame({'promptTokenCount': 9, 'candidatesTokenCount': 3, 'thoughtsTokenCount': 2,
+                  'totalTokenCount': 14, 'cachedContentTokenCount': 5,
+                  'cacheTokensDetails': [{'modality': 'TEXT', 'tokenCount': 5}],
+                  'serviceTier': 'standard'}, finish=True))
+
+
+async def _stream_through_service(setup, data):
+    registry, caps, run, token = setup
+    stream = Stream(data)
+    async with httpx.AsyncClient(trust_env=False, transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=stream))) as client:
+        svc = GeminiRunService(caps, GeminiHTTPTransport('synthetic', model=MODEL, client=client))
+        svc.bind_profile(run.run_id, GeminiProfile(MODEL, 100, 20, 2, 3))
+        return b''.join([part async for part in svc.stream(token, 'req', body())])
+
+
+@pytest.mark.asyncio
+async def test_live_stream_shapes_are_accepted_and_settle_on_the_terminal_usage(setup):
+    """Every one of these refused a real Pi run until relaxed. Cached tokens are
+    charged at the full input rate: over-counting, never under."""
+    assert await _stream_through_service(setup, LIVE_STREAM) == LIVE_STREAM
+    assert spend(setup[0]) == (0, 9 * 2 + 5 * 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('old,new', [
+    (b'"serviceTier": "standard"', b'"serviceTier": "priority"'),
+    (b'"promptTokenCount": 9, "candidatesTokenCount": 3, "thoughtsTokenCount": 2, "totalTokenCount": 14',
+     b'"promptTokenCount": 6, "candidatesTokenCount": 3, "thoughtsTokenCount": 2, "totalTokenCount": 11'),
+    (b'"cachedContentTokenCount": 5', b'"cachedContentTokenCount": 10'),
+])
+async def test_live_stream_limits_still_hold(setup, old, new):
+    """Another tier, a falling prompt count, or more cached than prompted: refused."""
+    data = LIVE_STREAM.replace(old, new, 1)
+    assert data != LIVE_STREAM
+    with pytest.raises(RuntimeError):
+        await _stream_through_service(setup, data)

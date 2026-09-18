@@ -12,7 +12,7 @@ from .worker import WorkerLimits
 
 FULL_LIMITS=WorkerLimits(vcpus=1,memory_mib=1024,pids=128,disk_bytes=1024**3,output_bytes=8*1024**2,wall_seconds=180)
 # The runtime a browser may choose, and the guest profile each one boots.
-GUEST_PROFILES={'pi':'mail-agent-pi-v1','claude':'mail-agent-claude-v1'}
+GUEST_PROFILES={'pi':'mail-agent-pi-v1','pi_gemini':'mail-agent-pi-gemini-v1','claude':'mail-agent-claude-v1'}
 
 
 def context(lease):

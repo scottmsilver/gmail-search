@@ -14,6 +14,7 @@
 "use client";
 
 import { createContext, useContext } from "react";
+import type { DeepModels } from "@/lib/deepModels";
 
 export type AuthUser = {
   id: string;
@@ -35,6 +36,8 @@ export type AuthContextValue = {
   // (model choice, battles, Pi/Claude backends)? Always true on the private
   // app; on the public origin it follows GMS_FULL_RUNTIME_EMAILS.
   fullRuntime?: boolean;
+  // Server-reported models the isolated-worker service runs (picker choices).
+  deepModels?: DeepModels;
   user: AuthUser | null;
   signOut: () => Promise<void>;
 };

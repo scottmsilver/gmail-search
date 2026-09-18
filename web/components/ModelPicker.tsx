@@ -7,6 +7,7 @@ import {
   availableModelsFor,
   type DeepBackend,
 } from "@/lib/config";
+import { servedChoice } from "@/lib/deepModels";
 import {
   getChatSettings,
   getServerChatSettings,
@@ -33,7 +34,7 @@ const SHORT_NAME: Record<string, string> = {
 const shortModel = (m: string) => SHORT_NAME[m] ?? m;
 
 export const ModelPicker = () => {
-  const { publicMode, fullRuntime } = useAuth();
+  const { publicMode, fullRuntime, deepModels } = useAuth();
   const settings = useChatSettings();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -57,17 +58,25 @@ export const ModelPicker = () => {
 
   // Capability, not deployment: an allowlisted owner gets the full picker on
   // the public origin, and everyone else keeps the bounded retrieval loop.
-  if (publicMode && !fullRuntime) return <span className="text-xs text-muted-foreground" title="Gemini searches your Gmail archive with retrieval tools. Shell execution and model battles are unavailable.">Gemini · Gmail retrieval only</span>;
+  if (publicMode && !fullRuntime && !deepModels) return <span className="text-xs text-muted-foreground" title="Gemini searches your Gmail archive with retrieval tools. Shell execution and model battles are unavailable.">Gemini · Gmail retrieval only</span>;
 
-  const battleOn = settings.battleMode;
-  const deepBackend = settings.deepBackend;
-  const modelOptions = availableModelsFor(deepBackend);
+  // When the server reports what it runs, offer exactly that; no battles (the
+  // isolated worker runs one VM at a time).
+  const served = deepModels;
+  const modelsFor = (backend: DeepBackend): readonly string[] =>
+    served ? served[backend] ?? [] : availableModelsFor(backend);
+  const choice = served
+    ? servedChoice(served, settings.deepBackend, settings.model)
+    : { backend: settings.deepBackend, model: settings.model as string };
+  const battleOn = !served && settings.battleMode;
+  const deepBackend = choice.backend;
+  const modelOptions = modelsFor(deepBackend);
   const triggerLabel = battleOn
     ? "⚔ deep analysis battle"
-    : `${deepBackend} · ${shortModel(settings.model)}`;
+    : `${deepBackend} · ${shortModel(choice.model)}`;
 
   const switchDeepBackend = (next: DeepBackend) => {
-    const nextModels = availableModelsFor(next);
+    const nextModels = modelsFor(next);
     const patch: Partial<ChatSettings> = { deepBackend: next };
     if (!(nextModels as readonly string[]).includes(settings.model)) {
       patch.model = nextModels[0] as ChatSettings["model"];
@@ -93,7 +102,7 @@ export const ModelPicker = () => {
               Model
             </div>
             <select
-              value={settings.model}
+              value={choice.model}
               onChange={(e) => setChatSettings({ model: e.target.value as ChatSettings["model"] })}
               disabled={battleOn}
               className="w-full bg-neutral-50 border border-neutral-200 rounded px-2 py-1 text-neutral-800 font-medium focus:outline-none focus:border-neutral-400"
@@ -113,7 +122,7 @@ export const ModelPicker = () => {
               </div>
               <div className="flex items-center gap-1">
 
-                <button
+                {(!served || served.claude_code) && <button
                   type="button"
                   onClick={() => switchDeepBackend("claude_code")}
                   className={
@@ -121,12 +130,12 @@ export const ModelPicker = () => {
                       ? "flex-1 rounded bg-blue-700 text-white px-2 py-1 font-medium hover:bg-blue-600"
                       : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
                   }
-                  title="Claude Code runtime: Claudebox + MCP, full orchestrator (planner → ... → critic)."
+                  title={served ? "Native Claude Code in an isolated VM." : "Claude Code runtime: Claudebox + MCP, full orchestrator (planner → ... → critic)."}
                 >
                   Claude Code
-                </button>
+                </button>}
 
-                <button
+                {(!served || served.pi) && <button
                   type="button"
                   onClick={() => switchDeepBackend("pi")}
                   className={
@@ -134,15 +143,15 @@ export const ModelPicker = () => {
                       ? "flex-1 rounded bg-teal-700 text-white px-2 py-1 font-medium hover:bg-teal-600"
                       : "flex-1 rounded bg-neutral-100 text-neutral-700 px-2 py-1 hover:bg-neutral-200"
                   }
-                  title="Pi: single agent using the selected model."
+                  title={served ? "Pi in an isolated VM, using the selected model." : "Pi: single agent using the selected model."}
                 >
                   Pi
-                </button>
+                </button>}
               </div>
             </div>
           )}
 
-          <div>
+          {!served && <div>
             <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">
               Deep analysis battle
             </div>
@@ -157,7 +166,7 @@ export const ModelPicker = () => {
             >
               ⚔ {battleOn ? "on — two independent deep analyses" : "off — one deep analysis"}
             </button>
-          </div>
+          </div>}
 
           <div>
             <div className="text-[10px] uppercase tracking-wide text-neutral-400 mb-1">

@@ -309,3 +309,89 @@ def test_a_runtime_without_a_credential_is_refused_before_launch(tmp_path):
     envelope(s.lease,'Find my receipts','claude')
     with pytest.raises(AccessDenied):
         envelope(s.lease,'Find my receipts','pi')
+
+
+def test_pi_on_gemini_binds_a_gemini_profile_at_medium_thinking(tmp_path):
+    from gmail_search.invited_runtime import GEMINI_OUTPUT_TOKEN_LIMIT, envelope_factory
+    s=_envelope(tmp_path)
+    bound=[]
+    gemini=SimpleNamespace(bind_profile=lambda run,profile:bound.append((run,profile)))
+    rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
+    envelope=envelope_factory(Capabilities(s.registry),SimpleNamespace(bind_profile=None),rates,gemini=gemini)
+    packet=envelope(s.lease,'Find my receipts','pi_gemini')
+    validate_bootstrap(packet,'Find my receipts','pi_gemini')
+    assert json.loads(packet[4:])['profile']=='mail-agent-pi-gemini-v1'
+    (run,profile),=bound
+    assert run==s.lease.run_id and profile.model=='gemini-3.8-flash'
+    assert profile.thinking_level=='MEDIUM' and profile.output_token_limit==GEMINI_OUTPUT_TOKEN_LIMIT
+
+
+def test_pi_on_gemini_is_refused_without_the_gemini_service(tmp_path):
+    s=_envelope(tmp_path)
+    with pytest.raises(AccessDenied):
+        s.envelope(s.lease,'Find my receipts','pi_gemini')
+
+
+def test_the_guest_asks_gemini_for_no_more_than_the_gateway_allows():
+    import importlib.util
+    from gmail_search.invited_runtime import GEMINI_OUTPUT_TOKEN_LIMIT
+    worker=Path(__file__).parents[1]/'deploy/public/worker'
+    import sys
+    sys.path.insert(0,str(worker))
+    try:
+        spec=importlib.util.spec_from_file_location('guest_agent_pi_limits',worker/'guest_agent_pi.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(worker))
+    assert module.PI_MODELS['mail-agent-pi-gemini-v1']['maxTokens']==GEMINI_OUTPUT_TOKEN_LIMIT
+
+
+def test_an_unpinned_subject_defers_to_the_identity_store_and_a_pinned_one_must_match():
+    from gmail_search.invited_runtime import _subject_matches
+    assert _subject_matches(SimpleNamespace(google_subject=None),'any-bound-subject')
+    assert _subject_matches(SimpleNamespace(google_subject='pinned'),'pinned')
+    assert not _subject_matches(SimpleNamespace(google_subject='pinned'),'someone-else')
+
+
+def test_the_identity_store_refuses_a_second_subject_after_the_first_binds(tmp_path):
+    """What makes leaving the config unpinned safe: first verified sign-in wins."""
+    from gmail_search.auth.identity_store import IdentityDenied, IdentityStore, VerifiedGoogleIdentity
+    tmp_path.chmod(0o700)
+    identities=IdentityStore(tmp_path/'identities')
+    identities.invite('owner@example.test')
+    identities.prepare_admission(VerifiedGoogleIdentity('owner@example.test','first-subject',True))
+    with pytest.raises(IdentityDenied):
+        identities.prepare_admission(VerifiedGoogleIdentity('owner@example.test','second-subject',True))
+
+
+def _identity_store(tmp_path,subject):
+    from gmail_search.auth.identity_store import IdentityStore
+    tmp_path.chmod(0o700)
+    identities=IdentityStore(tmp_path/'identities')
+    account=identities.invite('owner@example.test')
+    identities.mark_provisioned(account.owner_id)
+    if subject is not None:
+        with identities._transaction() as db:
+            db.execute('UPDATE identities SET google_subject=? WHERE owner_id=?',(subject,account.owner_id))
+    return identities,account.owner_id
+
+
+@pytest.mark.parametrize('pinned,bound,pending',[
+    (None,None,True),        # awaiting first sign-in: startup skips its DB checks
+    (None,'bound',False),    # signed in: checked in full
+    ('bound','bound',False),
+])
+def test_only_an_unpinned_unbound_owner_is_pending(tmp_path,pinned,bound,pending):
+    from gmail_search.invited_runtime import verify_identities
+    identities,owner_id=_identity_store(tmp_path,bound)
+    owner=SimpleNamespace(id=owner_id,email='owner@example.test',google_subject=pinned)
+    assert (owner_id in verify_identities(identities,[owner]))==pending
+    assert identities.is_active(owner_id)==(not pending), 'a pending owner can run nothing'
+
+
+def test_a_pinned_owner_that_never_signed_in_is_refused(tmp_path):
+    from gmail_search.invited_runtime import verify_identities
+    identities,owner_id=_identity_store(tmp_path,None)
+    owner=SimpleNamespace(id=owner_id,email='owner@example.test',google_subject='pinned')
+    with pytest.raises(AccessDenied):
+        verify_identities(identities,[owner])

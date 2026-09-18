@@ -35,6 +35,8 @@ from .gateway.maintenance import GateReader, ReleaseIdentity
 from .gateway.metadata_service import RunMetadataService
 from .gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from .gateway.provider import AnthropicRunService, ProviderProfile, _finish
+from .gateway.gemini import MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
+from .gateway.gemini_http import GeminiHTTPTransport
 from .gateway.provider_http import AnthropicHTTPTransport, ClaudeLoginFile
 from .gateway.provision_writer import verify_writer_access
 from .gateway.registry import AccessDenied, Registry
@@ -92,19 +94,39 @@ def verify_budgets(registry,owners):
                 raise AccessDenied()
 
 
+def _subject_matches(owner,subject):
+    """A pinned subject must match; an unpinned one defers to the identity store,
+    which binds the first verified sign-in and refuses any other afterwards."""
+    return owner.google_subject is None or subject==owner.google_subject
+
+
 def verify_identities(identities,owners):
+    """Refuse any mismatch; return the owners still awaiting their first sign-in.
+
+    Pending means unpinned here and unbound in the store. The store reports such
+    an owner inactive, so nothing can run for them and their logins cannot be
+    exercised yet; startup skips only their database checks. Restart after the
+    first sign-in to check them in full, then pin the subject.
+    """
+    pending=set()
     with identities._transaction() as db:
         for owner in owners:
             row=db.execute('SELECT * FROM identities WHERE owner_id=?',(owner.id,)).fetchone()
             if (not identities._ready(db,row) or row['email']!=owner.email
-                    or row['google_subject']!=owner.google_subject):
+                    or not _subject_matches(owner,row['google_subject'])):
                 raise AccessDenied()
+            if row['google_subject'] is None:
+                pending.add(owner.id)
+    return frozenset(pending)
 
 
 # Each guest runtime speaks to the gateway through its own qualified CLI profile.
 CLIENT_PROFILES={'pi':'pi-0.84.4','claude':'claude-2.1.272'}
 # Guests are told this cap; the gateway refuses anything above it.
 OUTPUT_TOKEN_LIMIT=4096
+# Pi on Gemini. MEDIUM is the legacy Pi default; thought tokens bill as output.
+GEMINI_OUTPUT_TOKEN_LIMIT=16384
+GEMINI_THINKING='MEDIUM'
 
 
 def anthropic_transports(provider):
@@ -121,17 +143,31 @@ def anthropic_transports(provider):
     return {client:transport for client,transport in routes.items() if transport is not None}
 
 
-def envelope_factory(capabilities,provider,rates):
-    profiles={runtime:ProviderProfile(model='claude-sonnet-4-6',input_token_limit=200000,
-        output_token_limit=OUTPUT_TOKEN_LIMIT,input_units_per_token=rates.input_units_per_token,
-        output_units_per_token=rates.output_units_per_token,client_profile=client,effort='high')
-        for runtime,client in CLIENT_PROFILES.items()}
+def _profile_binders(provider,gemini,rates):
+    """runtime -> bind(run_id), for exactly the runtimes this deployment can serve."""
     routed=getattr(provider,'transports_by_client',None)
+    binders={}
+    for runtime,client in CLIENT_PROFILES.items():
+        if routed is not None and client not in routed:
+            continue
+        profile=ProviderProfile(model='claude-sonnet-4-6',input_token_limit=200000,
+            output_token_limit=OUTPUT_TOKEN_LIMIT,input_units_per_token=rates.input_units_per_token,
+            output_units_per_token=rates.output_units_per_token,client_profile=client,effort='high')
+        binders[runtime]=lambda run_id,profile=profile:provider.bind_profile(run_id,profile)
+    if gemini is not None:
+        profile=GeminiProfile(GEMINI_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
+            rates.output_units_per_token,thinking_level=GEMINI_THINKING)
+        binders['pi_gemini']=lambda run_id:gemini.bind_profile(run_id,profile)
+    return binders
+
+
+def envelope_factory(capabilities,provider,rates,*,gemini=None):
+    binders=_profile_binders(provider,gemini,rates)
     def envelope(lease,prompt,runtime='pi'):
         # Refuse before launch, not on the guest's first inference call.
-        if runtime not in profiles or (routed is not None and CLIENT_PROFILES[runtime] not in routed):
+        if runtime not in binders:
             raise AccessDenied()
-        provider.bind_profile(lease.run_id,profiles[runtime])
+        binders[runtime](lease.run_id)
         tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,ttl=180).secret
             for audience,operations in (
                 ('sql',{'schema','query'}),
@@ -207,7 +243,7 @@ async def open_runtime(config):
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600:
             raise AccessDenied()
         identities=IdentityStore(identity_path)
-        verify_identities(identities,config.owners)
+        pending=verify_identities(identities,config.owners)
         owners={owner.id:owner for owner in config.owners}
         def is_active(owner):
             gate.require_ready()
@@ -224,7 +260,7 @@ async def open_runtime(config):
         search_reader=SearchReader(SearchRegistry({o.id:SearchCredential(o.id,o.search_dsn,schema_profile=TEXT)
             for o in config.owners},is_active=is_active),
             profile=SearchProfile('gemini-embedding-2',config.provider.fact_model_tag,3072,schema_profile=TEXT),admission=admission)
-        await verify_databases(config.owners,writers,gateway,search_reader)
+        await verify_databases([o for o in config.owners if o.id not in pending],writers,gateway,search_reader)
         indexes=OwnerIndexRegistry()
         stack.push_async_callback(_close_async,indexes)
         for owner in config.owners:
@@ -249,6 +285,9 @@ async def open_runtime(config):
             profile=GeminiRerankerProfile(config.provider.rerank_input_units_per_token,
                 config.provider.rerank_output_units_per_token,'full-model-ceilings-v1'),admission=provider_admission)
         provider=AnthropicRunService(caps,None,transports_by_client=inference_transports)
+        gemini_transport=GeminiHTTPTransport(config.provider.gemini_key,model=GEMINI_MODEL)
+        stack.push_async_callback(_close_async,gemini_transport)
+        gemini=GeminiRunService(caps,gemini_transport)
         attachment_reader=OwnerAttachmentReader(gateway)
         locator=QueryAttachmentLocator(gateway,config.attachment_root)
         source=OwnerAttachmentSource(config.attachment_root,locate=locator.locate_raw)
@@ -262,10 +301,10 @@ async def open_runtime(config):
             attachment_reads=RunAttachmentReadService(caps,attachment_reader),
             raw_attachments=RunRawAttachmentService(caps,source,
                 admission=DataAdmission(global_concurrency=2,owner_concurrency=1)),
-            anthropic=provider,events=events)
+            anthropic=provider,gemini=gemini,events=events)
         transport=SSHTransport(host=config.worker.host,port=config.worker.port,
             private_key=config.worker.private_key,known_hosts=config.worker.known_hosts)
-        backend=ProductionBackend(registry,transport=transport,envelope_for=envelope_factory(caps,provider,config.provider))
+        backend=ProductionBackend(registry,transport=transport,envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini))
         stack.push_async_callback(_close_sync,backend)
         workers=WorkerController(registry,backend,limits=FULL_LIMITS,max_workers=1,max_owner_workers=1)
         runs,conversations=compose_browser_runs(workers,events,connect=None,is_active=is_active,
@@ -276,7 +315,7 @@ async def open_runtime(config):
         def provision_account(account,claims):
             owner=owners.get(account.owner_id)
             if (owner is None or account.email!=owner.email or claims.email!=owner.email
-                    or claims.subject!=owner.google_subject or claims.email_verified is not True
+                    or not _subject_matches(owner,claims.subject) or claims.email_verified is not True
                     or not is_active(owner.id)):
                 raise AccessDenied()
             return True

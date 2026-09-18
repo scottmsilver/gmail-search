@@ -18,6 +18,7 @@ from . import public
 from .gmail_consent import GmailConsent
 from .identity_store import IdentityDenied, IdentityStore, VerifiedGoogleIdentity
 from .invited_broker import BoundGmailBroker, BrokerUnavailable
+from .run_routes import deep_models
 
 GMAIL_STATE_COOKIE = '__Host-gms_gmail_state'
 
@@ -125,7 +126,8 @@ def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent,
     async def me(request: Request):
         query(request, [])
         _, account = session(request)
-        return JSONResponse({'multi_tenant': True, 'user': {'id': account.owner_id, 'email': account.email}})
+        return JSONResponse({'multi_tenant': True, 'user': {'id': account.owner_id, 'email': account.email},
+                             'capabilities': {'full_runtime': False, 'deep_models': deep_models()}})
 
     @router.post('/api/auth/logout')
     async def logout(request: Request):

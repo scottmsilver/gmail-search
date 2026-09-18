@@ -228,6 +228,24 @@ test("isToolPart and isReasoningPart still match their shapes (sanity)", () => {
   eq(isReasoningPart({ type: "data", name: "deep-stage", data: {} }), false);
 });
 
+// ─── served deep models (isolated-worker service) ─────────────────
+const { parseDeepModels, servedChoice } = await loadTs("lib/deepModels.ts");
+const SERVED = { pi: ["google/gemini-3.8-flash"], claude_code: ["sonnet"] };
+test("served models parse from the server capability", () => {
+  eq(parseDeepModels(SERVED), SERVED);
+  eq(parseDeepModels({ ...SERVED, shell: ["x"] }), SERVED, "unknown backends are ignored");
+  eq(parseDeepModels(undefined), undefined);
+  eq(parseDeepModels({ pi: [] }), undefined, "an empty list is malformed");
+  eq(parseDeepModels({ pi: [7] }), undefined);
+});
+test("a served choice keeps what is served and never substitutes a sibling", () => {
+  eq(servedChoice(SERVED, "claude_code", "sonnet"), { backend: "claude_code", model: "sonnet" });
+  eq(servedChoice(SERVED, "claude_code", "opus"), { backend: "claude_code", model: "sonnet" }, "unserved model -> default");
+  eq(servedChoice(SERVED, "pi", "openrouter/meta/muse-spark-1.3"), { backend: "pi", model: "google/gemini-3.8-flash" });
+  eq(servedChoice(SERVED, undefined, undefined), { backend: "pi", model: "google/gemini-3.8-flash" });
+  eq(servedChoice({ claude_code: ["sonnet"] }, "pi", undefined), { backend: "claude_code", model: "sonnet" });
+});
+
 // ─── done ──────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

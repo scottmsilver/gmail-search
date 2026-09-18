@@ -20,13 +20,29 @@ from .public import SESSION_COOKIE
 from .result_routes import _ResultRoute
 
 
-# The browser's deep-backend names, mapped to the guest runtime each one boots.
-BACKENDS = {None: 'pi', 'pi': 'pi', 'claude_code': 'claude'}
+# The (picker backend, picker model) pairs this deployment serves, each with the
+# guest runtime it boots; the first model is the backend's default. `/api/auth/me`
+# reports this table so the picker offers exactly it. A model with no qualified
+# gateway route is refused, never substituted.
+SERVED_MODELS = {
+    'pi': (('google/gemini-3.8-flash', 'pi_gemini'),),
+    'claude_code': (('sonnet', 'claude'),),
+}
+# Names older saved settings may still send for a served model.
+MODEL_ALIASES = {'openrouter/google/gemini-3.8-flash': 'google/gemini-3.8-flash'}
 
 
-def _model_hint(value):
-    """The picker always sends a model; the gateway pins its own, so accept and drop it."""
-    return value is None or (type(value) is str and 0 < len(value) <= 128)
+def deep_models():
+    return {backend: [model for model, _ in pairs] for backend, pairs in SERVED_MODELS.items()}
+
+
+def _runtime(backend, model):
+    """The guest runtime for the browser's (backend, model), or None if not served."""
+    pairs = SERVED_MODELS.get('pi' if backend is None else backend) if type(backend) in (str, type(None)) else None
+    if not pairs or not (model is None or type(model) is str):
+        return None
+    model = pairs[0][0] if model is None else MODEL_ALIASES.get(model, model)
+    return dict(pairs).get(model)
 
 
 def _frame(kind, payload):
@@ -151,10 +167,9 @@ def create_run_router(identities, runs, *, origin, claim_conversation):
     async def analyze(request: Request):
         account = await session(request)
         value = await body(request,account)
-        if (set(value)-{'question','conversation_id','backend','model'}
-                or value.get('backend') not in BACKENDS or not _model_hint(value.get('model'))):
+        runtime = _runtime(value.get('backend'), value.get('model'))
+        if set(value)-{'question','conversation_id','backend','model'} or runtime is None:
             raise HTTPException(400,'Unsupported run parameters')
-        runtime = BACKENDS[value.get('backend')]
         conversation = _conversation(value.get('conversation_id'))
         question = value.get('question')
         try:

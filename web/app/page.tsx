@@ -23,6 +23,7 @@ import {
 import { stopAgentRun, type AgentRun } from "@/lib/agentRunControl";
 
 import { workerChatHistory } from "@/lib/workerChatHistory";
+import { servedChoice } from "@/lib/deepModels";
 
 const PYTHON_UI_URL = process.env.NEXT_PUBLIC_PYTHON_UI_URL ?? "";
 
@@ -44,13 +45,16 @@ const newConversationId = () =>
     .join("");
 
 export default function Page() {
-  const { publicMode, fullWorkerMode, fullRuntime } = useAuth();
+  const { publicMode, fullWorkerMode, fullRuntime, deepModels } = useAuth();
+  // Server-reported served models: send the picker's served choice, never battles.
+  const deepModelsRef = useRef(deepModels);
+  deepModelsRef.current = deepModels;
   const fullWorkerModeRef = useRef(fullWorkerMode);
   fullWorkerModeRef.current = fullWorkerMode;
   // Restricted only when the deployment is public AND the server has not
   // reported this user as capable.
-  const publicModeRef = useRef(publicMode && !fullRuntime);
-  publicModeRef.current = publicMode && !fullRuntime;
+  const publicModeRef = useRef(publicMode && !fullRuntime && !deepModels);
+  publicModeRef.current = publicMode && !fullRuntime && !deepModels;
   const router = useRouter();
   const params = useSearchParams();
   const urlC = params.get("c");
@@ -88,6 +92,11 @@ export default function Page() {
         }}),
         body: () => {
           const s = getChatSettings();
+          const served = deepModelsRef.current && servedChoice(deepModelsRef.current, s.deepBackend, s.model);
+          if (served) return {
+            model: served.model, battle: false, deep_backend: served.backend,
+            conversation_id: conversationIdRef.current,
+          };
           return {
             model: publicModeRef.current ? undefined : s.model,
             battle: publicModeRef.current ? false : s.battleMode,

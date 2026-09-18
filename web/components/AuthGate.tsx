@@ -19,11 +19,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AuthProvider, type AuthUser } from "@/components/AuthContext";
+import { parseDeepModels, type DeepModels } from "@/lib/deepModels";
 
 type AuthState =
   | { kind: "checking" }
   | { kind: "open" } // multi-tenant off — anyone can use the app
-  | { kind: "signed-in"; user: AuthUser; fullRuntime: boolean }
+  | { kind: "signed-in"; user: AuthUser; fullRuntime: boolean; deepModels?: DeepModels }
   | { kind: "signed-out" }
   | { kind: "error"; detail: string };
 
@@ -57,6 +58,7 @@ export function AuthGate({ children, publicMode = false, fullWorkerMode = false 
             // deployment this build is serving; it cannot say what this
             // particular signed-in user is allowed to run.
             fullRuntime: body.capabilities?.full_runtime === true,
+            deepModels: parseDeepModels(body.capabilities?.deep_models),
             user: {
               id: u.id,
               email: u.email,
@@ -102,7 +104,7 @@ export function AuthGate({ children, publicMode = false, fullWorkerMode = false 
   const ctxSignedIn = useMemo(
     () =>
       state.kind === "signed-in"
-        ? { multiTenant: true, user: {...state.user, is_admin: publicMode ? false : state.user.is_admin}, signOut, publicMode, fullWorkerMode, fullRuntime: state.fullRuntime }
+        ? { multiTenant: true, user: {...state.user, is_admin: publicMode ? false : state.user.is_admin}, signOut, publicMode, fullWorkerMode, fullRuntime: state.fullRuntime, deepModels: state.deepModels }
         : null,
     [state, signOut, publicMode, fullWorkerMode],
   );

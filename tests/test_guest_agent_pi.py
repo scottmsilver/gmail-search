@@ -13,8 +13,8 @@ WORKER=Path(__file__).parents[1]/'deploy/public/worker'
 sys.path.insert(0,str(WORKER))
 
 
-def envelope():
-    return {'version':1,'profile':'mail-agent-pi-v1','prompt':'Find invoices; $(touch /tmp/no)\nΔ',
+def envelope(profile='mail-agent-pi-v1'):
+    return {'version':1,'profile':profile,'prompt':'Find invoices; $(touch /tmp/no)\nΔ',
             'tool_config':{'version':3,'tool_profile':'mail-raw-mcp-v3','capabilities':{
                 'sql':'1'*64,'retrieval':'2'*64,'artifact':'3'*64,'attachment':'4'*64}},
             'inference_capability':'5'*64,'events_capability':'6'*64}
@@ -281,3 +281,27 @@ print(json.dumps({'type':'agent_end','messages':[result,result]}),flush=True)
     assert events[0]['result']['display_truncated'] is True
     assert events[-1]['text']=='Complete answer'
     assert proc.returncode is not None
+
+
+def test_the_gemini_profile_points_pi_at_the_gateways_google_route(tmp_path,monkeypatch):
+    """Pi's Google client appends /models/<id>:streamGenerateContent to baseUrl;
+    the worker relay admits exactly /v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse."""
+    runner=module('guest_agent_pi');monkeypatch.setattr(runner,'RUN',tmp_path/'run')
+    monkeypatch.setattr(runner.os,'chown',lambda *args:None)
+    gemini=envelope('mail-agent-pi-gemini-v1')
+    cwd,env=runner.prepare(gemini)
+    provider=json.loads((tmp_path/'run/home/pi/models.json').read_text())['providers']['gateway']
+    assert provider['api']=='google-generative-ai'
+    assert provider['baseUrl']=='http://127.0.0.1:18080/v1beta'
+    assert provider['apiKey']=='${GEMINI_API_KEY}'
+    assert [m['id'] for m in provider['models']]==['gemini-3.8-flash']
+    assert env['GEMINI_API_KEY']==gemini['inference_capability']
+    assert 'ANTHROPIC_API_KEY' not in env and 'ANTHROPIC_BASE_URL' not in env
+    argv=runner.pi_argv('mail-agent-pi-gemini-v1')
+    assert argv[argv.index('--model')+1]=='gemini-3.8-flash'
+    assert argv[argv.index('--thinking')+1]=='medium'
+
+
+def test_a_non_pi_profile_is_refused_by_the_pi_runner(tmp_path,monkeypatch):
+    runner=module('guest_agent_pi');monkeypatch.setattr(runner,'RUN',tmp_path/'run')
+    with pytest.raises(runner.RunnerError):runner.prepare(envelope('mail-agent-claude-v1'))

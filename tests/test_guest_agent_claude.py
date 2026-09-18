@@ -29,9 +29,9 @@ def module(name):
 
 # ── which agent runs ─────────────────────────────────────────────────────────
 
-def test_the_bootstrap_accepts_exactly_the_two_agent_profiles():
+def test_the_bootstrap_accepts_exactly_the_agent_profiles():
     boot = module('guest_agent_bootstrap')
-    assert boot.PROFILES == {'mail-agent-pi-v1', 'mail-agent-claude-v1'}
+    assert boot.PROFILES == {'mail-agent-pi-v1', 'mail-agent-pi-gemini-v1', 'mail-agent-claude-v1'}
     for profile in boot.PROFILES:
         assert boot.validate_config(envelope(profile))['profile'] == profile
     for profile in ('legacy-mail-v1', 'mail-agent-claude-v2', 'claude', ''):

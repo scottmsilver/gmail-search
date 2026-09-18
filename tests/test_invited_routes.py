@@ -88,7 +88,11 @@ def test_complete_staged_browser_flow_keeps_credentials_server_side(setup):
     cookie=response.headers['set-cookie']
     assert '__Host-gms_session=' in cookie and 'HttpOnly' in cookie and 'Secure' in cookie and 'SameSite=lax' in cookie
     assert provisioned[0][0].owner_id==owner.owner_id
-    assert client.get('/api/auth/me').json()['user']['id']==owner.owner_id
+    me=client.get('/api/auth/me').json()
+    assert me['user']['id']==owner.owner_id
+    # The picker offers exactly what the run route serves, and never battles.
+    assert me['capabilities']=={'full_runtime':False,'deep_models':{
+        'pi':['google/gemini-3.8-flash'],'claude_code':['sonnet']}}
     assert client.get('/api/auth/gmail-status').json()=={'multi_tenant':True,'connect_method':'POST','connected':False}
     assert connect(client).status_code==303
     assert posted[-1][1]['owner_id']==owner.owner_id

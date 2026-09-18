@@ -1,4 +1,5 @@
 import { pythonApiUrl } from "./config";
+import { parseDeepModels, type DeepModels } from "./deepModels";
 
 export const privateHeaders = {
   "Cache-Control": "private, no-store",
@@ -15,6 +16,8 @@ export type AuthenticatedCaller = {
   // public origin it follows GMS_FULL_RUNTIME_EMAILS. Never inferred from the
   // deployment, and never taken from the request body.
   fullRuntime: boolean;
+  // Server-reported models the isolated-worker service runs; see deepModels.ts.
+  deepModels?: DeepModels;
 };
 
 export async function authenticatedCaller(req: Request): Promise<AuthenticatedCaller | null> {
@@ -26,7 +29,8 @@ export async function authenticatedCaller(req: Request): Promise<AuthenticatedCa
     if (!response.ok) return null;
     const body = await response.json();
     if (body.multi_tenant !== true || typeof body.user?.id !== "string" || !body.user.id.trim()) return null;
-    return { id: body.user.id, fullRuntime: body.capabilities?.full_runtime === true };
+    return { id: body.user.id, fullRuntime: body.capabilities?.full_runtime === true,
+      deepModels: parseDeepModels(body.capabilities?.deep_models) };
   } catch { return null; }
 }
 

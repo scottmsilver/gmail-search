@@ -379,3 +379,10 @@ def test_rejects_a_bad_or_doubled_claude_login(tmp_path, login):
     value["provider"]["claude_login_file"] = login
     with pytest.raises(ConfigError):
         load_runtime_config(_write(tmp_path, value))
+
+
+def test_an_owner_subject_may_be_left_unpinned(tmp_path):
+    """Bound by the identity store on the owner's first verified sign-in."""
+    value = _value(tmp_path)
+    value["owners"][0]["google_subject"] = None
+    assert load_runtime_config(_write(tmp_path, value)).owners[0].google_subject is None
