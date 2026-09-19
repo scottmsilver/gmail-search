@@ -12,11 +12,11 @@ import signal
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from guest_agent_bootstrap import CLAUDE_PROFILE, PI_GEMINI_PROFILE, PROFILE, receive
+from guest_agent_bootstrap import CLAUDE_PROFILE, PI_GEMINI_PROFILE, PI_OPUS_PROFILE, PROFILE, receive
 import guest_agent_claude
 import guest_agent_pi
 
-RUNNERS = {PROFILE: guest_agent_pi.run, PI_GEMINI_PROFILE: guest_agent_pi.run,
+RUNNERS = {PROFILE: guest_agent_pi.run, PI_GEMINI_PROFILE: guest_agent_pi.run, PI_OPUS_PROFILE: guest_agent_pi.run,
            CLAUDE_PROFILE: guest_agent_claude.run}
 
 

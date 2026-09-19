@@ -44,7 +44,8 @@ class _PrivateRoute(APIRoute):
         return guarded
 
 
-def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent, broker: BoundGmailBroker, *, provision_account):
+def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent, broker: BoundGmailBroker, *, provision_account,
+                               runtimes=None):
     """Provision callback(account, verified_claims) must return exactly True.
 
     It must create/verify the exact server-owned users.id and fixed database
@@ -127,7 +128,7 @@ def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent,
         query(request, [])
         _, account = session(request)
         return JSONResponse({'multi_tenant': True, 'user': {'id': account.owner_id, 'email': account.email},
-                             'capabilities': {'full_runtime': False, 'deep_models': deep_models()}})
+                             'capabilities': {'full_runtime': False, 'deep_models': deep_models(runtimes)}})
 
     @router.post('/api/auth/logout')
     async def logout(request: Request):

@@ -25,20 +25,29 @@ from .result_routes import _ResultRoute
 # reports this table so the picker offers exactly it. A model with no qualified
 # gateway route is refused, never substituted.
 SERVED_MODELS = {
-    'pi': (('google/gemini-3.8-flash', 'pi_gemini'),),
+    'pi': (('google/gemini-3.8-flash', 'pi_gemini'), ('anthropic/claude-opus-5', 'pi_opus')),
     'claude_code': (('sonnet', 'claude'),),
 }
 # Names older saved settings may still send for a served model.
-MODEL_ALIASES = {'openrouter/google/gemini-3.8-flash': 'google/gemini-3.8-flash'}
+MODEL_ALIASES = {'openrouter/google/gemini-3.8-flash': 'google/gemini-3.8-flash',
+                 'openrouter/anthropic/claude-opus-5': 'anthropic/claude-opus-5'}
 
 
-def deep_models():
-    return {backend: [model for model, _ in pairs] for backend, pairs in SERVED_MODELS.items()}
+def _served(runtimes):
+    """The table limited to runtimes this deployment can launch (None: all)."""
+    table = {backend: tuple((model, runtime) for model, runtime in pairs if runtimes is None or runtime in runtimes)
+             for backend, pairs in SERVED_MODELS.items()}
+    return {backend: pairs for backend, pairs in table.items() if pairs}
 
 
-def _runtime(backend, model):
+def deep_models(runtimes=None):
+    return {backend: [model for model, _ in pairs] for backend, pairs in _served(runtimes).items()}
+
+
+def _runtime(backend, model, runtimes=None):
     """The guest runtime for the browser's (backend, model), or None if not served."""
-    pairs = SERVED_MODELS.get('pi' if backend is None else backend) if type(backend) in (str, type(None)) else None
+    served = _served(runtimes)
+    pairs = served.get('pi' if backend is None else backend) if type(backend) in (str, type(None)) else None
     if not pairs or not (model is None or type(model) is str):
         return None
     model = pairs[0][0] if model is None else MODEL_ALIASES.get(model, model)
@@ -64,7 +73,7 @@ def _object(pairs):
     return result
 
 
-def create_run_router(identities, runs, *, origin, claim_conversation):
+def create_run_router(identities, runs, *, origin, claim_conversation, runtimes=None):
     parsed = urlsplit(origin)
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
             or parsed.path or parsed.query or parsed.fragment or not callable(claim_conversation)):
@@ -167,7 +176,7 @@ def create_run_router(identities, runs, *, origin, claim_conversation):
     async def analyze(request: Request):
         account = await session(request)
         value = await body(request,account)
-        runtime = _runtime(value.get('backend'), value.get('model'))
+        runtime = _runtime(value.get('backend'), value.get('model'), runtimes)
         if set(value)-{'question','conversation_id','backend','model'} or runtime is None:
             raise HTTPException(400,'Unsupported run parameters')
         conversation = _conversation(value.get('conversation_id'))

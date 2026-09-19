@@ -150,6 +150,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return parsed.path
         if self.command=='POST' and self.path=='/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse':
             return self.path
+        if self.command=='POST' and self.path=='/v1/chat/completions':  # OpenRouter-served Pi models
+            return self.path
         if self.command=='POST' and parsed.path in ('/v1/sql', '/v1/thread', '/v1/search', '/v1/find-facts', '/v1/query-emails', '/v1/attachment/parse', '/v1/attachment/meta', '/v1/attachment/text', '/v1/attachment/list', '/v1/attachment/raw', '/v1/events') and not query:
             return parsed.path
         if self.command=='GET' and parsed.path=='/v1/schema' and not query:

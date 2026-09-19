@@ -21,6 +21,7 @@
     "anthropic_key": "REPLACE_WITH_ANTHROPIC_KEY",
     "claude_oauth_token": "REPLACE_WITH_CLAUDE_SETUP_TOKEN_OUTPUT",
     "gemini_key": "REPLACE_WITH_GEMINI_KEY",
+    "openrouter_key": "REPLACE_WITH_OPENROUTER_KEY_OR_DELETE_THIS_LINE",
     "input_units_per_token": 1,
     "output_units_per_token": 1,
     "embedding_units_per_token": 1,

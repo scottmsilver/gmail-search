@@ -64,7 +64,7 @@ async def _body(request):
     return value['query']
 
 
-def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, events=None) -> FastAPI:
+def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, openrouter=None, events=None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware('http')
@@ -131,9 +131,9 @@ def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=No
         from .attachment_http import add_attachment_routes
         add_attachment_routes(app, attachments, _token, _json_body)
 
-    if anthropic is not None or gemini is not None:
+    if anthropic is not None or gemini is not None or openrouter is not None:
         from .inference_http import add_inference_routes
-        add_inference_routes(app, anthropic=anthropic, gemini=gemini, token_from_request=_token)
+        add_inference_routes(app, anthropic=anthropic, gemini=gemini, openrouter=openrouter, token_from_request=_token)
 
     if events is not None:
         from .event_http import add_event_routes

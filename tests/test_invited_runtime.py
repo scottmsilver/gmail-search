@@ -119,7 +119,7 @@ def assembled(tmp_path,monkeypatch):
         release=SimpleNamespace(store_id='test-store',release_epoch=1),
         worker=SimpleNamespace(host='worker.test',port=22,private_key=tmp_path/'key',known_hosts=tmp_path/'hosts'),
         broker=SimpleNamespace(origin='https://broker.test',bearer='b'*48,signing_secret='h'*48),
-        provider=SimpleNamespace(anthropic_key='a'*40,claude_oauth_token=None,claude_login_file=None,gemini_key='g'*40,input_units_per_token=1,
+        provider=SimpleNamespace(anthropic_key='a'*40,claude_oauth_token=None,claude_login_file=None,openrouter_key=None,gemini_key='g'*40,input_units_per_token=1,
             output_units_per_token=1,embedding_units_per_token=1,rerank_input_units_per_token=1,
             rerank_output_units_per_token=1,fact_model_tag='facts-v1'))
     for key,value in {'GMAIL_MULTI_TENANT':'1','GMS_PUBLIC_ORIGIN':'https://gms.example.test',
@@ -395,3 +395,46 @@ def test_a_pinned_owner_that_never_signed_in_is_refused(tmp_path):
     owner=SimpleNamespace(id=owner_id,email='owner@example.test',google_subject='pinned')
     with pytest.raises(AccessDenied):
         verify_identities(identities,[owner])
+
+
+def test_every_layer_allows_the_same_deep_turn():
+    """A 33-step Claude run died at 3 minutes: the capabilities, controller,
+    worker and guest each capped a turn separately. They must agree."""
+    import importlib.util,sys
+    from gmail_search.gateway.full_agent_remote import FULL_LIMITS, RUN_WALL_SECONDS
+    worker=Path(__file__).parents[1]/'deploy/public/worker'
+    rpc_dir=Path(__file__).parents[1]/'src/gmail_search/gateway'  # the manager imports full_agent_rpc
+    sys.path[:0]=[str(worker),str(rpc_dir)]
+    try:
+        loaded={}
+        for name in ('full_agent_manager','guest_agent_pi'):
+            spec=importlib.util.spec_from_file_location(name+'_limits',worker/(name+'.py'))
+            loaded[name]=importlib.util.module_from_spec(spec);spec.loader.exec_module(loaded[name])
+    finally:
+        sys.path.remove(str(worker));sys.path.remove(str(rpc_dir))
+    assert FULL_LIMITS.wall_seconds==RUN_WALL_SECONDS==loaded['full_agent_manager'].Limits.wall_seconds==900
+    assert RUN_WALL_SECONDS-60<loaded['guest_agent_pi'].RUN_SECONDS<RUN_WALL_SECONDS
+
+
+def test_capabilities_last_as_long_as_the_turn(tmp_path):
+    import time
+    s=_envelope(tmp_path)
+    s.envelope(s.lease,'Find my receipts','pi')
+    with s.registry._transaction() as db:
+        expiry=[row['expires_at']-time.time() for row in db.execute('SELECT expires_at FROM capabilities')]
+    assert expiry and all(e>850 for e in expiry), 'capabilities must outlive the old 180 s cap'
+
+
+def test_pi_on_opus_binds_an_openrouter_profile_only_with_the_service(tmp_path):
+    from gmail_search.invited_runtime import envelope_factory
+    s=_envelope(tmp_path)
+    bound=[]
+    openrouter=SimpleNamespace(bind_profile=lambda run,profile:bound.append(profile))
+    rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
+    envelope=envelope_factory(Capabilities(s.registry),SimpleNamespace(bind_profile=None),rates,openrouter=openrouter)
+    assert 'pi_opus' in envelope.runtimes
+    packet=envelope(s.lease,'Find my receipts','pi_opus')
+    validate_bootstrap(packet,'Find my receipts','pi_opus')
+    assert json.loads(packet[4:])['profile']=='mail-agent-pi-opus-v1'
+    assert bound[0].model=='anthropic/claude-opus-5' and bound[0].reasoning_effort=='medium'
+    assert 'pi_opus' not in s.envelope.runtimes

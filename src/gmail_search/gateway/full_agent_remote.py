@@ -10,9 +10,13 @@ from .attachment_remote import SSHTransport as _SSHTransport,exchange_process
 from .registry import AccessDenied,RunLease
 from .worker import WorkerLimits
 
-FULL_LIMITS=WorkerLimits(vcpus=1,memory_mib=1024,pids=128,disk_bytes=1024**3,output_bytes=8*1024**2,wall_seconds=180)
+# One deep turn's wall clock, as the legacy deep mode allowed. The worker manager's
+# Limits.wall_seconds and the guest's RUN_SECONDS must agree (see tests).
+RUN_WALL_SECONDS=900
+FULL_LIMITS=WorkerLimits(vcpus=1,memory_mib=1024,pids=128,disk_bytes=1024**3,output_bytes=8*1024**2,wall_seconds=RUN_WALL_SECONDS)
 # The runtime a browser may choose, and the guest profile each one boots.
-GUEST_PROFILES={'pi':'mail-agent-pi-v1','pi_gemini':'mail-agent-pi-gemini-v1','claude':'mail-agent-claude-v1'}
+GUEST_PROFILES={'pi':'mail-agent-pi-v1','pi_gemini':'mail-agent-pi-gemini-v1','pi_opus':'mail-agent-pi-opus-v1',
+    'claude':'mail-agent-claude-v1'}
 
 
 def context(lease):

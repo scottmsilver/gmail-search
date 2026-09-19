@@ -111,6 +111,7 @@ def test_invalid_start_never_launches(app_state,body):
 @pytest.mark.parametrize('backend,model,runtime',[
     (None,None,'pi_gemini'),('pi','google/gemini-3.8-flash','pi_gemini'),
     ('pi','openrouter/google/gemini-3.8-flash','pi_gemini'),
+    ('pi','anthropic/claude-opus-5','pi_opus'),('pi','openrouter/anthropic/claude-opus-5','pi_opus'),
     ('claude_code',None,'claude'),('claude_code','sonnet','claude')])
 def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,model,runtime):
     body = {'question':'hello','conversation_id':'conversation'}
@@ -123,7 +124,7 @@ def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,model,ru
 
 
 @pytest.mark.parametrize('backend,model',[
-    ('pi','openrouter/meta/muse-spark-1.3'),('pi','anthropic/claude-opus-5'),
+    ('pi','openrouter/meta/muse-spark-1.3'),
     ('claude_code','opus'),('claude_code','haiku'),('shell',None)])
 def test_a_model_without_a_gateway_route_is_refused_not_substituted(app_state,backend,model):
     """The gateway pins Claude Code to Sonnet 4.6; running Sonnet for an 'opus' pick would lie."""
@@ -294,3 +295,14 @@ def test_cancellation_while_first_send_waits_reaps_unpublished_worker(app_state)
     assert not s.backend.handles
     with s.runs.registry._transaction() as db:
         assert db.execute('SELECT state FROM browser_runs').fetchone()[0] == 'cancelled'
+
+
+def test_the_table_offers_only_runtimes_the_deployment_can_launch():
+    """Without an OpenRouter key there is no pi_opus binder: Opus is neither
+    reported nor accepted."""
+    from gmail_search.auth.run_routes import _runtime, deep_models
+    runtimes = frozenset({'pi_gemini','claude'})
+    assert deep_models(runtimes) == {'pi':['google/gemini-3.8-flash'],'claude_code':['sonnet']}
+    assert _runtime('pi','anthropic/claude-opus-5',runtimes) is None
+    assert _runtime('pi','anthropic/claude-opus-5') == 'pi_opus'
+    assert deep_models(frozenset({'claude'})) == {'claude_code':['sonnet']}

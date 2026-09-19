@@ -18,7 +18,7 @@ from .registry import AccessDenied
 
 _TERMINAL=frozenset(('completed','failed','cancelled'))
 # Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
-RUNTIMES=frozenset(('pi','pi_gemini','claude'))
+RUNTIMES=frozenset(('pi','pi_gemini','pi_opus','claude'))
 
 
 def _conversation(value):

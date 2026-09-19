@@ -386,3 +386,11 @@ def test_an_owner_subject_may_be_left_unpinned(tmp_path):
     value = _value(tmp_path)
     value["owners"][0]["google_subject"] = None
     assert load_runtime_config(_write(tmp_path, value)).owners[0].google_subject is None
+
+
+def test_an_openrouter_key_is_optional(tmp_path):
+    value = _value(tmp_path)
+    assert load_runtime_config(_write(tmp_path, value)).provider.openrouter_key is None
+    value["provider"]["openrouter_key"] = "sk-or-secret"
+    config = load_runtime_config(_write(tmp_path, value, name="with-openrouter.json"))
+    assert config.provider.openrouter_key == "sk-or-secret" and "sk-or-secret" not in repr(config)

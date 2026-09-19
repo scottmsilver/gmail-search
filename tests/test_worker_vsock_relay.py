@@ -292,3 +292,13 @@ def test_truncated_binary_response_closes_without_second_response(server,payload
     assert headers.startswith(b'HTTP/1.1 200')
     assert b'Content-Length: 20' in headers and body==payload
     assert result.count(b'HTTP/1.1')==1 and b'Relay request rejected' not in result
+
+
+def test_openrouter_chat_route_is_fixed_and_takes_no_parameters(server):
+    headers = b'Authorization: Bearer synthetic\r\nContent-Length: 2\r\nContent-Type: application/json\r\n'
+    assert request(server, '/v1/chat/completions', headers, base=False).startswith(b'HTTP/1.1 200')
+    assert server[1][0][0] == '/v1/chat/completions'
+    server[1].clear()
+    for invalid in ('/v1/chat/completions?model=x', '/v1/chat/other', '/v1/completions'):
+        assert request(server, invalid, headers, base=False).startswith(b'HTTP/1.1 400')
+    assert not server[1]

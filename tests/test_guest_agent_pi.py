@@ -305,3 +305,15 @@ def test_the_gemini_profile_points_pi_at_the_gateways_google_route(tmp_path,monk
 def test_a_non_pi_profile_is_refused_by_the_pi_runner(tmp_path,monkeypatch):
     runner=module('guest_agent_pi');monkeypatch.setattr(runner,'RUN',tmp_path/'run')
     with pytest.raises(runner.RunnerError):runner.prepare(envelope('mail-agent-claude-v1'))
+
+
+def test_the_opus_profile_points_pi_at_the_gateways_chat_route(tmp_path,monkeypatch):
+    """Pi's OpenAI client posts {baseUrl}/chat/completions; the relay admits /v1/chat/completions."""
+    runner=module('guest_agent_pi');monkeypatch.setattr(runner,'RUN',tmp_path/'run')
+    monkeypatch.setattr(runner.os,'chown',lambda *args:None)
+    opus=envelope('mail-agent-pi-opus-v1')
+    cwd,env=runner.prepare(opus)
+    provider=json.loads((tmp_path/'run/home/pi/models.json').read_text())['providers']['gateway']
+    assert (provider['api'],provider['baseUrl'])==('openai-completions','http://127.0.0.1:18080/v1')
+    assert [m['id'] for m in provider['models']]==['anthropic/claude-opus-5']
+    assert env['OPENROUTER_API_KEY']==opus['inference_capability'] and 'ANTHROPIC_API_KEY' not in env

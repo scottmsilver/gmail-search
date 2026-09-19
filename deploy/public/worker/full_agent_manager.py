@@ -32,7 +32,7 @@ class Limits:
     pids:int=128
     disk_bytes:int=1024**3
     output_bytes:int=8*1024**2
-    wall_seconds:int=180
+    wall_seconds:int=900  # FULL_LIMITS.wall_seconds on the controller
 
 
 def private(path,mode,directory=False):
@@ -168,7 +168,7 @@ class Manager:
                     return rpc.reply(h,'running' if row['state']=='active' else 'error','ok' if row['state']=='active' else 'stop_pending')
                 if self.db.execute("SELECT 1 FROM jobs WHERE state!='stopped'").fetchone():return rpc.reply(h,'error','busy')
                 now=time.time();context=dict(h['context']);expires=min(h['lease_expires'],now+LEASE_SECONDS,context['deadline'])
-                if not now<expires or context['deadline']-now>180:return rpc.reply(h,'error','expired')
+                if not now<expires or context['deadline']-now>Limits.wall_seconds:return rpc.reply(h,'error','expired')
                 with self.db:self.db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,0)',(handle,peer_uid,h['context_sha256'],binding,'active'))
                 entry=dict(cancel=threading.Event(),cleanup=threading.Lock(),session=None,launched=False,expires=expires,context=context)
                 thread=threading.Thread(target=self._run,args=(handle,context,payload,entry),daemon=False);entry['thread']=thread;self.jobs[handle]=entry

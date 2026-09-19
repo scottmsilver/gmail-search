@@ -92,7 +92,7 @@ def test_complete_staged_browser_flow_keeps_credentials_server_side(setup):
     assert me['user']['id']==owner.owner_id
     # The picker offers exactly what the run route serves, and never battles.
     assert me['capabilities']=={'full_runtime':False,'deep_models':{
-        'pi':['google/gemini-3.8-flash'],'claude_code':['sonnet']}}
+        'pi':['google/gemini-3.8-flash','anthropic/claude-opus-5'],'claude_code':['sonnet']}}
     assert client.get('/api/auth/gmail-status').json()=={'multi_tenant':True,'connect_method':'POST','connected':False}
     assert connect(client).status_code==303
     assert posted[-1][1]['owner_id']==owner.owner_id

@@ -259,14 +259,16 @@ class _InferenceResponse(StreamingResponse):
                 await _release(self._admission, self._owner_id)
 
 
-def add_inference_routes(app, *, anthropic=None, gemini=None, token_from_request):
-    """Mount only the two fixed provider routes selected by trusted startup code."""
+def add_inference_routes(app, *, anthropic=None, gemini=None, openrouter=None, token_from_request):
+    """Mount only the fixed provider routes selected by trusted startup code."""
     admission = _Admission()
     if anthropic is not None:
         _add(app, '/v1/messages', anthropic, token_from_request, admission, query=())
     if gemini is not None:
         _add(app, '/v1beta/models/gemini-3.8-flash:streamGenerateContent', gemini,
              token_from_request, admission, query=(('alt', 'sse'),))
+    if openrouter is not None:
+        _add(app, '/v1/chat/completions', openrouter, token_from_request, admission, query=())
 
 
 def _add(app, path, service, token_from_request, admission, *, query):

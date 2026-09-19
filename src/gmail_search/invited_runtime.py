@@ -37,6 +37,8 @@ from .gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from .gateway.provider import AnthropicRunService, ProviderProfile, _finish
 from .gateway.gemini import MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
 from .gateway.gemini_http import GeminiHTTPTransport
+from .gateway.openrouter import OpenRouterProfile, OpenRouterRunService
+from .gateway.openrouter_http import OpenRouterHTTPTransport
 from .gateway.provider_http import AnthropicHTTPTransport, ClaudeLoginFile
 from .gateway.provision_writer import verify_writer_access
 from .gateway.registry import AccessDenied, Registry
@@ -127,6 +129,9 @@ OUTPUT_TOKEN_LIMIT=4096
 # Pi on Gemini. MEDIUM is the legacy Pi default; thought tokens bill as output.
 GEMINI_OUTPUT_TOKEN_LIMIT=16384
 GEMINI_THINKING='MEDIUM'
+# Pi on OpenRouter-served models: runtime -> model. Medium effort, as legacy Pi.
+OPENROUTER_RUNTIMES={'pi_opus':'anthropic/claude-opus-5'}
+OPENROUTER_OUTPUT_TOKEN_LIMIT=16384
 
 
 def anthropic_transports(provider):
@@ -143,7 +148,7 @@ def anthropic_transports(provider):
     return {client:transport for client,transport in routes.items() if transport is not None}
 
 
-def _profile_binders(provider,gemini,rates):
+def _profile_binders(provider,gemini,rates,openrouter=None):
     """runtime -> bind(run_id), for exactly the runtimes this deployment can serve."""
     routed=getattr(provider,'transports_by_client',None)
     binders={}
@@ -158,17 +163,23 @@ def _profile_binders(provider,gemini,rates):
         profile=GeminiProfile(GEMINI_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
             rates.output_units_per_token,thinking_level=GEMINI_THINKING)
         binders['pi_gemini']=lambda run_id:gemini.bind_profile(run_id,profile)
+    if openrouter is not None:
+        for runtime,model in OPENROUTER_RUNTIMES.items():
+            profile=OpenRouterProfile(model,200000,OPENROUTER_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
+                rates.output_units_per_token,reasoning_effort='medium')
+            binders[runtime]=lambda run_id,profile=profile:openrouter.bind_profile(run_id,profile)
     return binders
 
 
-def envelope_factory(capabilities,provider,rates,*,gemini=None):
-    binders=_profile_binders(provider,gemini,rates)
+def envelope_factory(capabilities,provider,rates,*,gemini=None,openrouter=None):
+    binders=_profile_binders(provider,gemini,rates,openrouter)
     def envelope(lease,prompt,runtime='pi'):
         # Refuse before launch, not on the guest's first inference call.
         if runtime not in binders:
             raise AccessDenied()
         binders[runtime](lease.run_id)
-        tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,ttl=180).secret
+        tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,
+            ttl=FULL_LIMITS.wall_seconds).secret
             for audience,operations in (
                 ('sql',{'schema','query'}),
                 ('retrieval',{'thread.get','search','facts.find','query.emails'}),
@@ -183,6 +194,7 @@ def envelope_factory(capabilities,provider,rates,*,gemini=None):
         packet=len(raw).to_bytes(4,'big')+raw
         validate_bootstrap(packet,prompt,runtime)
         return packet
+    envelope.runtimes=frozenset(binders)
     return envelope
 
 
@@ -288,6 +300,11 @@ async def open_runtime(config):
         gemini_transport=GeminiHTTPTransport(config.provider.gemini_key,model=GEMINI_MODEL)
         stack.push_async_callback(_close_async,gemini_transport)
         gemini=GeminiRunService(caps,gemini_transport)
+        openrouter=None
+        if config.provider.openrouter_key:
+            openrouter_transport=OpenRouterHTTPTransport(config.provider.openrouter_key)
+            stack.push_async_callback(_close_async,openrouter_transport)
+            openrouter=OpenRouterRunService(caps,openrouter_transport)
         attachment_reader=OwnerAttachmentReader(gateway)
         locator=QueryAttachmentLocator(gateway,config.attachment_root)
         source=OwnerAttachmentSource(config.attachment_root,locate=locator.locate_raw)
@@ -301,10 +318,11 @@ async def open_runtime(config):
             attachment_reads=RunAttachmentReadService(caps,attachment_reader),
             raw_attachments=RunRawAttachmentService(caps,source,
                 admission=DataAdmission(global_concurrency=2,owner_concurrency=1)),
-            anthropic=provider,gemini=gemini,events=events)
+            anthropic=provider,gemini=gemini,openrouter=openrouter,events=events)
         transport=SSHTransport(host=config.worker.host,port=config.worker.port,
             private_key=config.worker.private_key,known_hosts=config.worker.known_hosts)
-        backend=ProductionBackend(registry,transport=transport,envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini))
+        envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini,openrouter=openrouter)
+        backend=ProductionBackend(registry,transport=transport,envelope_for=envelope_for)
         stack.push_async_callback(_close_sync,backend)
         workers=WorkerController(registry,backend,limits=FULL_LIMITS,max_workers=1,max_owner_workers=1)
         runs,conversations=compose_browser_runs(workers,events,connect=None,is_active=is_active,
@@ -325,6 +343,6 @@ async def open_runtime(config):
         browser_app=create_invited_app(identities=identities,consent=consent,broker=broker,
             provision_account=provision_account,runs=runs,conversations=conversations,
             artifacts=artifacts,mail=BrowserMail(gateway,attachment_reader=attachment_reader,
-                attachment_source=source),startup_prepared=True)
+                attachment_source=source),startup_prepared=True,runtimes=envelope_for.runtimes)
         gate.require_ready()
         yield Runtime(browser_app,gateway_app)

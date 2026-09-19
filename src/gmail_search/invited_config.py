@@ -85,6 +85,8 @@ class ProviderConfig:
     fact_model_tag: str
     # Or borrow the host's Claude Code login read-only (never refreshed here).
     claude_login_file: Path | None = None
+    # OpenRouter, for Pi's OpenRouter-served picker models. Optional.
+    openrouter_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -316,9 +318,10 @@ def _provider(value: Any) -> ProviderConfig:
     }
     credentials = ({"anthropic_key", "claude_oauth_token", "claude_login_file"} & set(value)
                    if type(value) is dict else set())
+    optional = {"openrouter_key"} & set(value) if type(value) is dict else set()
     if not credentials or {"claude_oauth_token", "claude_login_file"} <= credentials:
         raise _invalid()
-    value = _object(value, fields | credentials)
+    value = _object(value, fields | credentials | optional)
     anthropic_key = _provider_secret(value["anthropic_key"]) if "anthropic_key" in value else None
     claude_oauth_token = (_provider_secret(value["claude_oauth_token"])
                           if "claude_oauth_token" in value else None)
@@ -356,6 +359,7 @@ def _provider(value: Any) -> ProviderConfig:
         anthropic_key=anthropic_key,
         claude_oauth_token=claude_oauth_token,
         claude_login_file=claude_login_file,
+        openrouter_key=_provider_secret(value["openrouter_key"]) if "openrouter_key" in value else None,
         gemini_key=gemini_key,
         input_units_per_token=input_rate,
         output_units_per_token=output_rate,

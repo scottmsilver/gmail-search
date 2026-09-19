@@ -43,7 +43,8 @@ class InvitedBoundary:
         await self.app(scope, receive, private_send)
 
 
-def create_invited_app(*, identities, consent, broker, provision_account, runs, conversations, artifacts, mail=None, startup_prepared=False):
+def create_invited_app(*, identities, consent, broker, provision_account, runs, conversations, artifacts, mail=None,
+                       startup_prepared=False, runtimes=None):
     """Assemble browser routes using a single trusted identity/registry.
 
     Only the owning launcher may set startup_prepared, after recovery and Gmail
@@ -54,7 +55,9 @@ def create_invited_app(*, identities, consent, broker, provision_account, runs, 
     config = validate_public_auth_config()
     if config is None or consent.identities is not identities or artifacts.registry is not runs.registry:
         raise ValueError('Explicit invited identity and shared result registry required')
-    auth = create_invited_auth_router(identities, consent, broker, provision_account=provision_account)
+    # `runtimes`: the guest runtimes this deployment can launch; the picker and
+    # the run route offer only those.
+    auth = create_invited_auth_router(identities, consent, broker, provision_account=provision_account, runtimes=runtimes)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -71,7 +74,8 @@ def create_invited_app(*, identities, consent, broker, provision_account, runs, 
     if mail is not None:
         app.include_router(create_mail_router(identities, mail))
     app.include_router(create_conversation_router(identities, conversations, origin=config.origin))
-    app.include_router(create_run_router(identities, runs, origin=config.origin, claim_conversation=conversations.claim))
+    app.include_router(create_run_router(identities, runs, origin=config.origin, claim_conversation=conversations.claim,
+                                         runtimes=runtimes))
     app.include_router(create_result_router(identities, artifacts, runs.events))
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(config.origin).hostname, '127.0.0.1', 'localhost'])
     app.add_middleware(InvitedBoundary, origin=config.origin)
