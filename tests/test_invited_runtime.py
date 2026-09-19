@@ -438,3 +438,19 @@ def test_pi_on_opus_binds_an_openrouter_profile_only_with_the_service(tmp_path):
     assert json.loads(packet[4:])['profile']=='mail-agent-pi-opus-v1'
     assert bound[0].model=='anthropic/claude-opus-5' and bound[0].reasoning_effort=='medium'
     assert 'pi_opus' not in s.envelope.runtimes
+
+
+
+def test_a_pending_owner_cannot_run_even_after_signing_in(tmp_path):
+    """The startup database checks were skipped for them; signing in must not
+    make them runnable until a restart runs those checks."""
+    from gmail_search.auth.identity_store import VerifiedGoogleIdentity
+    from gmail_search.invited_runtime import run_gate, verify_identities
+    identities,owner_id=_identity_store(tmp_path,None)
+    owner=SimpleNamespace(id=owner_id,email='owner@example.test',google_subject=None)
+    pending=verify_identities(identities,[owner])
+    can_run=run_gate({owner_id:owner},pending,identities)
+    identities.prepare_admission(VerifiedGoogleIdentity('owner@example.test','first-subject',True))
+    assert identities.is_active(owner_id), 'the sign-in bound them'
+    assert not can_run(owner_id), 'but they run nothing until restart'
+    assert run_gate({owner_id:owner},verify_identities(identities,[owner]),identities)(owner_id)

@@ -58,6 +58,9 @@ class _OpenRouterEvents:
                 raise ProviderProtocolError()
             self.stopped = True
             return b'\n'.join(lines) + b'\n\n'
+        if self.input_tokens is not None:
+            # Usage is the last frame before [DONE]; content after it would go unbilled.
+            raise ProviderProtocolError()
         value = json.loads(raw, object_pairs_hook=_unique_object)
         _plain_json(value)
         _object(value, 'id object created model choices', 'provider usage system_fingerprint service_tier')

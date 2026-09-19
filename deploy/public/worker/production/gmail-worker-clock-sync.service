@@ -6,12 +6,13 @@ Before=gmail-full-agent-manager.service
 
 [Service]
 Type=simple
-ExecStartPre=/usr/sbin/modprobe ptp_kvm
+# `+`: only this step gets full privileges; the daemon keeps just CAP_SYS_TIME.
+ExecStartPre=+/usr/sbin/modprobe ptp_kvm
 ExecStart=/usr/bin/python3 -I /opt/gmail-worker/phc_clock_sync.py
 Restart=always
 RestartSec=5
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_SYS_TIME CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_SYS_TIME
 PrivateNetwork=yes
 ProtectHome=yes
 ProtectSystem=strict

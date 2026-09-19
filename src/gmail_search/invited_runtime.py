@@ -96,6 +96,17 @@ def verify_budgets(registry,owners):
                 raise AccessDenied()
 
 
+def run_gate(owners,pending,identities):
+    """Who may run: a configured, active owner whose databases startup checked.
+
+    A pending owner may sign in (binding their subject) but runs nothing until a
+    restart has run the database checks startup skipped for them.
+    """
+    def can_run(owner):
+        return owner in owners and owner not in pending and identities.is_active(owner)
+    return can_run
+
+
 def _subject_matches(owner,subject):
     """A pinned subject must match; an unpinned one defers to the identity store,
     which binds the first verified sign-in and refuses any other afterwards."""
@@ -257,9 +268,10 @@ async def open_runtime(config):
         identities=IdentityStore(identity_path)
         pending=verify_identities(identities,config.owners)
         owners={owner.id:owner for owner in config.owners}
+        can_run=run_gate(owners,pending,identities)
         def is_active(owner):
             gate.require_ready()
-            return owner in owners and identities.is_active(owner)
+            return can_run(owner)
         registry=Registry(config.state_dir/'registry.sqlite',is_active=is_active,release_identity=gate.identity)
         verify_budgets(registry,config.owners)
         caps=Capabilities(registry)
@@ -334,7 +346,7 @@ async def open_runtime(config):
             owner=owners.get(account.owner_id)
             if (owner is None or account.email!=owner.email or claims.email!=owner.email
                     or not _subject_matches(owner,claims.subject) or claims.email_verified is not True
-                    or not is_active(owner.id)):
+                    or not (owner.id in pending or is_active(owner.id))):
                 raise AccessDenied()
             return True
         # Revoke abandoned run authority before even the gateway socket opens.

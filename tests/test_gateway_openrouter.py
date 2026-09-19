@@ -106,3 +106,17 @@ async def test_a_stream_off_contract_charges_the_reservation(setup, old, new):
     with pytest.raises(RuntimeError):
         await _through_service(setup, data)
     assert spend(setup[0]) == (0, 2000 * 2 + 200 * 3)
+
+
+
+@pytest.mark.asyncio
+async def test_content_after_usage_is_refused(setup):
+    """Usage is the last frame before [DONE]; anything after it would go unbilled."""
+    data = (FIXTURES / 'opus5_tool_call_stream.txt').read_bytes()
+    extra = (b'data: {"id":"gen-1789773056-y8UW7ch2d9vXHO2m1xwx","object":"chat.completion.chunk",'
+             b'"created":1789773056,"model":"anthropic/claude-opus-5","choices":[{"index":0,'
+             b'"delta":{"content":"unbilled text"}}]}\n\n')
+    data = data.replace(b'data: [DONE]', extra + b'data: [DONE]')
+    with pytest.raises(RuntimeError):
+        await _through_service(setup, data)
+    assert spend(setup[0]) == (0, 2000 * 2 + 200 * 3)
