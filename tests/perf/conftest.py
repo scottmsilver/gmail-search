@@ -61,7 +61,14 @@ def _perf_real_db(_isolated_pg_schema, monkeypatch):
     # no `search_id`, BM25 keyed on `id` — so the declaration has to move with
     # the DSN or `store/schema_profile.py` refuses the connection, which is
     # exactly what it is there to do.
-    monkeypatch.setenv("GMS_SCHEMA_PROFILE", "text-key-v1")
+    #
+    # Read it from serve rather than hardcoding it: this was pinned to
+    # `text-key-v1`, and the owner-partitions migration then made the live
+    # corpus `text-partitioned-v1`, so the pin hard-failed three tests
+    # against a database that was in fact correct. Falls back to the old pin
+    # when serve is not running (CI, fresh install), where the empty-corpus
+    # guard skips anyway.
+    monkeypatch.setenv("GMS_SCHEMA_PROFILE", H.serve_schema_profile_from_proc() or "text-key-v1")
     schema_profile.reset_verification_cache()
     yield
     schema_profile.reset_verification_cache()

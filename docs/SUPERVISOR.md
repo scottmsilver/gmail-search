@@ -18,7 +18,7 @@ rows) trigger a respawn after `--restart-delay` seconds (default 15).
 
 ## Run it under systemd-user (auto-start at login)
 
-Drop this at `~/.config/systemd/user/gmail-search-supervisor.service`:
+Drop this at `~/.config/systemd/user/gmail-search-supervise.service`:
 
 ```ini
 [Unit]
@@ -31,6 +31,11 @@ WorkingDirectory=%h/development/gmail-search
 ExecStart=%h/development/gmail-search/.venv/bin/gmail-search supervise
 Restart=on-failure
 RestartSec=10
+# Inherited by every spawned daemon. `crawl` drives a Chromium pool through
+# Playwright, whose drivers cost pipe descriptors; on systemd's default of
+# 1024 a driver leak exhausted the daemon in 19 minutes and wedged crawling
+# for four days (2026-09-15). Do not omit this.
+LimitNOFILE=65536
 
 [Install]
 WantedBy=default.target
@@ -40,8 +45,8 @@ Then:
 
 ```
 systemctl --user daemon-reload
-systemctl --user enable --now gmail-search-supervisor.service
-journalctl --user -u gmail-search-supervisor.service -f
+systemctl --user enable --now gmail-search-supervise.service
+journalctl --user -u gmail-search-supervise.service -f
 ```
 
 If you're not using systemd-user, a `@reboot` cron line works too:

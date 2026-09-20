@@ -139,6 +139,16 @@ def serve_db_dsn_from_proc() -> str | None:
     return found.get("DB_DSN")
 
 
+def serve_schema_profile_from_proc() -> str | None:
+    """Read the serve process's GMS_SCHEMA_PROFILE straight from /proc, for
+    exactly the reason `serve_db_dsn_from_proc` exists: the profile
+    declaration has to travel with the DSN it describes, and the ambient env
+    has already been rewritten by test isolation. Returns None when serve
+    does not export one."""
+    found = _read_env_from_serve(("GMS_SCHEMA_PROFILE",))
+    return found.get("GMS_SCHEMA_PROFILE")
+
+
 def http_base_url(env: dict[str, str] | None = None) -> str:
     """Serve HTTP base. Reads GMAIL_SEARCH_API_URL, defaults to the serve
     command's local bind. Never hardcoded in committed call sites beyond

@@ -3,6 +3,9 @@ name: CI
   push:
     branches:
     - main
+    # Long-lived integration branches: without this, work sits uncovered
+    # until someone opens a PR (12 commits / 15 days, as of 2026-09-20).
+    - prod/**
   pull_request:
 jobs:
   lint:
@@ -20,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       paradedb:
-        image: paradedb/paradedb:latest
+        # Pinned, and matched to production's pg_search 0.23.0. NOTE: this is
+        # the unpatched upstream build — prod runs a local patch for the
+        # pg_search ctid bug. If CI ever trips that, move to a newer upstream.
+        image: paradedb/paradedb:0.23.0-pg16
         env:
           POSTGRES_USER: gmail_search
           POSTGRES_PASSWORD: gmail_search
@@ -37,4 +43,10 @@ jobs:
     - name: Install package + dev deps from the lockfile
       run: uv sync --locked --extra dev
     - name: pytest (fast suite - integration/perf excluded via pyproject addopts)
+      # Without this the suite cannot see the service container above, and
+      # since f471efd an unconfigured suite fails rather than falling through
+      # to a live database. conftest creates a disposable test_<uuid8> schema
+      # per test against this DSN.
+      env:
+        GMS_TEST_PG_DSN: host=127.0.0.1 port=5544 user=gmail_search password=gmail_search dbname=gmail_search
       run: uv run pytest -q

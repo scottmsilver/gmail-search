@@ -105,7 +105,7 @@ gmail-search supervise
 
 `supervise` is the recommended steady-state mode. For every enrolled user it keeps `watch`, `update`, `summarize`, `reindex`, and `propositionize` alive, plus one shared `reconcile` and `crawl` — all via DB heartbeats, no PID files, duplicate daemons blocked at the DB layer. The reference deployment runs it as a `systemctl --user` unit alongside `serve`, the MCP server, the web app, a log-rotation timer, and a serve watchdog timer.
 
-**Set `LimitNOFILE=65536` on the supervisor unit.** That unit is not tracked in this repo, so the setting has to be applied wherever it is installed, and children inherit it. `crawl` drives a Chromium pool through Playwright, whose drivers cost pipe descriptors; on systemd's default of 1024 a driver leak exhausted the daemon in 19 minutes and wedged crawling for four days (2026-09-15). A daemon that heartbeats on its error path is invisible to the watchdog, so failures must be recorded as failures — see `_record_crawl_failure` in `cli.py`.
+**Set `LimitNOFILE=65536` on the supervisor unit.** The unit is not a tracked file — its canonical definition is the snippet in [docs/SUPERVISOR.md](docs/SUPERVISOR.md), which now carries this setting — so it has to be applied wherever it is installed, and children inherit it. `crawl` drives a Chromium pool through Playwright, whose drivers cost pipe descriptors; on systemd's default of 1024 a driver leak exhausted the daemon in 19 minutes and wedged crawling for four days (2026-09-15). A daemon that heartbeats on its error path is invisible to the watchdog, so failures must be recorded as failures — see `_record_crawl_failure` in `cli.py`.
 
 ### 6. Use it
 
