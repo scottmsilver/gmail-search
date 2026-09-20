@@ -105,6 +105,8 @@ gmail-search supervise
 
 `supervise` is the recommended steady-state mode. For every enrolled user it keeps `watch`, `update`, `summarize`, `reindex`, and `propositionize` alive, plus one shared `reconcile` and `crawl` — all via DB heartbeats, no PID files, duplicate daemons blocked at the DB layer. The reference deployment runs it as a `systemctl --user` unit alongside `serve`, the MCP server, the web app, a log-rotation timer, and a serve watchdog timer.
 
+**Set `LimitNOFILE=65536` on the supervisor unit.** That unit is not tracked in this repo, so the setting has to be applied wherever it is installed, and children inherit it. `crawl` drives a Chromium pool through Playwright, whose drivers cost pipe descriptors; on systemd's default of 1024 a driver leak exhausted the daemon in 19 minutes and wedged crawling for four days (2026-09-15). A daemon that heartbeats on its error path is invisible to the watchdog, so failures must be recorded as failures — see `_record_crawl_failure` in `cli.py`.
+
 ### 6. Use it
 
 ```bash
@@ -289,7 +291,9 @@ src/gmail_search/
     drive.py        — Drive API ingestion for body-linked Drive docs
     url_extract.py  — URL extraction from message bodies (with denylist)
     url_fetcher.py  — URL crawler: curl_cffi (Chrome TLS) first, crawl4ai
-                       headless fallback, dead-URL memory, per-host breaker
+                       headless fallback, dead-URL memory, per-host breaker;
+                       _crawler_session() owns browser start/teardown so a
+                       failed startup cannot orphan the Playwright driver
     crawl_profile.py — Per-host crawl profiles
     invite_guard.py — LLM gate: no link crawling on actionable invitations
   auth/

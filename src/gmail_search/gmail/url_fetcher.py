@@ -22,6 +22,7 @@ import os
 import re
 import socket
 import time  # noqa: F401 — used in _resolve_all_ips; formatter must not strip
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1084,6 +1085,91 @@ async def _process_one(
     return ok
 
 
+def _browser_config():
+    """The one Chromium profile every crawler tier uses.
+
+    Was copy-pasted into `run`, `run_continuous` and the self-test; the three
+    differed only in a comment, so they are one function now.
+    """
+    from crawl4ai import BrowserConfig
+
+    return BrowserConfig(
+        headless=True,
+        verbose=False,
+        light_mode=True,
+        text_mode=True,
+        proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
+        extra_args=[
+            # Chromium refuses to run as root inside containers / some
+            # CI — these flags match what crawl4ai's own docs recommend.
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ],
+    )
+
+
+# Playwright's `stop()` waits on the node driver with `proc.communicate()`,
+# which never returns if the driver wedges. Teardown gets a bounded budget.
+_CRAWLER_CLOSE_TIMEOUT_S = 30.0
+
+
+async def _close_crawler_quietly(crawler) -> None:
+    """Best-effort teardown that never masks the error which triggered it.
+
+    The close runs as its own shielded task under a timeout for two reasons
+    that both end in the leak this module exists to prevent: a wedged driver
+    makes `close()` hang forever, and a teardown reached *during*
+    cancellation would re-raise `CancelledError` at its first await — before
+    `playwright.stop()` — abandoning the driver. Shielding lets the close
+    finish even when the awaiting caller is being torn down.
+    """
+    task = asyncio.create_task(crawler.close())
+    try:
+        await asyncio.wait_for(asyncio.shield(task), _CRAWLER_CLOSE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        # `wait_for` cancels the SHIELD, not the task under it. A wedged close
+        # would otherwise stay pending until `asyncio.run()` tore the loop down
+        # ("Task was destroyed but it is pending"). The driver is already lost
+        # at this point; say so once at WARNING rather than hiding it.
+        task.cancel()
+        logger.warning("crawler teardown timed out after %ss; abandoning the driver", _CRAWLER_CLOSE_TIMEOUT_S)
+    except BaseException:  # noqa: BLE001 — chiefly CancelledError
+        # The caller is being torn down. Leave the shielded close running: it
+        # is the only thing that can still stop the driver.
+        logger.debug("crawler teardown did not complete cleanly", exc_info=True)
+
+
+@asynccontextmanager
+async def _crawler_session():
+    """An `AsyncWebCrawler` whose teardown also runs when STARTUP fails.
+
+    `async with AsyncWebCrawler(...)` does NOT call `__aexit__` if
+    `__aenter__` raises — and `__aenter__` spawns the Playwright node driver
+    subprocess *before* it launches the browser. So a launch failure
+    (2026-09-15: a Playwright upgrade left chromium-1208 undownloaded)
+    orphaned a live driver holding two pipe fds, with no reference left to
+    close it.
+
+    The crawl daemon retries every 2s, so that leaked ~60 fds/minute and
+    exhausted its 1024-fd limit in ~19 minutes, then sat wedged on EMFILE for
+    four days. Starting and closing explicitly is what lets the failure path
+    reclaim the driver.
+    """
+    from crawl4ai import AsyncWebCrawler
+
+    crawler = AsyncWebCrawler(config=_browser_config())
+    try:
+        await crawler.start()
+    except BaseException:
+        await _close_crawler_quietly(crawler)
+        raise
+    try:
+        yield crawler
+    finally:
+        await _close_crawler_quietly(crawler)
+
+
 async def run(
     db_path: Path,
     *,
@@ -1096,7 +1182,6 @@ async def run(
     Returns `{total, done, failed}` so the CLI can report progress.
     Uses a single shared `AsyncWebCrawler` to keep Chromium hot.
     """
-    from crawl4ai import AsyncWebCrawler, BrowserConfig
 
     conn = get_connection(db_path)
     try:
@@ -1120,27 +1205,12 @@ async def run(
     sem = asyncio.Semaphore(max(1, concurrency))
     _browser_cap = max(1, int(os.environ.get("GMAIL_CRAWL_BROWSER_CONCURRENCY", "3")))
     browser_sem = asyncio.Semaphore(min(_browser_cap, max(1, concurrency)))
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        light_mode=True,
-        text_mode=True,
-        proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
-        extra_args=[
-            # Chromium refuses to run as root inside containers / some
-            # CI — these flags match what crawl4ai's own docs recommend.
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-    )
-
     done = 0
     failed = 0
     http_client = build_http_client(timeout_s)
     cffi_session = build_cffi_session()  # primary engine; None → httpx-only
     try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
+        async with _crawler_session() as crawler:
             tasks = [
                 asyncio.create_task(
                     _process_one(
@@ -1205,7 +1275,6 @@ async def run_continuous(
     Returns `{total, done, failed}`. `target` is a soft cap on stubs pulled
     this call (the CLI loops it, refreshing progress + the memory-aware browser
     cap between calls)."""
-    from crawl4ai import AsyncWebCrawler, BrowserConfig
 
     progress = JobProgress(db_path, "crawl_urls")
     counters = {"done": 0, "failed": 0, "pulled": 0}
@@ -1333,16 +1402,8 @@ async def run_continuous(
             n = counters["done"] + counters["failed"]
             progress.update("crawling", n, target, f"{counters['done']} ok / {counters['failed']} failed")
 
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        light_mode=True,
-        text_mode=True,
-        proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
-        extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-    )
     try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
+        async with _crawler_session() as crawler:
             http_workers = [asyncio.create_task(_http_worker()) for _ in range(max(1, http_concurrency))]
             browser_workers = [asyncio.create_task(_browser_worker(crawler)) for _ in range(max(1, browser_cap))]
             ticker = asyncio.create_task(_progress_ticker())
@@ -1381,18 +1442,9 @@ def _self_test() -> None:
     """
     import asyncio as _aio
 
-    from crawl4ai import AsyncWebCrawler, BrowserConfig
 
     async def _go() -> None:
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=False,
-            light_mode=True,
-            text_mode=True,
-            proxy_config=_crawl_proxy_config(),  # None → direct; route browser tier through egress
-            extra_args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
-        async with AsyncWebCrawler(config=browser_config) as crawler:
+        async with _crawler_session() as crawler:
             r = await fetch_url_markdown(crawler, "https://example.com", timeout_s=30.0)
             if r is None:
                 print("FETCH FAILED")

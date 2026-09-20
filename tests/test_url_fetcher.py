@@ -646,6 +646,37 @@ def test_process_one_browser_uses_browser_sem_not_http_sem(monkeypatch):
 # ─── continuous worker-pool ────────────────────────────────────────────
 
 
+def _install_fake_crawler_session(monkeypatch) -> None:
+    """Stub `crawl4ai` with a fake `AsyncWebCrawler`.
+
+    Mirrors crawl4ai's real start/close surface — `start()`, `close()`, and
+    `__aenter__`/`__aexit__` delegating to them — because `_crawler_session`
+    drives start/close explicitly (not via `async with`) to guarantee driver
+    teardown when startup itself fails.
+    """
+    import sys as _sys
+    import types as _types
+
+    class _FakeCrawler:
+        async def start(self):
+            return self
+
+        async def close(self):
+            return None
+
+        async def __aenter__(self):
+            return await self.start()
+
+        async def __aexit__(self, *a):
+            await self.close()
+            return False
+
+    fake_mod = _types.ModuleType("crawl4ai")
+    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
+    fake_mod.BrowserConfig = lambda **k: None
+    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+
+
 def test_run_continuous_processes_all_outcomes(monkeypatch):
     # End-to-end of run_continuous with everything below the orchestration
     # mocked: a producer batch of stubs with ok / fail / browser outcomes;
@@ -695,20 +726,7 @@ def test_run_continuous_processes_all_outcomes(monkeypatch):
     monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
 
     # Stub the crawl4ai AsyncWebCrawler context manager.
-    class _FakeCrawler:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-    import sys as _sys
-    import types as _types
-
-    fake_mod = _types.ModuleType("crawl4ai")
-    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
-    fake_mod.BrowserConfig = lambda **k: None
-    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+    _install_fake_crawler_session(monkeypatch)
 
     r = asyncio.run(uf.run_continuous(None, http_concurrency=3, browser_cap=2, target=6))
     # s0,s1 ok via http; s3,s4 ok via browser → 4 done. s2 fail, s5 abandon → 2 fail.
@@ -925,20 +943,7 @@ def test_run_continuous_antibot_abandons_and_strikes(monkeypatch):
 
     monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
 
-    class _FakeCrawler:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-    import sys as _sys
-    import types as _types
-
-    fake_mod = _types.ModuleType("crawl4ai")
-    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
-    fake_mod.BrowserConfig = lambda **k: None
-    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+    _install_fake_crawler_session(monkeypatch)
 
     r = asyncio.run(uf.run_continuous(None, http_concurrency=2, browser_cap=1, target=3))
     assert r == {"total": 3, "done": 2, "failed": 1}
@@ -1006,20 +1011,7 @@ def test_run_continuous_skips_render_when_redirect_lands_on_blocked_host(monkeyp
     monkeypatch.setattr(uf, "resolve_via_http", fake_resolve)
     monkeypatch.setattr(uf, "_fetch_via_crawl4ai", fake_browser)
 
-    class _FakeCrawler:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-    import sys as _sys
-    import types as _types
-
-    fake_mod = _types.ModuleType("crawl4ai")
-    fake_mod.AsyncWebCrawler = lambda **k: _FakeCrawler()
-    fake_mod.BrowserConfig = lambda **k: None
-    monkeypatch.setitem(_sys.modules, "crawl4ai", fake_mod)
+    _install_fake_crawler_session(monkeypatch)
 
     r = asyncio.run(uf.run_continuous(None, http_concurrency=1, browser_cap=1, target=1))
     assert r == {"total": 1, "done": 0, "failed": 1}
