@@ -343,7 +343,10 @@ async def open_runtime(config):
         events=Events(caps)
         artifacts=ArtifactStore(config.state_dir/'artifacts',caps)
         readers=ReaderRegistry({o.id:ReaderCredential(o.id,o.reader_dsn) for o in config.owners},is_active=is_active)
-        writers=WriterRegistry({o.id:WriterCredential(o.id,o.writer_dsn) for o in config.owners},is_active=is_active)
+        # Writes check the gate fresh: maintenance must stop them at once. Reads may
+        # lag by the cache window; the registry re-reads the gate itself anyway.
+        writers=WriterRegistry({o.id:WriterCredential(o.id,o.writer_dsn) for o in config.owners},
+            is_active=check_owner_and_gate)
         admission=DataAdmission(global_concurrency=4,owner_concurrency=2)
         gateway=QueryGateway(readers,limits=QueryLimits(global_concurrency=4,owner_concurrency=2,
             deadline_seconds=TOOL_DEADLINE_SECONDS),admission=admission)
