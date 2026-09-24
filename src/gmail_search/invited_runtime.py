@@ -159,6 +159,12 @@ def anthropic_transports(provider):
     return {client:transport for client,transport in routes.items() if transport is not None}
 
 
+def _bind_with(service,profile):
+    """Bind this exact profile. Never close over a loop variable here: a later
+    profile would silently rebind an earlier runtime's service (it did)."""
+    return lambda run_id:service.bind_profile(run_id,profile)
+
+
 def _profile_binders(provider,gemini,rates,openrouter=None):
     """runtime -> bind(run_id), for exactly the runtimes this deployment can serve."""
     routed=getattr(provider,'transports_by_client',None)
@@ -169,16 +175,16 @@ def _profile_binders(provider,gemini,rates,openrouter=None):
         profile=ProviderProfile(model='claude-sonnet-4-6',input_token_limit=200000,
             output_token_limit=OUTPUT_TOKEN_LIMIT,input_units_per_token=rates.input_units_per_token,
             output_units_per_token=rates.output_units_per_token,client_profile=client,effort='high')
-        binders[runtime]=lambda run_id,profile=profile:provider.bind_profile(run_id,profile)
+        binders[runtime]=_bind_with(provider,profile)
     if gemini is not None:
         profile=GeminiProfile(GEMINI_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
             rates.output_units_per_token,thinking_level=GEMINI_THINKING)
-        binders['pi_gemini']=lambda run_id:gemini.bind_profile(run_id,profile)
+        binders['pi_gemini']=_bind_with(gemini,profile)
     if openrouter is not None:
         for runtime,model in OPENROUTER_RUNTIMES.items():
             profile=OpenRouterProfile(model,200000,OPENROUTER_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
                 rates.output_units_per_token,reasoning_effort='medium')
-            binders[runtime]=lambda run_id,profile=profile:openrouter.bind_profile(run_id,profile)
+            binders[runtime]=_bind_with(openrouter,profile)
     return binders
 
 

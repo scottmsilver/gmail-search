@@ -309,6 +309,9 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
                 workerRunId = data.session_id;
                 writer.write({type: "data-agent-run", transient: true,
                   data: {runId: data.session_id, conversationId: data.conversation_id}});
+                // The isolated runtime's first event waits on the VM booting
+                // (~4s). Show the run as started now, not after that wait.
+                emitStage("status", {type: "status", state: "starting"});
               }
             } else {
               if (kind === "cost") {

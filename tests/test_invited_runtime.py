@@ -454,3 +454,30 @@ def test_a_pending_owner_cannot_run_even_after_signing_in(tmp_path):
     assert identities.is_active(owner_id), 'the sign-in bound them'
     assert not can_run(owner_id), 'but they run nothing until restart'
     assert run_gate({owner_id:owner},verify_identities(identities,[owner]),identities)(owner_id)
+
+
+
+def test_each_runtime_binds_its_own_profile_when_all_are_configured(tmp_path):
+    """The Gemini binder used to close over a loop variable the OpenRouter loop
+    then reassigned, so Pi-on-Gemini bound an OpenRouter profile and every run
+    was refused before launch."""
+    from gmail_search.gateway.gemini import GeminiProfile
+    from gmail_search.gateway.openrouter import OpenRouterProfile
+    from gmail_search.gateway.provider import ProviderProfile
+    from gmail_search.invited_runtime import envelope_factory
+    s=_envelope(tmp_path)
+    bound={}
+    def service(name):
+        return SimpleNamespace(bind_profile=lambda run,profile,name=name:bound.__setitem__(name,profile))
+    provider=service('anthropic')
+    provider.transports_by_client={'pi-0.84.4':object(),'claude-2.1.272':object()}
+    rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
+    envelope=envelope_factory(Capabilities(s.registry),provider,rates,
+                              gemini=service('gemini'),openrouter=service('openrouter'))
+    assert sorted(envelope.runtimes)==['claude','pi','pi_gemini','pi_opus']
+    for runtime,expected in (('pi_gemini',GeminiProfile),('pi_opus',OpenRouterProfile),
+                             ('claude',ProviderProfile),('pi',ProviderProfile)):
+        bound.clear()
+        envelope(s.lease,'Find my receipts',runtime)
+        (service_name,profile),=bound.items()
+        assert type(profile) is expected, f'{runtime} bound {type(profile).__name__} via {service_name}'

@@ -166,7 +166,7 @@ async def test_injected_client_must_disable_environment_proxies():
 async def test_standard_optional_usage_and_cumulative_input_settlement(setup,geo):
     frames=response_events()
     start=json.loads(frames[0].split(b'data: ',1)[1])
-    start['message'].update(container=None,stop_details=None)
+    start['message'].update(container=None,stop_details=None,diagnostics=None)
     start['message']['usage'].update(cache_creation=None,server_tool_use=None,service_tier='standard',inference_geo=geo,output_tokens_details=None)
     frames[0]=event('message_start',message=start['message'])
     frames[1]=event('content_block_start',index=0,content_block={'type':'text','text':'','citations':None})
@@ -282,3 +282,19 @@ def test_a_borrowed_login_is_never_sent_as_an_api_key(tmp_path):
     from gmail_search.gateway.provider_http import ClaudeLoginFile
     with pytest.raises(ValueError):
         AnthropicHTTPTransport(ClaudeLoginFile(tmp_path / 'credentials.json'))
+
+
+@pytest.mark.asyncio
+async def test_a_non_null_diagnostics_field_is_refused(setup):
+    """Upstream added message_start.diagnostics on 2026-09-24 (null so far);
+    every Claude run failed until it was allowed. Only null is qualified."""
+    frames=response_events()
+    start=json.loads(frames[0].split(b'data: ',1)[1])
+    start['message']['diagnostics']={'note':'unqualified'}
+    frames[0]=event('message_start',message=start['message'])
+    wire=Wire(frames)
+    async with client_for(wire) as client:
+        svc=service(setup,AnthropicHTTPTransport('synthetic-key',client=client))
+        with pytest.raises(RuntimeError):
+            await collect(svc,setup[3])
+    assert wire.closed

@@ -384,3 +384,17 @@ test('public deployment allows battles for a caller the server reports as capabl
     globalThis.fetch = originalFetch;
   }
 });
+
+test('an admitted worker run shows a starting step before the VM reports in', async () => {
+  // The guest's first event waits on the VM booting; without this the bubble
+  // sits empty for seconds after the user hits send.
+  globalThis.fetch = async (url) => String(url).endsWith('/api/auth/me') ? identity()
+    : new Response('event: session\ndata: {"session_id":"run-1","conversation_id":"c1","supports_cancel":true}\n\n'
+        + 'event: final\ndata: {"payload":{"text":"Answer"}}\n\n');
+  try {
+    const text = await (await POST(request({messages, conversation_id:'c1'}))).text();
+    const stages = text.split('\n').filter(l => l.includes('"data-deep-stage"'));
+    assert.ok(stages.length > 0, 'a deep stage is emitted');
+    assert.ok(stages[0].includes('"state":"starting"'), `first stage is starting, got ${stages[0].slice(0,200)}`);
+  } finally { globalThis.fetch = originalFetch; }
+});

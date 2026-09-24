@@ -126,11 +126,12 @@ class _Events:
             _object(value,'type message')
             if self.started:
                 raise ProviderProtocolError()
-            message=_object(value['message'],'id type role model content usage','stop_reason stop_sequence container stop_details')
+            message=_object(value['message'],'id type role model content usage','stop_reason stop_sequence container stop_details diagnostics')
             if message['type']!='message' or message['role']!='assistant' or message['model']!=self.model or message['content']!=[]:
                 raise ProviderProtocolError()
             _text(message['id'])
-            if any(message.get(key) is not None for key in ('stop_reason','stop_sequence','container','stop_details')):
+            # `diagnostics` appeared on 2026-09-24; nothing but null is qualified.
+            if any(message.get(key) is not None for key in ('stop_reason','stop_sequence','container','stop_details','diagnostics')):
                 raise ProviderProtocolError()
             usage=_usage(message['usage'],start=True)
             self.input_tokens,self.output_tokens=usage['input_tokens'],usage['output_tokens']
