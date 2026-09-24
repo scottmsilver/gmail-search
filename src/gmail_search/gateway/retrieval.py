@@ -9,6 +9,7 @@ import re
 
 from .analytics import QueryRejected
 from .registry import AccessDenied
+from .tool_deadline import tool_deadline
 
 _ID = re.compile(r'[A-Za-z0-9_-]{1,256}\Z', re.ASCII)
 _COLUMNS = 'id, thread_id, from_addr, to_addr, subject, date, labels'
@@ -127,7 +128,7 @@ class RunRetrievalService:
         Attachment inventory flags independently describe the requested ID page;
         visible messages contain only manifests from that inventory page.
         """
-        deadline = asyncio.get_running_loop().time()+30
+        deadline = tool_deadline()
         async with asyncio.timeout_at(deadline):
             lease = await self.authorize(token)
         if (type(thread_id) is not str or not _ID.fullmatch(thread_id)

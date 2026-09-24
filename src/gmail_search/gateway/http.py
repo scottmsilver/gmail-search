@@ -6,12 +6,18 @@ qualified worker relay, not expose it as an unauthenticated Internet service.
 import asyncio
 from decimal import Decimal
 import json
+import logging
+import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .analytics import QueryRejected
+from .analytics import QueryRejected, TextScanRejected
 from .service import RunQueryService
+
+timing_logger = logging.getLogger('gmail_search.gateway.timing')
+# Calls at or above this are logged as warnings (the tool deadline is 5 s).
+SLOW_CALL_MS = 2000
 
 _HEADERS = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'}
 _MAX_BODY = 32768
@@ -64,15 +70,25 @@ async def _body(request):
     return value['query']
 
 
-def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, openrouter=None, events=None) -> FastAPI:
+def _log_timing(request, response, started):
+    """Route, status and wall time only; never arguments or results."""
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    log = timing_logger.warning if elapsed_ms >= SLOW_CALL_MS else timing_logger.info
+    log('gateway %s %s %d %.0fms', request.method, request.url.path, response.status_code, elapsed_ms)
+
+
+def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, openrouter=None, events=None, judge=None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware('http')
     async def secure_errors(request, call_next):
+        started = time.perf_counter()
         try:
             response = await call_next(request)
         except PermissionError:
             response = JSONResponse({'detail':'Run access denied'}, status_code=403)
+        except TextScanRejected as error:
+            response = JSONResponse({'detail':str(error)}, status_code=400)
         except QueryRejected:
             response = JSONResponse({'detail':'Unsupported analytical query'}, status_code=400)
         except TimeoutError:
@@ -81,6 +97,7 @@ def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=No
             response = JSONResponse({'detail':'Query service unavailable'}, status_code=503)
         for name, value in _HEADERS.items():
             response.headers[name] = value
+        _log_timing(request, response, started)
         return response
 
     @app.get('/v1/schema')
@@ -118,6 +135,9 @@ def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=No
     if facts is not None:
         from .facts_http import add_facts_routes
         add_facts_routes(app, facts, _token, _json_body)
+    if judge is not None:
+        from .judge_http import add_judge_routes
+        add_judge_routes(app, judge, _token, _json_body)
 
     if metadata is not None:
         from .metadata_http import add_metadata_routes

@@ -5,11 +5,13 @@ accepted. This launcher never provisions accounts or opens an administrator DSN.
 """
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import fcntl
 import json
+import logging
 import os
 import stat
+import time
 
 import httpx
 
@@ -35,6 +37,10 @@ from .gateway.maintenance import GateReader, ReleaseIdentity
 from .gateway.metadata_service import RunMetadataService
 from .gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from .gateway.provider import AnthropicRunService, ProviderProfile, _finish
+from .gateway.effort_router import EffortRouter
+from .gateway.escalation import ThinkingEscalation
+from .gateway.jev import jev_config_from_env
+from .gateway.judge_http import RunJudgeService
 from .gateway.gemini import MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
 from .gateway.gemini_http import GeminiHTTPTransport
 from .gateway.openrouter import OpenRouterProfile, OpenRouterRunService
@@ -45,13 +51,17 @@ from .gateway.registry import AccessDenied, Registry
 from .gateway.retrieval import RunRetrievalService
 from .gateway.search_embedding import GeminiEmbeddingHTTPTransport, GeminiEmbeddingProfile, GeminiQueryEmbedder
 from .gateway.search_index import IndexBinding, OwnerIndexRegistry, load_scann_index
-from .gateway.search_reader import SearchCredential, SearchProfile, SearchReader, SearchRegistry
+from .gateway.search_reader import SearchCredential, SearchReader, SearchRegistry
 from .gateway.search_reranker import GeminiRerankerHTTPTransport, GeminiRerankerProfile, GeminiThreadReranker
 from .gateway.search_service import OwnerSearchContext, RunSearchService
 from .gateway.service import RunQueryService
+from .gateway.tool_deadline import TOOL_DEADLINE_SECONDS
 from .gateway.worker import WorkerController
 from .gateway.writer import WriterCredential, WriterRegistry, application_writer_role
 from .invited_app import create_invited_app
+from .invited_config import invited_search_profile
+
+logger=logging.getLogger(__name__)
 
 
 class ProductionBackend(SSHFullAgentBackend):
@@ -94,6 +104,9 @@ def verify_budgets(registry,owners):
             row=db.execute('SELECT owner_id,ceiling FROM budgets WHERE budget_id=?',(owner.budget_id,)).fetchone()
             if row is None or row['owner_id']!=owner.id or row['ceiling']<=0:
                 raise AccessDenied()
+            usage=db.execute('SELECT spent,reserved FROM budgets WHERE budget_id=?',(owner.budget_id,)).fetchone()
+            logger.warning('token budget owner=%s ceiling=%d spent=%d reserved=%d',
+                owner.id,row['ceiling'],usage['spent'],usage['reserved'])
 
 
 def run_gate(owners,pending,identities):
@@ -105,6 +118,25 @@ def run_gate(owners,pending,identities):
     def can_run(owner):
         return owner in owners and owner not in pending and identities.is_active(owner)
     return can_run
+
+
+# How long a positive owner/release-gate answer is reused. The full check opens
+# three SQLite files; readers consult it continuously, so an uncached gate made
+# a 10k-row search take ~30 s. A refusal is never cached.
+OWNER_GATE_CACHE_SECONDS=1.0
+
+
+def recently_confirmed(check,*,ttl=OWNER_GATE_CACHE_SECONDS,clock=time.monotonic):
+    """Wrap an owner check so a True answer is reused for `ttl` seconds."""
+    confirmed_until={}
+    def cached(owner):
+        if confirmed_until.get(owner,float('-inf'))>clock():
+            return True
+        result=check(owner)
+        if result is True:
+            confirmed_until[owner]=clock()+ttl
+        return result
+    return cached
 
 
 def _subject_matches(owner,subject):
@@ -133,6 +165,9 @@ def verify_identities(identities,owners):
     return frozenset(pending)
 
 
+# Agent VMs the worker runs at once (1 vCPU, up to ~1 GB each; the worker has
+# 4 vCPUs and ~3.9 GB, and Firecracker only backs memory a guest touches).
+MAX_CONCURRENT_RUNS=5
 # Each guest runtime speaks to the gateway through its own qualified CLI profile.
 CLIENT_PROFILES={'pi':'pi-0.84.4','claude':'claude-2.1.272'}
 # Guests are told this cap; the gateway refuses anything above it.
@@ -162,10 +197,33 @@ def anthropic_transports(provider):
 def _bind_with(service,profile):
     """Bind this exact profile. Never close over a loop variable here: a later
     profile would silently rebind an earlier runtime's service (it did)."""
-    return lambda run_id:service.bind_profile(run_id,profile)
+    return lambda run_id,prompt=None:service.bind_profile(run_id,profile)
 
 
-def _profile_binders(provider,gemini,rates,openrouter=None):
+def _bind_routed_gemini(service,profile,router):
+    """Bind Gemini with a thinking level Jev picks from this run's question."""
+    def bind(run_id,prompt=None):
+        level=router.thinking_level(prompt) if router is not None and prompt else profile.thinking_level
+        return service.bind_profile(run_id,replace(profile,thinking_level=level))
+    return bind
+
+
+def effort_router_for(jev):
+    """Jev effort router when Jev is configured, else None (fixed MEDIUM)."""
+    if jev is None:
+        return None
+    return EffortRouter(jev,httpx.Client(trust_env=False,follow_redirects=False))
+
+
+def judge_service_for(caps,jev,escalation):
+    """Guest `judge` tool backend when Jev is configured, else None (route absent)."""
+    if jev is None:
+        return None
+    return RunJudgeService(caps,jev,httpx.AsyncClient(trust_env=False,follow_redirects=False),
+        escalation=escalation)
+
+
+def _profile_binders(provider,gemini,rates,openrouter=None,router=None):
     """runtime -> bind(run_id), for exactly the runtimes this deployment can serve."""
     routed=getattr(provider,'transports_by_client',None)
     binders={}
@@ -179,7 +237,7 @@ def _profile_binders(provider,gemini,rates,openrouter=None):
     if gemini is not None:
         profile=GeminiProfile(GEMINI_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
             rates.output_units_per_token,thinking_level=GEMINI_THINKING)
-        binders['pi_gemini']=_bind_with(gemini,profile)
+        binders['pi_gemini']=_bind_routed_gemini(gemini,profile,router)
     if openrouter is not None:
         for runtime,model in OPENROUTER_RUNTIMES.items():
             profile=OpenRouterProfile(model,200000,OPENROUTER_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
@@ -188,18 +246,18 @@ def _profile_binders(provider,gemini,rates,openrouter=None):
     return binders
 
 
-def envelope_factory(capabilities,provider,rates,*,gemini=None,openrouter=None):
-    binders=_profile_binders(provider,gemini,rates,openrouter)
+def envelope_factory(capabilities,provider,rates,*,gemini=None,openrouter=None,router=None):
+    binders=_profile_binders(provider,gemini,rates,openrouter,router)
     def envelope(lease,prompt,runtime='pi'):
         # Refuse before launch, not on the guest's first inference call.
         if runtime not in binders:
             raise AccessDenied()
-        binders[runtime](lease.run_id)
+        binders[runtime](lease.run_id,prompt)
         tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,
             ttl=FULL_LIMITS.wall_seconds).secret
             for audience,operations in (
                 ('sql',{'schema','query'}),
-                ('retrieval',{'thread.get','search','facts.find','query.emails'}),
+                ('retrieval',{'thread.get','search','facts.find','query.emails','judge'}),
                 ('attachment',{'meta','text','raw'}),
                 ('artifact',{'artifact.commit','artifact.read'}),
                 ('inference',{'generate'}),('events',{'append'}))}
@@ -275,9 +333,10 @@ async def open_runtime(config):
         pending=verify_identities(identities,config.owners)
         owners={owner.id:owner for owner in config.owners}
         can_run=run_gate(owners,pending,identities)
-        def is_active(owner):
+        def check_owner_and_gate(owner):
             gate.require_ready()
             return can_run(owner)
+        is_active=recently_confirmed(check_owner_and_gate)
         registry=Registry(config.state_dir/'registry.sqlite',is_active=is_active,release_identity=gate.identity)
         verify_budgets(registry,config.owners)
         caps=Capabilities(registry)
@@ -286,10 +345,11 @@ async def open_runtime(config):
         readers=ReaderRegistry({o.id:ReaderCredential(o.id,o.reader_dsn) for o in config.owners},is_active=is_active)
         writers=WriterRegistry({o.id:WriterCredential(o.id,o.writer_dsn) for o in config.owners},is_active=is_active)
         admission=DataAdmission(global_concurrency=4,owner_concurrency=2)
-        gateway=QueryGateway(readers,limits=QueryLimits(global_concurrency=4,owner_concurrency=2),admission=admission)
+        gateway=QueryGateway(readers,limits=QueryLimits(global_concurrency=4,owner_concurrency=2,
+            deadline_seconds=TOOL_DEADLINE_SECONDS),admission=admission)
         search_reader=SearchReader(SearchRegistry({o.id:SearchCredential(o.id,o.search_dsn,schema_profile=TEXT)
             for o in config.owners},is_active=is_active),
-            profile=SearchProfile('gemini-embedding-2',config.provider.fact_model_tag,3072,schema_profile=TEXT),admission=admission)
+            profile=invited_search_profile(config.provider.fact_model_tag),admission=admission)
         await verify_databases([o for o in config.owners if o.id not in pending],writers,gateway,search_reader)
         indexes=OwnerIndexRegistry()
         stack.push_async_callback(_close_async,indexes)
@@ -317,7 +377,8 @@ async def open_runtime(config):
         provider=AnthropicRunService(caps,None,transports_by_client=inference_transports)
         gemini_transport=GeminiHTTPTransport(config.provider.gemini_key,model=GEMINI_MODEL)
         stack.push_async_callback(_close_async,gemini_transport)
-        gemini=GeminiRunService(caps,gemini_transport)
+        escalation=ThinkingEscalation()
+        gemini=GeminiRunService(caps,gemini_transport,escalation=escalation)
         openrouter=None
         if config.provider.openrouter_key:
             openrouter_transport=OpenRouterHTTPTransport(config.provider.openrouter_key)
@@ -326,6 +387,7 @@ async def open_runtime(config):
         attachment_reader=OwnerAttachmentReader(gateway)
         locator=QueryAttachmentLocator(gateway,config.attachment_root)
         source=OwnerAttachmentSource(config.attachment_root,locate=locator.locate_raw)
+        jev=jev_config_from_env()
         gateway_app=create_gateway_app(RunQueryService(caps,gateway),artifacts=artifacts,
             retrieval=RunRetrievalService(caps,gateway,attachment_reader=attachment_reader),
             search=RunSearchService(caps,search_reader,indexes,embedder,
@@ -336,13 +398,16 @@ async def open_runtime(config):
             attachment_reads=RunAttachmentReadService(caps,attachment_reader),
             raw_attachments=RunRawAttachmentService(caps,source,
                 admission=DataAdmission(global_concurrency=2,owner_concurrency=1)),
-            anthropic=provider,gemini=gemini,openrouter=openrouter,events=events)
+            anthropic=provider,gemini=gemini,openrouter=openrouter,events=events,
+            judge=judge_service_for(caps,jev,escalation))
         transport=SSHTransport(host=config.worker.host,port=config.worker.port,
             private_key=config.worker.private_key,known_hosts=config.worker.known_hosts)
-        envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini,openrouter=openrouter)
+        envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini,openrouter=openrouter,
+            router=effort_router_for(jev))
         backend=ProductionBackend(registry,transport=transport,envelope_for=envelope_for)
         stack.push_async_callback(_close_sync,backend)
-        workers=WorkerController(registry,backend,limits=FULL_LIMITS,max_workers=1,max_owner_workers=1)
+        workers=WorkerController(registry,backend,limits=FULL_LIMITS,max_workers=MAX_CONCURRENT_RUNS,
+            max_owner_workers=MAX_CONCURRENT_RUNS)
         runs,conversations=compose_browser_runs(workers,events,connect=None,is_active=is_active,
             prepare_input=backend.prepare_input,budget_for=lambda owner:owners[owner].budget_id,
             transaction_factory=writers.connection)

@@ -10,6 +10,7 @@ import json
 from . import attachment_reader as ar
 from .registry import AccessDenied
 from .service import _drain
+from .tool_deadline import tool_deadline
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _PUBLIC_METADATA = (
@@ -180,7 +181,7 @@ class RunAttachmentReadService:
         )
 
     async def _run(self, token, operation, read, project):
-        deadline = asyncio.get_running_loop().time() + 30
+        deadline = tool_deadline()
         task = None
 
         async def check():

@@ -232,7 +232,7 @@ class BoundSearchQueries:
             where.append('m.date<=%s');params.append(filters.date_to+'T23:59:59')
         if filters.has_attachment is not None:
             where.append(('' if filters.has_attachment else 'NOT ')+'EXISTS(SELECT 1 FROM public.attachments a WHERE a.user_id=m.user_id AND a.message_id=m.id)')
-        return await self._session.read('SELECT m.user_id AS owner_id,m.id AS message_id FROM public.messages m WHERE '+' AND '.join(where)+' ORDER BY m.id',params,MessageCandidate,limit)
+        return await self._session.read_message_ids('SELECT m.user_id AS owner_id,m.id AS message_id FROM public.messages m WHERE '+' AND '.join(where)+' ORDER BY m.id',params,limit)
 
     async def _lexical(self,branch,tokens,*,phrase=False,candidate_ids=None,limit=200):
         _limit(limit,10_000)
@@ -269,7 +269,7 @@ class BoundSearchQueries:
             FROM public.embeddings e JOIN public.messages m ON m.user_id=e.user_id AND m.id=e.message_id
             LEFT JOIN public.attachments a ON a.user_id=e.user_id AND a.message_id=e.message_id AND a.id=e.attachment_id
             WHERE e.user_id=%s AND e.model=%s AND e.id=ANY(%s::bigint[]) ORDER BY e.id''',
-            [self._session.owner_id,self._session.profile.embedding_model,list(ids)],EmbeddingHit,max(1,len(ids)))
+            [self._session.owner_id,self._session.profile.embedding_tag,list(ids)],EmbeddingHit,max(1,len(ids)))
 
     async def hydrate_messages(self,message_ids,*,body_chars=200):
         _limit(body_chars,400_000)
@@ -316,7 +316,7 @@ class BoundSearchQueries:
         _limit(limit,128)
         if after is not None:_ids((after,),numeric=True)
         if ids is not None:ids=_ids(ids,numeric=True,maximum=10_000)
-        model=self._session.profile.fact_model_tag if table=='propositions' else self._session.profile.embedding_model
+        model=self._session.profile.fact_model_tag if table=='propositions' else self._session.profile.embedding_tag
         prefix='thread_id,text,' if table=='propositions' else ''
         # Guard BYTEA length before encoding/transferring it. Mismatch is explicit
         # metadata; callers decide coverage/error rather than silently rank zeros.

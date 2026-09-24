@@ -208,10 +208,14 @@ class AnthropicRunService:
                 await asyncio.to_thread(self.registry.settle,lease.run_id,request_key,charge)
             await _finish(cleanup())
 
+    def _effective_profile(self, lease, profile):
+        """The bound profile, as this call should use it (providers may escalate)."""
+        return profile
+
     async def stream(self, token, request_key, body):
         """Yield bounded provider bytes with authorization before every publication."""
         lease = await self._authorize(token)
-        profile = await asyncio.to_thread(self.profile,lease.run_id)
+        profile = self._effective_profile(lease, await asyncio.to_thread(self.profile,lease.run_id))
         normalized = self._compile(body, profile)
         units = profile.input_token_limit*profile.input_units_per_token + self._output_limit(normalized)*profile.output_units_per_token
         reservation = asyncio.create_task(asyncio.to_thread(

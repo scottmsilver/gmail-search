@@ -23,6 +23,9 @@ STATE_PATH='/var/lib/gmail-full-agent-rpc'
 ACCOUNT='gmail-full-agent-rpc'
 LEASE_SECONDS=20
 MAX_RECORDS=10000
+# Concurrent agent VMs. Each is jailed with its own id, netns and vsock socket;
+# a real run peaks near 375 MB of the worker's ~3.5 GB (measured 2026-09-24).
+MAX_ACTIVE_JOBS=5
 
 
 @dataclass(frozen=True)
@@ -166,7 +169,7 @@ class Manager:
                 if row is not None:
                     if row['binding']!=binding:return rpc.reply(h,'error','binding_mismatch')
                     return rpc.reply(h,'running' if row['state']=='active' else 'error','ok' if row['state']=='active' else 'stop_pending')
-                if self.db.execute("SELECT 1 FROM jobs WHERE state!='stopped'").fetchone():return rpc.reply(h,'error','busy')
+                if self.db.execute("SELECT count(*) FROM jobs WHERE state!='stopped'").fetchone()[0]>=MAX_ACTIVE_JOBS:return rpc.reply(h,'error','busy')
                 now=time.time();context=dict(h['context']);expires=min(h['lease_expires'],now+LEASE_SECONDS,context['deadline'])
                 if not now<expires or context['deadline']-now>Limits.wall_seconds:return rpc.reply(h,'error','expired')
                 with self.db:self.db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,0)',(handle,peer_uid,h['context_sha256'],binding,'active'))

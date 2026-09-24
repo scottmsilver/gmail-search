@@ -24,6 +24,8 @@ from urllib.parse import quote
 from guest_tool_config import LEGACY_PROFILE, RAW_PROFILE, ConfigError, parse_tool_config
 
 MAX_BATCH_ITEMS = 20
+# Every mail-tool call must finish fast; matches the gateway's tool deadline.
+TOOL_TIMEOUT_SECONDS = 5
 MAX_EXACT_INTEGER = 9007199254740991
 MAX_ARGUMENT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024**2
@@ -116,6 +118,55 @@ def _facts_options(item):
     return dict(item)
 
 
+# Jev judgments: bounded typed questions over state the agent supplies.
+MAX_JUDGE_STATE_BYTES = 32 * 1024
+MAX_JUDGE_QUESTIONS = 8
+_JUDGE_TYPES = ('noul', 'choice', 'score')
+_JUDGE_ID = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,63}\Z')
+
+
+def _judge_question(question):
+    """One agent question {id, type, instructions, options?} -> (id, Jev question)."""
+    if (type(question) is not dict or set(question) - {'id', 'type', 'instructions', 'options'}
+            or type(question.get('id')) is not str or not _JUDGE_ID.fullmatch(question['id'])
+            or question.get('type') not in _JUDGE_TYPES
+            or type(question.get('instructions')) is not str or not question['instructions'].strip()):
+        raise ToolError('Invalid judge question.')
+    options = question.get('options', [])
+    if type(options) is not list or any(type(option) is not str or not option.strip() for option in options):
+        raise ToolError('Judge options must be non-empty strings.')
+    judged = {'type': question['type'], 'instructions': question['instructions']}
+    if question['type'] == 'choice':
+        if not 2 <= len(options) <= 32:
+            raise ToolError('A choice question needs 2-32 options ("label: description").')
+        labels = [option.split(':', 1)[0].strip() for option in options]
+        if len(set(labels)) != len(labels) or not all(labels):
+            raise ToolError('Choice option labels must be distinct.')
+        judged['criteria'] = {label: option.split(':', 1)[-1].strip() for label, option in zip(labels, options)}
+    elif question['type'] == 'score':
+        if not 2 <= len(options) <= 10:
+            raise ToolError('A score question needs 2-10 ordered level descriptions.')
+        judged['criteria'] = options
+    elif options:
+        raise ToolError('A noul (yes/no) question takes no options.')
+    return question['id'], judged
+
+
+def _judge_options(item):
+    """Validate a judge call and convert it to the gateway's Jev request shape."""
+    if type(item) is not dict or set(item) != {'state', 'questions'}:
+        raise ToolError('Invalid judge arguments.')
+    state, questions = item['state'], item['questions']
+    if type(state) is not str or not state.strip() or len(state.encode('utf-8')) > MAX_JUDGE_STATE_BYTES:
+        raise ToolError('Judge state must be non-empty text of at most 32 KiB.')
+    if type(questions) is not list or not 1 <= len(questions) <= MAX_JUDGE_QUESTIONS:
+        raise ToolError('A judge call needs 1-8 questions.')
+    converted = dict(_judge_question(question) for question in questions)
+    if len(converted) != len(questions):
+        raise ToolError('Judge question ids must be distinct.')
+    return {'state': state, 'questions': converted}
+
+
 def _metadata_options(item):
     allowed = {'sender', 'subject_contains', 'date_from', 'date_to', 'label', 'has_attachment', 'order_by', 'limit'}
     if type(item) is not dict or set(item)-allowed:
@@ -161,8 +212,27 @@ def _attachment_options(item, *, allow_raw=False, exact_ids=False):
     return mode,body
 
 
+# The gateway explains some 400s (e.g. a text scan that belongs in search).
+# Those details are fixed gateway strings, never mail content; keep them short.
+MAX_REJECTION_REASON_BYTES = 600
+
+
+async def _rejection_reason(reader, status_code, headers):
+    """The gateway's `detail` for a 400, or None."""
+    length = headers.get(b'content-length')
+    if (status_code != b'400' or length is None or not re.fullmatch(rb'[0-9]{1,4}', length)
+            or int(length) > MAX_REJECTION_REASON_BYTES
+            or headers.get(b'content-type', b'').split(b';', 1)[0].lower() != b'application/json'):
+        return None
+    try:
+        detail = json.loads(await reader.readexactly(int(length))).get('detail')
+    except (ValueError, AttributeError, asyncio.IncompleteReadError):
+        return None
+    return detail if type(detail) is str and detail.isprintable() else None
+
+
 class GuestMailTools:
-    def __init__(self, workspace, capabilities, *, port=18080, timeout_seconds=30):
+    def __init__(self, workspace, capabilities, *, port=18080, timeout_seconds=TOOL_TIMEOUT_SECONDS):
         if (type(port) is not int or port not in (18080, 18081)
                 or type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 0 < timeout_seconds <= 60):
@@ -235,6 +305,8 @@ class GuestMailTools:
                 items, key = args['filters'], 'input'
             elif name == 'find_facts':
                 items, key = [_facts_options(args)], None
+            elif name == 'judge':
+                items, key = [_judge_options(args)], None
             elif name == 'search_emails_batch':
                 if set(args) != {'searches'}:
                     raise ToolError('Invalid search batch arguments.')
@@ -414,6 +486,10 @@ class GuestMailTools:
         if name == 'find_facts':
             body = json.dumps(_facts_options(item), ensure_ascii=False).encode('utf-8')
             return await self._request('POST', '/v1/find-facts', 'retrieval', body, budget)
+        if name == 'judge':
+            # `dispatch` already validated and converted the agent's questions.
+            body = json.dumps(item, ensure_ascii=False).encode('utf-8')
+            return await self._request('POST', '/v1/judge', 'retrieval', body, budget)
         if name == 'search_emails_batch':
             body = json.dumps(_search_options(item), ensure_ascii=False).encode('utf-8')
             return await self._request('POST', '/v1/search', 'retrieval', body, budget)
@@ -501,7 +577,9 @@ class GuestMailTools:
             if length is not None and (not re.fullmatch(rb'[0-9]{1,9}', length) or int(length) > MAX_RESPONSE_BYTES):
                 raise ToolError('Invalid or oversized gateway response length.')
             if int(first[1]) != status:
-                raise ToolError('Gateway rejected the operation. No retry was attempted.')
+                reason = await _rejection_reason(reader, first[1], headers)
+                raise ToolError('Gateway rejected the operation' + (f': {reason}' if reason else '.')
+                                + ' No retry was attempted.')
             if headers.get(b'content-type', b'').split(b';', 1)[0].lower() != b'application/json':
                 raise ToolError('Gateway response is not JSON.')
             chunks, size = [], 0

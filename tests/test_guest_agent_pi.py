@@ -100,7 +100,7 @@ def test_fixed_argv_and_capability_redaction():
     assert '--mode' in argv and argv[argv.index('--mode')+1]=='rpc'
     assert envelope()['prompt'] not in argv
     names=set(argv[argv.index('--tools')+1].split(','))
-    assert len(names)==15
+    assert len(names)==16 and 'mail_judge' in names
     assert {'bash','read','edit','write','grep','find','ls'}<=names
     event=runner.normalize({'type':'tool_execution_start','toolName':'bash','args':{'x':'5'*64}},['5'*64])
     assert '5'*64 not in json.dumps(event)
@@ -167,7 +167,7 @@ def test_prepare_pins_configuration_and_keeps_caps_out_of_model_file(tmp_path,mo
     assert envelope()['inference_capability'] not in models
     assert env['ANTHROPIC_API_KEY']==envelope()['inference_capability']
     assert envelope()['events_capability'] not in json.dumps(env)
-    assert len(env['MCP_DIRECT_TOOLS'].split(','))==8
+    assert len(env['MCP_DIRECT_TOOLS'].split(','))==9 and 'mail/judge' in env['MCP_DIRECT_TOOLS']
     with pytest.raises(FileExistsError):runner.prepare(envelope())
 
 

@@ -16,9 +16,9 @@ import signal
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from guest_tool_config import LEGACY_PROFILE, READ_PROFILE, RAW_PROFILE, LEGACY_TOOLS, READ_TOOLS
+from guest_tool_config import LEGACY_PROFILE, READ_PROFILE, RAW_PROFILE, LEGACY_TOOLS, READ_TOOLS, RAW_TOOLS
 from guest_mail_tool_cli import RUN_ROOT, _capabilities
-from guest_mail_tools import GuestMailTools, MAX_EXACT_INTEGER, ToolError, _invalid_constant, _object, _drain, _search_options, _facts_options, _metadata_options, _attachment_options
+from guest_mail_tools import GuestMailTools, MAX_EXACT_INTEGER, ToolError, _invalid_constant, _object, _drain, _search_options, _facts_options, _judge_options, _metadata_options, _attachment_options
 
 
 MAX_INPUT_LINE_BYTES = 256 * 1024
@@ -86,6 +86,10 @@ def _tools():
     return GuestMailTools(RUN_ROOT / "work", _capabilities(), port=18080)
 
 
+def _allowed_tools(profile):
+    return {LEGACY_PROFILE:LEGACY_TOOLS,READ_PROFILE:READ_TOOLS,RAW_PROFILE:RAW_TOOLS}[profile]
+
+
 def _tool_definitions(profile=LEGACY_PROFILE):
     if profile not in (LEGACY_PROFILE, READ_PROFILE, RAW_PROFILE):
         raise ToolError("Invalid guest tool profile.")
@@ -112,7 +116,9 @@ def _tool_definitions(profile=LEGACY_PROFILE):
         },
         {
             "name": "sql_query_batch",
-            "description": "Execute up to 20 SQL queries through the guest-scoped gateway.",
+            "description": ("Up to 20 SQL queries over mail metadata: ids, threads, senders, dates, labels, "
+                            "attachment names. Not for finding mail by content: LIKE/ILIKE/regex on body_text, "
+                            "subject or extracted_text is rejected. Use search_emails_batch for that."),
             "inputSchema": {
                 "type": "object", "properties": {"queries": {**batch, "items": {"type": "string", "minLength": 1}}},
                 "required": ["queries"], "additionalProperties": False,
@@ -158,7 +164,9 @@ def _tool_definitions(profile=LEGACY_PROFILE):
         },
         {
             "name": "search_emails_batch",
-            "description": "Run up to 20 owner-scoped hybrid mail searches. Read coverage metadata for approximate results and clipped bodies.",
+            "description": ("The way to find mail by content: up to 20 hybrid searches (BM25 keyword + semantic) "
+                            "with optional date_from/date_to. Read coverage metadata for approximate results "
+                            "and clipped bodies."),
             "inputSchema": {
                 "type": "object", "additionalProperties": False, "required": ["searches"],
                 "properties": {"searches": {**batch, "items": {
@@ -184,6 +192,32 @@ def _tool_definitions(profile=LEGACY_PROFILE):
                     "query": {"type": "string", "minLength": 1, "maxLength": 1000},
                     "exhaustive": {"type": "boolean", "default": True},
                     "k": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                },
+            },
+            "outputSchema": _output_schema(),
+        },
+        {
+            "name": "judge",
+            "description": ("Ask Jev (a fast judgment model, ~100 ms) typed questions instead of guessing: "
+                            "relevance, classification (e.g. order vs quote), which option is meant, or whether "
+                            "the evidence gathered so far answers the user's question (use a noul with id 'answered' for that check; a low answer grants more reasoning). `state` is the text to "
+                            "judge (<=32 KiB). Each question: noul (yes/no probability), choice (options "
+                            "'label: description') or score (ordered level descriptions). Returns probabilities "
+                            "and confidence per question."),
+            "inputSchema": {
+                "type": "object", "additionalProperties": False, "required": ["state", "questions"],
+                "properties": {
+                    "state": {"type": "string", "minLength": 1, "maxLength": 32768,
+                              "description": "The text (or JSON text) to judge."},
+                    "questions": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
+                        "type": "object", "additionalProperties": False, "required": ["id", "type", "instructions"],
+                        "properties": {
+                            "id": {"type": "string", "description": "Short identifier, e.g. answered."},
+                            "type": {"enum": ["noul", "choice", "score"]},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "options": {"type": "array", "items": {"type": "string"},
+                                        "description": "choice: 'label: description' per option; score: ordered level descriptions; noul: omit."},
+                        }}},
                 },
             },
             "outputSchema": _output_schema(),
@@ -251,11 +285,11 @@ def _tool_definitions(profile=LEGACY_PROFILE):
             elif type(value) is list:
                 for child in value:supported(child)
         for definition in definitions:supported(definition['inputSchema'])
-    allowed=LEGACY_TOOLS if profile==LEGACY_PROFILE else READ_TOOLS
+    allowed=_allowed_tools(profile)
     return [item for item in definitions if item['name'] in allowed]
 
 
-_TOOL_NAMES = frozenset(item["name"] for item in _tool_definitions(READ_PROFILE))
+_TOOL_NAMES = frozenset(item["name"] for item in _tool_definitions(RAW_PROFILE))
 
 
 def _valid_arguments(name, arguments, *, allow_raw=False, exact_ids=False):
@@ -286,6 +320,12 @@ def _valid_arguments(name, arguments, *, allow_raw=False, exact_ids=False):
         try:
             for item in values:_attachment_options(item,allow_raw=allow_raw,exact_ids=exact_ids)
         except (ValueError,TypeError):return False
+        return True
+    if name == "judge":
+        try:
+            _judge_options(arguments)
+        except (ValueError, TypeError, UnicodeError):
+            return False
         return True
     if name == "find_facts":
         try:
@@ -475,7 +515,7 @@ class GuestMailMCP:
             # Construction has no await: concurrent requests share one core
             # and its two-socket admission limit for this MCP connection.
             tools=self._get_tools()
-            allowed=LEGACY_TOOLS if self._profile==LEGACY_PROFILE else READ_TOOLS
+            allowed=_allowed_tools(self._profile)
             if (name not in allowed or self._profile==LEGACY_PROFILE and name=='get_thread_batch'
                     and {'attachment_after_id','attachment_limit'} & set(arguments)):
                 raise ToolError('Unsupported guest tool.')
@@ -487,7 +527,10 @@ class GuestMailMCP:
             # The core's cancellation path closes and drains its socket/tasks.
             # MCP cancellation asks us not to send a late response.
             raise
-        except (ToolError, OSError, TimeoutError, ValueError, TypeError, UnicodeError, RecursionError):
+        except ToolError as error:
+            # Fixed guest/gateway strings (never mail content) the agent can act on.
+            await self._emit(_result(identifier, _tool_error(str(error))))
+        except (OSError, TimeoutError, ValueError, TypeError, UnicodeError, RecursionError):
             await self._emit(_result(identifier, _tool_error("Guest tool is unavailable.")))
         finally:
             current = asyncio.current_task()

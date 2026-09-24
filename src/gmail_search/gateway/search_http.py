@@ -1,9 +1,9 @@
 """Optional capability-bound ranked search route for the private worker gateway."""
-import asyncio
 
 from fastapi import HTTPException, Request
 
 from .retrieval_http import run_while_connected
+from .tool_deadline import publication_deadline
 
 
 def add_search_routes(app,service,token_from_request,read_json):
@@ -19,7 +19,7 @@ def add_search_routes(app,service,token_from_request,read_json):
             return await run_while_connected(
                 request, service.search(token, **value),
                 before_publish=lambda: service.authorize(token),
-                publication_deadline=asyncio.get_running_loop().time()+30,
+                publication_deadline=publication_deadline(),
             )
         except (ValueError,TypeError):
             raise HTTPException(400,'Invalid search request') from None

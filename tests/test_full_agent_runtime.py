@@ -110,9 +110,10 @@ async def test_v3_core_rejects_inexact_ids_before_network(tmp_path):
     finally:await core.aclose()
 
 
-def test_full_extension_keeps_explicit_bounded_model_output_guard():
+def test_full_extension_bounds_what_the_model_sees_per_tool_call():
     source=(ROOT/'guest-agent-mail-mcp.ts').read_text()
-    # The adapter's boolean default silently truncates model-facing output at
-    # 50 KiB. This fixed profile must explicitly support the core's byte ceiling.
+    # At 8 MiB a single 694 KB thread fetch filled Gemini's 200k-token window:
+    # prompts grew to 208k tokens and the run failed. The adapter keeps a
+    # preview, names a temp file with the full output, and Pi can page it.
     assert 'outputGuard: true' not in source
-    assert 'outputGuard: { maxBytes: 8 * 1024 * 1024, maxLines: 100000, detailsMaxBytes: 16 * 1024 }' in source
+    assert 'outputGuard: { maxBytes: 100 * 1024, maxLines: 5000, detailsMaxBytes: 16 * 1024 }' in source

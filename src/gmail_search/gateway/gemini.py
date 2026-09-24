@@ -4,7 +4,7 @@ Reference: https://ai.google.dev/api/generate-content (2026-09-15).
 Local function tools and text/thought history only. No external content references,
 hosted tools, caches, audio or image generation. Not yet real Pi qualification.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .inference import (_plain_json, _copy, _object, _array, _text, _name,
                         _integer, _boolean, _schema, _reject, MAX_OUTPUT_TOKENS)
@@ -133,6 +133,16 @@ class GeminiProfile:
 
 class GeminiRunService(AnthropicRunService):
     profile_type = GeminiProfile
+
+    def __init__(self, *args, escalation=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.escalation = escalation
+
+    def _effective_profile(self, lease, profile):
+        if self.escalation is None:
+            return profile
+        level = self.escalation.level_for_call(lease.run_id, profile.thinking_level)
+        return profile if level == profile.thinking_level else replace(profile, thinking_level=level)
 
     def _endpoint(self, profile):
         return endpoint(profile.model)

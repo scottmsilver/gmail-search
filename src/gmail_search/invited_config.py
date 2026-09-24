@@ -22,6 +22,22 @@ from .gateway.search_reader import SearchCredential, SearchProfile
 from .gateway.search_reranker import GeminiRerankerProfile
 from .gateway.writer import WriterCredential
 
+# Queries embed with the GA model; the corpus rows are tagged with the preview
+# name. Both produce identical vectors (checked 2026-09-24, cosine 1.0).
+QUERY_EMBEDDING_MODEL = "gemini-embedding-2"
+STORED_EMBEDDING_TAG = "gemini-embedding-2-preview"
+EMBEDDING_DIMENSIONS = 3072
+
+
+def invited_search_profile(fact_model_tag: str) -> SearchProfile:
+    return SearchProfile(
+        QUERY_EMBEDDING_MODEL,
+        fact_model_tag,
+        EMBEDDING_DIMENSIONS,
+        schema_profile=TEXT_OWNER_PARTITIONS_V1,
+        stored_embedding_tag=STORED_EMBEDDING_TAG,
+    )
+
 
 _MAX_CONFIG_BYTES = 1024 * 1024
 _MAX_STRING_CHARS = 8192
@@ -349,12 +365,7 @@ def _provider(value: Any) -> ProviderConfig:
         rerank_output_rate,
         "full-model-ceilings-v1",
     )
-    SearchProfile(
-        "gemini-embedding-2",
-        fact_model_tag,
-        3072,
-        schema_profile=TEXT_OWNER_PARTITIONS_V1,
-    )
+    invited_search_profile(fact_model_tag)
     return ProviderConfig(
         anthropic_key=anthropic_key,
         claude_oauth_token=claude_oauth_token,

@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from .inference import MAX_REQUEST_BYTES
 from .provider import ReplayRejected
-from .registry import AccessDenied
+from .registry import AccessDenied, BudgetExhausted
 
 _REQUEST_KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z', re.ASCII)
 _STREAM_HEADERS = {
@@ -124,6 +124,8 @@ async def _close(iterator):
 def _http_error(error):
     if isinstance(error, ReplayRejected):
         return HTTPException(409, 'Inference request was already claimed')
+    if isinstance(error, BudgetExhausted):
+        return HTTPException(402, str(error))
     if isinstance(error, AccessDenied):
         return HTTPException(403, 'Run access denied')
     if isinstance(error, (ValueError, TypeError, RecursionError, UnicodeError)):

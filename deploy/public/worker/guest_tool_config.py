@@ -15,6 +15,8 @@ READ_PROFILE='mail-read-v2'
 RAW_PROFILE='mail-raw-mcp-v3'
 LEGACY_TOOLS=('describe_schema','sql_query_batch','get_thread_batch','publish_artifact_batch')
 READ_TOOLS=LEGACY_TOOLS+('search_emails_batch','find_facts','query_emails_batch','get_attachment_batch')
+# v3 adds `judge`: typed Jev judgments the agent asks instead of guessing.
+RAW_TOOLS=READ_TOOLS+('judge',)
 _TOKEN=re.compile(r'[a-f0-9]{64}\Z',re.ASCII)
 
 
@@ -42,7 +44,7 @@ class GuestToolConfig:
 
     @property
     def tool_names(self):
-        return LEGACY_TOOLS if self.version==1 else READ_TOOLS
+        return {1:LEGACY_TOOLS,2:READ_TOOLS,3:RAW_TOOLS}[self.version]
 
 
 def parse_tool_config(value):

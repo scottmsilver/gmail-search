@@ -306,3 +306,17 @@ def test_the_table_offers_only_runtimes_the_deployment_can_launch():
     assert _runtime('pi','anthropic/claude-opus-5',runtimes) is None
     assert _runtime('pi','anthropic/claude-opus-5') == 'pi_opus'
     assert deep_models(frozenset({'claude'})) == {'claude_code':['sonnet']}
+
+
+def test_a_question_while_every_worker_is_busy_is_told_to_wait(app_state):
+    """The worker runs one VM at a time. A second question used to be admitted
+    and then fail at launch as "The run failed"; now it is refused up front."""
+    s = app_state
+    s.runs.workers.max_workers = 1
+    owner = s.accounts['alice'].owner_id
+    s.runs._open(owner,'busy-conversation')   # a live run holding the only slot
+    response = s.client.post('/api/agent/analyze',headers=headers(s),json={
+        'question':'hello','conversation_id':'conversation'})
+    assert response.status_code == 409
+    assert 'still running' in response.json()['detail']
+    assert not s.backend.prompts

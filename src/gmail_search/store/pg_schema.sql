@@ -721,6 +721,9 @@ END $$;
 -- declare here because they're index-creation-on-empty-or-new tables
 -- that complete in microseconds.
 CREATE INDEX IF NOT EXISTS idx_messages_user_date          ON messages          (user_id, date DESC);
+-- Thread reads and per-thread attachment inventories filter on thread_id;
+-- without this every one was a full scan of the owner's messages (~500 ms).
+CREATE INDEX IF NOT EXISTS idx_messages_thread             ON messages          (user_id, thread_id, date, id);
 -- Serves the summarize work-selector's `ORDER BY m.date DESC` over INBOX mail
 -- directly (partial + matching sort key), so it walks newest-first and stops
 -- at LIMIT instead of seq-scanning + sorting the whole mailbox each pass.
@@ -848,8 +851,12 @@ BEGIN
         -- BYPASSRLS, this is what makes the gate effective.
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', tbl);
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', tbl);
+        -- Scoped to the two roles that bind app.user_id. Left TO PUBLIC it is
+        -- OR'd into every other role's owner policy, and pg_search then
+        -- evaluates it against every row of the partition (~950 ms per BM25
+        -- query for the invited search role instead of ~80 ms).
         EXECUTE format(
-            'CREATE POLICY tenant_isolation ON %I '
+            'CREATE POLICY tenant_isolation ON %I TO gmail_search_reader, gmail_analyst '
             'USING (user_id::text = current_setting(''app.user_id'', true)) '
             'WITH CHECK (user_id::text = current_setting(''app.user_id'', true))',
             tbl
@@ -898,6 +905,7 @@ ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_messages FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS tenant_isolation ON conversation_messages;
 CREATE POLICY tenant_isolation ON conversation_messages
+    TO gmail_search_reader, gmail_analyst
     USING (EXISTS (
         SELECT 1 FROM conversations c
          WHERE c.id = conversation_messages.conversation_id

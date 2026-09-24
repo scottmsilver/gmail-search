@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import math
 import re
+import time
 from types import MappingProxyType
 
 from gmail_search.search.parser import parse_query
@@ -19,6 +20,16 @@ from .search_index import PendingIndex
 from .search_queries import Selection, StructuredFilters, _text
 from .search_ranking import rank_candidates
 from .search_vectors import exact_candidates
+from .tool_deadline import tool_deadline
+
+
+# Candidate pool when a structured filter matches too many messages for an
+# exact scan. 3k keeps ~60% of the in-range hits a 10k pool finds (2017 test:
+# 419 vs 710) at a third of the rescoring and hydration cost.
+BROAD_FILTER_ANN_POOL=3000
+# Owner aliases/contacts change only when the daemons reindex; re-reading
+# ~11k rows on every search cost 0.2-1 s.
+OWNER_CONTEXT_CACHE_SECONDS=60
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,7 @@ class RunSearchService:
         self.embedder=embedder
         self.owners=MappingProxyType(dict(owners))
         self.reranker=reranker
+        self._context_cache={}
 
     async def authorize(self,token):
         return await _thread(self.capabilities.authorize,token,audience='retrieval',operation='search')
@@ -97,7 +109,7 @@ class RunSearchService:
                 or type(max_matches) is not int or not 0<=max_matches<=100):
             raise ValueError('Invalid search options')
         StructuredFilters(date_from=date_from,date_to=date_to)
-        deadline=asyncio.get_running_loop().time()+30
+        deadline=tool_deadline()
         async def check():
             current=await self.authorize(token)
             if current.run_id!=lease.run_id or current.owner_id!=lease.owner_id:
@@ -128,6 +140,16 @@ class RunSearchService:
         # further suspension may follow that check before publication.
         await check()
         return result
+
+    async def _cached_context(self,owner,deadline,check,reasons):
+        cached=self._context_cache.get(owner)
+        if cached is None or cached[0]<=time.monotonic():
+            fresh=set()
+            aliases,contacts=await self._context(owner,deadline,check,fresh)
+            cached=(time.monotonic()+OWNER_CONTEXT_CACHE_SECONDS,aliases,contacts,frozenset(fresh))
+            self._context_cache[owner]=cached
+        reasons.update(cached[3])
+        return cached[1],cached[2]
 
     async def _context(self,owner,deadline,check,reasons):
         aliases={}
@@ -207,7 +229,7 @@ class RunSearchService:
         try:
             # Complete the fixed reader's schema/credential qualification before
             # native index loading. This snapshot closes before provider work.
-            aliases,contacts=await self._context(lease.owner_id,deadline,check,reasons)
+            aliases,contacts=await self._cached_context(lease.owner_id,deadline,check,reasons)
             async with self.indexes.acquire(lease.owner_id) as index:
                 profile=self.reader.profile
                 if (index.binding.owner_id!=lease.owner_id or index.binding.model!=profile.embedding_model
@@ -244,7 +266,7 @@ class RunSearchService:
                         reasons.update(exact.reasons)
                         semantic='exact_restricted'
                     else:
-                        ids,scores=await index.search(vector,top_k=10_000 if candidates is not None else fetch_k,
+                        ids,scores=await index.search(vector,top_k=BROAD_FILTER_ANN_POOL if candidates is not None else fetch_k,
                                                       absolute_deadline=deadline)
                         reasons.add('approximate_vector_search')
                     hydrated=await db.hydrate_embeddings(tuple(ids))

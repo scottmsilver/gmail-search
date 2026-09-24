@@ -1,5 +1,6 @@
 """Explicit production entrypoint; never falls back to the legacy public server."""
 import asyncio
+import logging
 import os
 import sys
 
@@ -13,6 +14,17 @@ async def run(config):
         await serve_apps(runtime.browser_app,runtime.gateway_app)
 
 
+def _configure_logging():
+    """Our own operational lines (timings, budget) to the journal. Third-party
+    loggers stay silent: they can print URLs and headers."""
+    handler=logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter('%(name)s %(levelname)s %(message)s'))
+    ours=logging.getLogger('gmail_search')
+    ours.setLevel(logging.INFO)
+    ours.addHandler(handler)
+    ours.propagate=False
+
+
 def main():
     try:
         if sys.argv[1:] not in ([],['--check-config']):
@@ -21,6 +33,7 @@ def main():
         if sys.argv[1:] == ['--check-config']:
             print('Private invited configuration is valid; deployment readiness was not checked.')
             return
+        _configure_logging()
         asyncio.run(run(config))
     except KeyboardInterrupt:
         return

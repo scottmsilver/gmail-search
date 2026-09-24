@@ -109,7 +109,8 @@ def test_renew_replay_and_wrong_binding(tmp_path):
     finally:m.close()
 
 
-def test_stop_failure_retains_capacity_until_both_acks(tmp_path):
+def test_stop_failure_retains_capacity_until_both_acks(tmp_path,monkeypatch):
+    monkeypatch.setattr(mod,'MAX_ACTIVE_JOBS',1)
     m,b,s=setup(tmp_path);h,p=request();call(m,h,p);assert s.entered.wait(1)
     stop,_=request('stop',h['handle'],h['context']);b.fail_stop=True;s.fail_close=True
     assert call(m,stop,b'')['code']=='stop_pending'
@@ -255,3 +256,13 @@ def test_manager_directories_get_their_exact_mode_under_a_restrictive_umask(tmp_
 def stat_mode(path):
     import stat as stat_module
     return stat_module.S_IMODE(path.lstat().st_mode)
+
+
+def test_a_second_job_launches_while_the_first_runs(tmp_path,monkeypatch):
+    monkeypatch.setattr(mod,'MAX_ACTIVE_JOBS',2)
+    m,b,s=setup(tmp_path)
+    try:
+        h,p=request();assert call(m,h,p)['status']=='running'
+        h2,p2=request();assert call(m,h2,p2)['status']=='running'
+        h3,p3=request();assert call(m,h3,p3)['code']=='busy'
+    finally:m.close()

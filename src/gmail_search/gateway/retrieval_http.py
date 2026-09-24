@@ -4,6 +4,8 @@ import asyncio
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from .tool_deadline import publication_deadline
+
 
 async def _disconnect(request):
     # Called only after the bounded request body has been fully consumed.
@@ -72,4 +74,4 @@ def add_retrieval_routes(app, service, token_from_request, read_json):
             raise HTTPException(400, 'Invalid thread request')
         return await run_while_connected(request, service.thread(token, **value),
                                          before_publish=lambda: service.authorize(token),
-                                         publication_deadline=asyncio.get_running_loop().time()+30)
+                                         publication_deadline=publication_deadline())

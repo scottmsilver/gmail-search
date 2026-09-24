@@ -14,6 +14,7 @@ from psycopg import sql
 from .database import QueryResult
 from .registry import AccessDenied
 from .service import _drain
+from .tool_deadline import tool_deadline
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _COLUMNS = (
@@ -249,7 +250,7 @@ class RunMetadataService:
         order_by="date_desc",
         limit=20,
     ):
-        deadline = asyncio.get_running_loop().time() + 30
+        deadline = tool_deadline()
         async with asyncio.timeout_at(deadline):
             lease = await self.authorize(token)
         _options(

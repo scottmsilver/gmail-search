@@ -6,13 +6,14 @@ import hashlib
 import inspect
 import json
 import math
-import struct
 from types import MappingProxyType
 
+import numpy as np
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
-from .search_queries import BoundSearchQueries, Selection
+from .bounded_fetch import bounded_rows
+from .search_queries import BoundSearchQueries, MessageCandidate, Selection
 from .partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 as NUMERIC, TEXT_OWNER_PARTITIONS_V1 as TEXT, PartitionSchemaProfile, require_profile
 
 
@@ -100,10 +101,17 @@ class SearchProfile:
     fact_model_tag: str
     dimensions: int
     schema_profile: PartitionSchemaProfile=NUMERIC
+    # The `embeddings.model` tag the corpus was written under, when it differs
+    # from the API model that embeds queries (same vectors, different name).
+    stored_embedding_tag: str|None=None
+
+    @property
+    def embedding_tag(self):
+        return self.stored_embedding_tag or self.embedding_model
 
     def __post_init__(self):
         require_profile(self.schema_profile)
-        if any(not isinstance(value,str) or not value or len(value)>200 or '\x00' in value for value in (self.embedding_model,self.fact_model_tag)):
+        if any(not isinstance(value,str) or not value or len(value)>200 or '\x00' in value for value in (self.embedding_model,self.fact_model_tag,self.embedding_tag)):
             raise ValueError('Invalid trusted search model profile')
         if type(self.dimensions) is not int or not 1<=self.dimensions<=4096:
             raise ValueError('Invalid trusted vector dimensions')
@@ -241,7 +249,7 @@ class _Session:
         if await cursor.fetchone()!=(search_role(self.owner_id, profile=self.profile.schema_profile),search_role(self.owner_id, profile=self.profile.schema_profile),'64MB','on','force_custom_plan'):
             raise PermissionError('Search database identity is unavailable')
         await self.conn.execute('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-        for setting,value in (('search_path','pg_catalog'),('row_security','on'),('statement_timeout','10000'),('lock_timeout','1000'),('work_mem','4MB'),('max_parallel_workers_per_gather','0'),('plan_cache_mode','force_custom_plan')):
+        for setting,value in (('search_path','pg_catalog'),('row_security','on'),('statement_timeout','10000'),('lock_timeout','1000'),('work_mem','4MB'),('max_parallel_workers_per_gather','0'),('cursor_tuple_fraction','1'),('plan_cache_mode','force_custom_plan')):
             await self.conn.execute('SELECT set_config(%s,%s,true)',(setting,value))
         from .provision_search_reader import _checks
         checks=_checks(self.owner_id, profile=self.profile.schema_profile)
@@ -281,6 +289,52 @@ class _Session:
         milliseconds=max(1,int(min(remaining,self.reader.limits.statement_seconds)*1000))
         await self.conn.execute('SELECT set_config(\'statement_timeout\',%s,true)',(str(milliseconds),))
 
+    def _decode_row(self,payload):
+        values=json.loads(payload)
+        if values.pop('owner_id',None)!=self.owner_id:raise PermissionError('Search row owner mismatch')
+        if ('score' in values and (type(values['score']) not in (int,float) or not math.isfinite(values['score']))) or any(isinstance(value,float) and not math.isfinite(value) for value in values.values()):
+            raise RuntimeError('Invalid search numeric result')
+        if 'embedding' in values and values['embedding'] is not None:
+            vector=bytes.fromhex(values['embedding'])
+            if len(vector)!=self.profile.dimensions*4:raise RuntimeError('Invalid search vector size')
+            if not np.isfinite(np.frombuffer(vector,dtype='<f4')).all():
+                values['embedding']=None;values['vector_status']='invalid_vector'
+            else:values['embedding']=vector
+        return values
+
+    def _stop_reason(self,payload,accepted,limit,page_bytes,budget):
+        """Why this row ends the page, or None to accept it."""
+        if accepted>=limit:return 'row_limit'
+        if payload is None:return 'row_bytes'
+        if self.rows>=self.reader.limits.max_session_rows:return 'session_budget'
+        if len(payload.encode('utf-8'))+page_bytes>budget:return 'page_bytes'
+        return None
+
+    async def read_message_ids(self,statement,params,limit):
+        """IDs from `statement` (columns owner_id, message_id) as one aggregated
+        row. A per-row JSON document per ID made 21k candidates cost ~1 s."""
+        async def operation():
+            await self.check();await self._timeout()
+            budget=min(self.reader.limits.max_page_bytes,self.reader.limits.max_session_bytes-self.bytes)
+            if budget<=0 or self.rows>=self.reader.limits.max_session_rows:
+                return Selection((),False,'session_budget')
+            bounded=('SELECT CASE WHEN octet_length(ids::text)<=%s THEN ids::text ELSE NULL END,owners_ok FROM '
+                '(SELECT json_agg(gms_row.message_id ORDER BY gms_row.message_id) AS ids,'
+                'bool_and(gms_row.owner_id=%s) AS owners_ok FROM ('+statement+' LIMIT %s) gms_row) gms_agg')
+            cursor=await self.conn.execute(bounded,(budget,self.owner_id,*params,limit+1))
+            payload,owners_ok=await cursor.fetchone()
+            await self.check()
+            if owners_ok is False:raise PermissionError('Search row owner mismatch')
+            if payload is None and owners_ok is not None:return Selection((),False,'page_bytes')
+            ids=json.loads(payload) if payload is not None else []
+            if not isinstance(ids,list) or any(not isinstance(value,str) for value in ids):
+                raise RuntimeError('Invalid search candidate list')
+            reason='row_limit' if len(ids)>limit else None
+            ids=ids[:limit]
+            self.bytes+=len(payload or '');self.rows+=len(ids)
+            return Selection(tuple(MessageCandidate(value) for value in ids),reason is None,reason)
+        return await self.owned(operation())
+
     async def read(self,statement,params,row_type,limit,*,cursor=None):
         async def operation():
             await self.check();await self._timeout()
@@ -289,34 +343,19 @@ class _Session:
                 return Selection((),False,'session_budget')
             bounded=('SELECT CASE WHEN octet_length(row_to_json(gms_row)::text)<=%s '
                 'THEN row_to_json(gms_row)::text ELSE NULL END FROM ('+statement+' LIMIT %s) gms_row')
-            output=[];page_bytes=0;complete=True;reason=None
+            output=[];page_bytes=0;reason=None
             self.serial+=1
             async with self.conn.cursor(name='search_'+str(self.serial)) as db_cursor:
                 await db_cursor.execute(bounded,(budget,*params,limit+1))
-                while True:
-                    await self.check()
-                    item=await db_cursor.fetchone()
-                    if item is None:break
-                    if len(output)>=limit:
-                        complete=False;reason='row_limit';break
-                    payload=item[0]
-                    if payload is None:
-                        complete=False;reason='row_bytes';break
-                    size=len(payload.encode('utf-8'))
-                    if size+page_bytes>budget or self.rows>=self.reader.limits.max_session_rows:
-                        complete=False;reason='session_budget' if self.rows>=self.reader.limits.max_session_rows else 'page_bytes';break
-                    values=json.loads(payload)
-                    if values.pop('owner_id',None)!=self.owner_id:raise PermissionError('Search row owner mismatch')
-                    if ('score' in values and (type(values['score']) not in (int,float) or not math.isfinite(values['score']))) or any(isinstance(value,float) and not math.isfinite(value) for value in values.values()):
-                        raise RuntimeError('Invalid search numeric result')
-                    if 'embedding' in values and values['embedding'] is not None:
-                        vector=bytes.fromhex(values['embedding'])
-                        if len(vector)!=self.profile.dimensions*4:raise RuntimeError('Invalid search vector size')
-                        if any(not math.isfinite(value) for value, in struct.iter_unpack('<f',vector)):
-                            values['embedding']=None;values['vector_status']='invalid_vector'
-                        else:values['embedding']=vector
-                    output.append(row_type(**values));page_bytes+=size;self.bytes+=size;self.rows+=1
+                # Liveness is checked per batch (and below), never per row.
+                async with bounded_rows(db_cursor,row_byte_cap=budget,between_batches=self.check) as rows:
+                    async for (payload,) in rows:
+                        reason=self._stop_reason(payload,len(output),limit,page_bytes,budget)
+                        if reason:break
+                        size=len(payload.encode('utf-8'))
+                        output.append(row_type(**self._decode_row(payload)));page_bytes+=size;self.bytes+=size;self.rows+=1
             await self.check()
+            complete=reason is None
             next_cursor=getattr(output[-1],cursor) if output and not complete and cursor and reason in ('row_limit','page_bytes') else None
             return Selection(tuple(output),complete,reason,next_cursor)
         return await self.owned(operation())

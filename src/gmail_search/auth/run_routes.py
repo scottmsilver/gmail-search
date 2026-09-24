@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from gmail_search.gateway.browser_runs import event_frame
+from gmail_search.gateway.browser_runs import WorkerBusy, event_frame
 from gmail_search.gateway.event_http import _settled_call
 from .identity_store import IdentityDenied
 from .public import SESSION_COOKIE
@@ -191,7 +191,11 @@ def create_run_router(identities, runs, *, origin, claim_conversation, runtimes=
         if claimed is not True:
             raise PermissionError()
         await recheck(request,account)
-        run = await runs.start(account.owner_id,conversation,question,runtime)
+        try:
+            run = await runs.start(account.owner_id,conversation,question,runtime)
+        except WorkerBusy:
+            raise HTTPException(409,'Another deep analysis is still running. Wait for it to finish '
+                                    'or stop it, then ask again.') from None
         try:
             initial = await snapshot(request,account,conversation,run,0)
         except BaseException:

@@ -49,6 +49,43 @@ class QueryRejected(ValueError):
     """Unsupported query; messages contain no input SQL or bound data."""
 
 
+# Free-text columns. A LIKE/regex over these reads every row of the owner's
+# mail (seconds, past the tool deadline); the BM25 search tool answers the
+# same question from an index in milliseconds.
+_FULL_TEXT_COLUMNS = frozenset({'body_text', 'subject', 'extracted_text', 'text',
+                                'chunk_text', 'summary', 'snippet'})
+_PATTERN_OPERATORS = frozenset({'~~', '~~*', '!~~', '!~~*', '~', '~*', '!~', '!~*'})
+
+
+class TextScanRejected(QueryRejected):
+    """Pattern match over mail text; the message is shown to the agent."""
+    def __init__(self):
+        super().__init__('LIKE/ILIKE/regex on message or attachment text is not supported: it scans '
+                         'the whole mailbox. Use search_emails_batch for text (BM25 keyword + semantic '
+                         'search), then use SQL only to filter or join by id, thread_id, sender or date.')
+
+
+def _column_names(node):
+    """Every column name referenced anywhere under an AST node."""
+    names, pending = set(), [node]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if 'ColumnRef' in value:
+                fields = value['ColumnRef'].get('fields', [])
+                names.update(f['String']['sval'] for f in fields if 'String' in f)
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return names
+
+
+def _reject_text_scan(mode, operator, body):
+    is_pattern = mode in ('AEXPR_LIKE', 'AEXPR_ILIKE') or operator in _PATTERN_OPERATORS
+    if is_pattern and _FULL_TEXT_COLUMNS & _column_names(body.get('lexpr')):
+        raise TextScanRejected()
+
+
 @dataclass(frozen=True)
 class CompiledQuery:
     sql: str
@@ -330,6 +367,7 @@ class _Compiler:
                 return '(' + left + ' OPERATOR(pg_catalog.' + operator + ') ' + quantifier + ' (ARRAY[' + elements + ']))'
             if mode not in ('AEXPR_OP', 'AEXPR_LIKE', 'AEXPR_ILIKE'):
                 _reject()
+            _reject_text_scan(mode, operator, body)
             right = self.expr(body['rexpr'], scope, ctes)
             if 'lexpr' not in body:
                 if operator not in ('+', '-'):

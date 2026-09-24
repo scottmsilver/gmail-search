@@ -23,6 +23,9 @@ class PendingIndex(IndexUnavailable):
     """Only an explicitly registered, genuinely unbuilt owner index."""
 
 
+SEARCH_SLOT_POLL_SECONDS=0.02
+
+
 class IndexBusy(IndexUnavailable):
     """Bounded index capacity is occupied, including draining native work."""
 
@@ -132,6 +135,16 @@ class _Lease:
         self._closed=False
         self._jobs=set()
 
+    async def _wait_for_search_slot(self,generation,absolute_deadline):
+        """Queue behind a running search instead of failing the call: a batch
+        of searches from one tool call used to lose all but the first."""
+        registry=self._registry
+        while generation.searches or registry._searches>=registry._max_searches:
+            if self._closed or registry._closed:raise IndexUnavailable()
+            remaining=absolute_deadline-time.monotonic()
+            if remaining<=0:raise IndexBusy()
+            await asyncio.sleep(min(SEARCH_SLOT_POLL_SECONDS,remaining))
+
     async def search(self,vector,*,top_k,absolute_deadline):
         registry=self._registry;registry._check_loop()
         if self._closed or registry._closed:raise IndexUnavailable()
@@ -142,7 +155,8 @@ class _Lease:
         if absolute_deadline<=time.monotonic():raise TimeoutError()
         vector=_vector(vector,self.binding.dimensions)
         generation=self._generation
-        if generation.searches or registry._searches>=registry._max_searches:raise IndexBusy()
+        await self._wait_for_search_slot(generation,absolute_deadline)
+        # No await between the slot check above and this claim.
         generation.searches+=1;registry._searches+=1
         caller=asyncio.current_task();self._jobs.add(caller)
         worker=asyncio.create_task(asyncio.to_thread(generation.resource.searcher.search,vector,top_k=top_k))

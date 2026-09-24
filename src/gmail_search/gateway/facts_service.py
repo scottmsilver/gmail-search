@@ -12,6 +12,7 @@ import numpy as np
 
 from .registry import AccessDenied
 from .search_queries import FactVectorRow, Selection, _text
+from .tool_deadline import tool_deadline
 
 MAX_VECTORS = 200_000
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -184,6 +185,77 @@ def _selection(page, limit):
         raise RuntimeError("Invalid fact selection")
 
 
+# Above this many facts a whole-corpus exact scan cannot finish inside the tool
+# deadline (1.08M facts is ~13 GB of hex vectors), so only lexical candidates
+# are scored: the same bound the legacy find_facts uses (max_load=8000).
+FULL_SCAN_MAX_FACTS = 8000
+
+
+def _score_fact_page(page, after, scalars, reasons, query_vector, profile, owner_terms):
+    """Score one page of fact vectors into `scalars`; return the last ID."""
+    last = after
+    for row in page.rows:
+        if (
+            not isinstance(row, FactVectorRow)
+            or type(row.id) is not int
+            or row.id <= 0
+            or row.id >= 2**63
+            or (last is not None and row.id <= last)
+        ):
+            raise RuntimeError("Invalid fact page")
+        last = row.id
+        score, reason = (
+            (None, "model_mismatch")
+            if row.model != profile.fact_model_tag
+            else _cosine(row, query_vector, profile.dimensions)
+        )
+        if reason:
+            reasons.add(reason)
+        scalars[row.id] = (
+            score,
+            any(term in row.text.lower() for term in owner_terms),
+        )
+    return last
+
+
+async def _scan_all_facts(db, query_vector, profile, owner_terms, reasons, check):
+    scalars = {}
+    after = None
+    while len(scalars) < MAX_VECTORS:
+        limit = min(128, MAX_VECTORS - len(scalars))
+        page = await db.fact_vectors_page(after=after, limit=limit)
+        await check()
+        _selection(page, limit)
+        last = _score_fact_page(page, after, scalars, reasons, query_vector, profile, owner_terms)
+        if page.complete:
+            if page.next_cursor is not None:
+                raise RuntimeError("Invalid fact page")
+            break
+        if page.next_cursor is None:
+            reasons.add("scan_" + (page.reason or "incomplete"))
+            break
+        if not page.rows or type(page.next_cursor) is not int or page.next_cursor != last:
+            raise RuntimeError("Invalid fact cursor")
+        after = page.next_cursor
+        await asyncio.sleep(0)
+    else:
+        reasons.add("vector_limit")
+    return scalars
+
+
+async def _scan_fact_candidates(db, fact_ids, query_vector, profile, owner_terms, reasons, check):
+    scalars = {}
+    for start in range(0, len(fact_ids), 128):
+        chunk = sorted(fact_ids[start : start + 128])
+        page = await db.fact_vectors_page(fact_ids=chunk, limit=128)
+        await check()
+        _selection(page, 128)
+        if not page.complete:
+            reasons.add("scan_" + (page.reason or "incomplete"))
+        _score_fact_page(page, None, scalars, reasons, query_vector, profile, owner_terms)
+    return scalars
+
+
 def _rank(scalars, lexical, exhaustive):
     semantic = sorted(
         (pid for pid, meta in scalars.items() if meta[0] is not None),
@@ -268,7 +340,7 @@ class RunFactsService:
         return rows
 
     async def find_facts(self, token, *, query, exhaustive=True, k=200):
-        deadline = asyncio.get_running_loop().time() + 30
+        deadline = tool_deadline()
         async with asyncio.timeout_at(deadline):
             lease = await self._authorize(token)
         _text(query, 1000)
@@ -364,53 +436,15 @@ class RunFactsService:
                 lexical = [row.id for row in page.rows]
                 if len(set(lexical)) != len(lexical):
                     raise RuntimeError("Invalid fact lexical identity list")
-            scalars = {}
-            after = None
-            while len(scalars) < MAX_VECTORS:
-                page = await db.fact_vectors_page(
-                    after=after, limit=min(128, MAX_VECTORS - len(scalars))
+            if total <= FULL_SCAN_MAX_FACTS:
+                scalars = await _scan_all_facts(
+                    db, query_vector, profile, owner_terms, reasons, check
                 )
-                await check()
-                _selection(page, min(128, MAX_VECTORS - len(scalars)))
-                last = after
-                for row in page.rows:
-                    if (
-                        not isinstance(row, FactVectorRow)
-                        or type(row.id) is not int
-                        or row.id <= 0
-                        or row.id >= 2**63
-                        or (last is not None and row.id <= last)
-                    ):
-                        raise RuntimeError("Invalid fact page")
-                    last = row.id
-                    score, reason = (
-                        (None, "model_mismatch")
-                        if row.model != profile.fact_model_tag
-                        else _cosine(row, query_vector, profile.dimensions)
-                    )
-                    if reason:
-                        reasons.add(reason)
-                    scalars[row.id] = (
-                        score,
-                        any(term in row.text.lower() for term in owner_terms),
-                    )
-                if page.complete:
-                    if page.next_cursor is not None:
-                        raise RuntimeError("Invalid fact page")
-                    break
-                if page.next_cursor is None:
-                    reasons.add("scan_" + (page.reason or "incomplete"))
-                    break
-                if (
-                    not page.rows
-                    or type(page.next_cursor) is not int
-                    or page.next_cursor != last
-                ):
-                    raise RuntimeError("Invalid fact cursor")
-                after = page.next_cursor
-                await asyncio.sleep(0)
             else:
-                reasons.add("vector_limit")
+                reasons.add("lexical_candidates_only")
+                scalars = await _scan_fact_candidates(
+                    db, lexical, query_vector, profile, owner_terms, reasons, check
+                )
             if len(scalars) != total:
                 reasons.add("incomplete_fact_scan")
             if any(pid not in scalars for pid in lexical):

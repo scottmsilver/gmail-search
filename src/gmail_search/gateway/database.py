@@ -16,6 +16,7 @@ from typing import Callable, Mapping
 from psycopg.conninfo import conninfo_to_dict
 import psycopg
 
+from .bounded_fetch import bounded_rows
 from .data_admission import DataAdmission
 
 
@@ -166,6 +167,9 @@ class QueryGateway:
                         ('statement_timeout', str(max(1, int(self.limits.deadline_seconds * 1000)))),
                         ('lock_timeout', str(self.limits.lock_timeout_ms)),
                         ('work_mem', '4MB'), ('max_parallel_workers_per_gather', '0'),
+                        # Results are always read to the end: plan for all rows, not a
+                        # fast first row (a thread's attachment list took ~1 s otherwise).
+                        ('cursor_tuple_fraction', '1'),
                     ):
                         await conn.execute('SELECT pg_catalog.set_config(%s,%s,true)', (setting, value))
                     # temp_file_limit is an administrator-only setting pinned at provisioning.
@@ -181,21 +185,22 @@ class QueryGateway:
                                    'THEN pg_catalog.row_to_json(gms_result)::pg_catalog.text ELSE NULL END '
                                    'FROM (' + compiled.sql + ') AS gms_result')
                         await cursor.execute(bounded, (self.limits.max_bytes, *compiled.params))
-                        while True:
+
+                        async def still_active():
                             self.registry.credential(credential.owner_id)
-                            item = await cursor.fetchone()
-                            if item is None:
-                                break
-                            payload = item[0]
-                            if payload is None or len(rows) >= self.limits.max_rows:
-                                complete = False
-                                break
-                            size += len(payload.encode())
-                            if size > self.limits.max_bytes:
-                                complete = False
-                                break
-                            values = json.loads(payload, parse_float=Decimal)
-                            rows.append(tuple(values[column] for column in compiled.columns))
+                        # Liveness is checked per batch (and by _watch_owner), never per row.
+                        async with bounded_rows(cursor, row_byte_cap=self.limits.max_bytes,
+                                                between_batches=still_active) as results:
+                            async for (payload,) in results:
+                                if payload is None or len(rows) >= self.limits.max_rows:
+                                    complete = False
+                                    break
+                                size += len(payload.encode())
+                                if size > self.limits.max_bytes:
+                                    complete = False
+                                    break
+                                values = json.loads(payload, parse_float=Decimal)
+                                rows.append(tuple(values[column] for column in compiled.columns))
                     return QueryResult(compiled.columns, tuple(rows), complete)
         except psycopg.errors.QueryCanceled:
             raise TimeoutError('Analytical query deadline exceeded') from None

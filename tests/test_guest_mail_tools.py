@@ -11,6 +11,7 @@ import pytest_asyncio
 MODULE = Path(__file__).parents[1] / 'deploy/public/worker/guest_mail_tools.py'
 TOKENS = {'sql': '1' * 64, 'retrieval': '2' * 64, 'artifact': '3' * 64}
 V2_CONFIG = {'version': 2, 'tool_profile': 'mail-read-v2', 'capabilities': {**TOKENS, 'attachment': '4'*64}}
+V3_CONFIG = {'version': 3, 'tool_profile': 'mail-raw-mcp-v3', 'capabilities': {**TOKENS, 'attachment': '4'*64}}
 
 
 def load_module():
@@ -477,3 +478,34 @@ async def test_v2_attachment_errors_are_redacted_and_invalid_items_do_not_block_
     result=await core.dispatch('get_attachment_batch',{'items':items})
     assert len(gateway.calls)==1 and all('error' in row['result'] for row in result['results'])
     assert TOKENS['sql'] not in json.dumps(result) and 'private upstream' not in json.dumps(result)
+
+
+JUDGE_CALL = {'state': 'Casera confirmed the 4000W W-Series order.', 'questions': [
+    {'id': 'answered', 'type': 'noul', 'instructions': 'Does the state say which heaters were ordered?'},
+    {'id': 'kind', 'type': 'choice', 'instructions': 'Order or quote?', 'options': ['order: confirmed purchase', 'quote: price only']}]}
+
+
+@pytest.mark.asyncio
+async def test_judge_converts_questions_and_sends_one_retrieval_request(gateway, tmp_path):
+    module = load_module()
+    result = await module.GuestMailTools(tmp_path, V3_CONFIG).dispatch('judge', JUDGE_CALL)
+    assert 'error' not in result
+    method, path, headers, body = gateway.calls[0]
+    assert (method, path, len(gateway.calls)) == ('POST', '/v1/judge', 1)
+    assert headers['Authorization'] == 'Bearer '+TOKENS['retrieval']
+    assert json.loads(body)['questions'] == {
+        'answered': {'type': 'noul', 'instructions': 'Does the state say which heaters were ordered?'},
+        'kind': {'type': 'choice', 'instructions': 'Order or quote?',
+                 'criteria': {'order': 'confirmed purchase', 'quote': 'price only'}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('call', [{'state': 'x', 'questions': []},
+    {'state': '', 'questions': JUDGE_CALL['questions']},
+    {'state': 'x', 'questions': [{'id': 'a', 'type': 'choice', 'instructions': 'pick', 'options': ['only']}]},
+    {'state': 'x', 'questions': [{'id': 'a', 'type': 'noul', 'instructions': 'yes?', 'options': ['x']}]}])
+async def test_invalid_judge_calls_never_open_connection(gateway, tmp_path, call):
+    module = load_module()
+    result = await module.GuestMailTools(tmp_path, V3_CONFIG).dispatch('judge', call)
+    assert 'error' in result
+    assert not gateway.calls

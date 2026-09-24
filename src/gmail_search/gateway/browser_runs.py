@@ -17,6 +17,11 @@ from .maintenance import require_ready_in
 from .registry import AccessDenied
 
 _TERMINAL=frozenset(('completed','failed','cancelled'))
+class WorkerBusy(AccessDenied):
+    """Every worker slot holds a live run. Refused before admission, so the
+    browser is told to wait instead of seeing a run that fails at launch."""
+
+
 # Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
 RUNTIMES=frozenset(('pi','pi_gemini','pi_opus','claude'))
 
@@ -67,8 +72,16 @@ class BrowserRuns:
         async with self._worker_lock:
             return await _settled_call(method,run_id)
 
+    def _require_free_worker(self):
+        with self.registry._transaction() as db:
+            live=db.execute('''SELECT COUNT(*) FROM browser_runs b JOIN runs r USING(run_id)
+                WHERE r.status='active' AND b.state IN ('starting','running','stopping')''').fetchone()[0]
+        if live>=self.workers.max_workers:
+            raise WorkerBusy()
+
     def _open(self,owner,conversation):
         _conversation(conversation)
+        self._require_free_worker()
         budget=self.budget_for(owner)
         # Keep the host deadline inside the remote worker ceiling. An exact
         # boundary incorrectly rejects admission under ordinary clock skew.

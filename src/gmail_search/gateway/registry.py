@@ -7,6 +7,7 @@ spend remains reserved after cancellation until trusted provider settlement.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 import math
 import os
 from pathlib import Path
@@ -16,9 +17,40 @@ import time
 import uuid
 
 
+logger = logging.getLogger(__name__)
+# Settlement logs once when spending first crosses each of these fractions.
+BUDGET_WARNING_FRACTIONS = (0.8, 0.95)
+
+
 class AccessDenied(PermissionError):
     def __init__(self):
         super().__init__('Run authorization or resource reservation is unavailable.')
+
+
+class BudgetExhausted(AccessDenied):
+    """A reservation would exceed the owner's lifetime token ceiling."""
+    def __init__(self, ceiling, spent, reserved, requested):
+        PermissionError.__init__(self, f'Token budget exhausted: spent {spent:,} of {ceiling:,} tokens '
+            f'({reserved:,} reserved in flight); this call needs {requested:,}.')
+        self.ceiling, self.spent, self.reserved, self.requested = ceiling, spent, reserved, requested
+
+
+def _budget_exhausted(db, budget_id, requested):
+    row = db.execute('SELECT owner_id,ceiling,spent,reserved FROM budgets WHERE budget_id=?', (budget_id,)).fetchone()
+    if row is None:
+        return AccessDenied()
+    logger.warning('token budget exhausted owner=%s ceiling=%d spent=%d reserved=%d requested=%d',
+        row['owner_id'], row['ceiling'], row['spent'], row['reserved'], requested)
+    return BudgetExhausted(row['ceiling'], row['spent'], row['reserved'], requested)
+
+
+def _log_budget_threshold(db, budget_id, charged):
+    row = db.execute('SELECT owner_id,ceiling,spent FROM budgets WHERE budget_id=?', (budget_id,)).fetchone()
+    for fraction in BUDGET_WARNING_FRACTIONS:
+        limit = row['ceiling'] * fraction
+        if row['spent'] - charged < limit <= row['spent']:
+            logger.warning('token budget %d%% used owner=%s spent=%d ceiling=%d',
+                int(fraction * 100), row['owner_id'], row['spent'], row['ceiling'])
 
 
 @dataclass(frozen=True)
@@ -268,7 +300,7 @@ class Registry:
                 return Reservation(run_id, request_key, units, old['charged'], False)
             changed = db.execute('UPDATE budgets SET reserved=reserved+? WHERE budget_id=? AND owner_id=? AND reserved+spent+?<=ceiling', (units, run['budget_id'], run['owner_id'], units)).rowcount
             if changed != 1:
-                raise AccessDenied()
+                raise _budget_exhausted(db, run['budget_id'], units)
             db.execute('INSERT INTO reservations(run_id,request_key,units) VALUES(?,?,?)', (run_id, request_key, units))
             return Reservation(run_id, request_key, units, None, True)
 
@@ -282,3 +314,4 @@ class Registry:
             if old['charged'] is None:
                 db.execute('UPDATE budgets SET reserved=reserved-?,spent=spent+? WHERE budget_id=?', (old['units'], charged, old['budget_id']))
                 db.execute('UPDATE reservations SET charged=? WHERE run_id=? AND request_key=?', (charged, run_id, request_key))
+                _log_budget_threshold(db, old['budget_id'], charged)
