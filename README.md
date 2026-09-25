@@ -300,7 +300,9 @@ src/gmail_search/
     drive.py        — Drive API ingestion for body-linked Drive docs
     url_extract.py  — URL extraction from message bodies (with denylist)
     url_fetcher.py  — URL crawler: curl_cffi (Chrome TLS) first, crawl4ai
-                       headless fallback, dead-URL memory, per-host breaker
+                       headless fallback, dead-URL memory, per-host breaker;
+                       _crawler_session() owns browser start/teardown so a
+                       failed startup cannot orphan the Playwright driver
     crawl_profile.py — Per-host crawl profiles
     invite_guard.py — LLM gate: no link crawling on actionable invitations
   auth/
