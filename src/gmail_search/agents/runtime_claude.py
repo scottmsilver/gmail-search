@@ -28,6 +28,7 @@ import httpx
 _now: Callable[[], float] = time.monotonic
 _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
+from gmail_search.agents.cost import CostSink  # noqa: F401
 from gmail_search.agents.jsonl_tail import (  # noqa: F401
     encode_workspace_path,
     map_jsonl_event_to_tool_calls,
@@ -37,8 +38,6 @@ from gmail_search.agents.orchestration import StageAgent, StageResult  # noqa: F
 
 logger = logging.getLogger(__name__)
 
-
-CostSink = Callable[..., None]
 
 _DEFAULT_CLAUDEBOX_URL = "http://localhost:8765"
 _DEFAULT_MCP_ADMIN_URL = "http://localhost:7878"

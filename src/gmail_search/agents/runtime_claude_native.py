@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
+from gmail_search.agents.cost import CostSink  # noqa: F401
 from gmail_search.agents.deep_events import RETRIEVAL_TOOL_NAMES as _RETRIEVAL_TOOL_NAMES  # noqa: F401
 from gmail_search.agents.deep_events import emit_analyst_events as _emit_analyst_events
 from gmail_search.agents.deep_events import emit_error as _emit_error
@@ -27,9 +28,6 @@ from gmail_search.agents.session import append_event, finalize_session, session_
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
-
-
-CostSink = Callable[..., None]
 
 
 NATIVE_INSTRUCTION = """You are a deep-analysis agent over the user's personal Gmail archive. Your

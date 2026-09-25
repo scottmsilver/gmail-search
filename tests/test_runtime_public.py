@@ -32,8 +32,11 @@ def test_dispatch_binds_authenticated_identity(monkeypatch):
     assert received == [{'query': 'q', 'user_id': 'owner'}]
 
 
-def response(*parts):
-    return SimpleNamespace(candidates=[SimpleNamespace(content=types.Content(role='model', parts=list(parts)))])
+def response(*parts, usage=None):
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(content=types.Content(role='model', parts=list(parts)))],
+        usage_metadata=usage,
+    )
 
 
 @pytest.fixture
@@ -79,6 +82,77 @@ def test_manual_loop(harness, monkeypatch):
     assert 'final' in events and 'client closed' in events and events[-1] == 'closed'
 
 
+def test_reports_cost_via_sink_with_thoughts_folded_into_output(harness, monkeypatch):
+    """Issue #78: gms.oursilverfamily.com always showed "cost unknown"
+    because this runtime never read `usage_metadata` or called a cost
+    sink. `thoughts_token_count` must land in `output_tokens`, matching
+    `gateway/gemini_http.py`'s `candidatesTokenCount + thoughtsTokenCount`
+    convention (Gemini bills thoughts as output)."""
+    script, events, final, requests = harness
+    usage = SimpleNamespace(prompt_token_count=100, candidates_token_count=20, thoughts_token_count=7)
+    script.append(response(types.Part(text='Found [abc].'), usage=usage))
+    calls = []
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner', cost_sink=lambda **kw: calls.append(kw)))
+    assert calls == [{'agent_name': 'public', 'model': rp._model(), 'input_tokens': 100, 'output_tokens': 27}]
+
+
+def test_no_cost_sink_given_is_a_silent_noop(harness):
+    """The default (no `cost_sink`) must behave exactly as before this
+    issue: no crash, no cost reported — "cost unknown" is correct when
+    the caller doesn't ask for cost tracking."""
+    script, events, final, requests = harness
+    usage = SimpleNamespace(prompt_token_count=100, candidates_token_count=20, thoughts_token_count=0)
+    script.append(response(types.Part(text='Found [abc].'), usage=usage))
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner'))
+    assert final == [{'status': 'done', 'final_answer': 'Found [abc].'}]
+
+
+def test_missing_usage_metadata_skips_cost_report_without_raising(harness):
+    """A malformed or absent `usage_metadata` (None) must not crash the
+    turn or fabricate a cost — same "report unknown rather than a
+    possibly-wrong number" rule the footer reader already follows."""
+    script, events, final, requests = harness
+    script.append(response(types.Part(text='Found [abc].')))  # usage=None
+    calls = []
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner', cost_sink=lambda **kw: calls.append(kw)))
+    assert calls == []
+    assert final == [{'status': 'done', 'final_answer': 'Found [abc].'}]
+
+
+def test_cost_sink_exception_does_not_fail_the_turn(harness, monkeypatch):
+    """A broken cost sink is a bookkeeping failure, not a user-facing
+    one — mirrors `runtime_claude.py`'s `_report_cost`, which logs and
+    swallows rather than letting a ledger bug break the answer."""
+    script, events, final, requests = harness
+    usage = SimpleNamespace(prompt_token_count=1, candidates_token_count=1, thoughts_token_count=0)
+    script.append(response(types.Part(text='Found [abc].'), usage=usage))
+
+    def broken_sink(**kw):
+        raise RuntimeError('ledger down')
+
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner', cost_sink=broken_sink))
+    assert final == [{'status': 'done', 'final_answer': 'Found [abc].'}]
+
+
+def test_reports_cost_once_per_round(harness, monkeypatch):
+    """A multi-round turn (tool call, then answer) must report cost for
+    each model round, not just the last one — every round is a
+    separate billable call."""
+    script, events, final, requests = harness
+    usage1 = SimpleNamespace(prompt_token_count=50, candidates_token_count=5, thoughts_token_count=0)
+    usage2 = SimpleNamespace(prompt_token_count=80, candidates_token_count=15, thoughts_token_count=2)
+    script.extend([
+        response(types.Part(function_call=types.FunctionCall(name='search_emails', args={'query': 'q'})), usage=usage1),
+        response(types.Part(text='Found [abc].'), usage=usage2),
+    ])
+    async def dispatch(name, args, user_id):
+        return {'results': [{'thread_id': 'abc'}]}
+    monkeypatch.setattr(rp, '_dispatch', dispatch)
+    calls = []
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner', cost_sink=lambda **kw: calls.append(kw)))
+    assert [(c['input_tokens'], c['output_tokens']) for c in calls] == [(50, 5), (80, 17)]
+
+
 def test_elapsed_ms_reaches_final_event_before_finalize_commits_done(harness, monkeypatch):
     """`session_elapsed_ms`'s value must reach `emit_writer_and_final` —
     and `finalize_session` (which commits status='done') must still run
@@ -86,9 +160,10 @@ def test_elapsed_ms_reaches_final_event_before_finalize_commits_done(harness, mo
     replay race: `/api/agent/analyze/<id>/events` treats status='done'
     as "stream complete, stop polling," so a reconnecting client could
     see 'done' and return before the `final` event's own INSERT has
-    committed, missing the answer and its elapsed time entirely. The
-    public runtime has no cost tracking at all, so elapsed time is the
-    only thing issue #74 can show for this backend."""
+    committed, missing the answer and its elapsed time entirely. This
+    test calls `public_run` with no `cost_sink` (as issue #74 shipped
+    it, before #78 wired one in from `service.py`), so elapsed time is
+    the only thing available to show here."""
     script, events, final, requests = harness
     script.extend([response(types.Part(text='Found [abc].'))])
     order: list[str] = []

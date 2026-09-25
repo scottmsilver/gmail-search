@@ -17,6 +17,7 @@ from google import genai
 from google.genai import types
 
 from gmail_search.agents import tools as retrieval
+from gmail_search.agents.cost import CostSink
 from gmail_search.agents.deep_events import (
     emit_error, emit_plan_event, emit_retriever_events, emit_writer_and_final,
 )
@@ -150,7 +151,26 @@ def _bounded_result(result):
     return clipped
 
 
-async def _drive(client, conn, session_id, question, user_id):
+def _report_cost(cost_sink: CostSink | None, model: str, usage_metadata) -> None:
+    """Report one round's token usage to the shared cost sink, the same
+    callback `service.py` passes to every other deep-mode backend
+    (`pi_run`, `native_run`, the claudebox stages). Folds thinking
+    tokens into billable output, matching `gateway/gemini_http.py`'s
+    `outputs = candidatesTokenCount + thoughtsTokenCount` — Gemini
+    bills thoughts as output. `input_tokens` is the full prompt count;
+    any provider-side cache read is inside it, so this never undercounts,
+    same convention `gemini_http.py` uses for `cachedContentTokenCount`."""
+    if cost_sink is None or usage_metadata is None:
+        return
+    input_tokens = usage_metadata.prompt_token_count or 0
+    output_tokens = (usage_metadata.candidates_token_count or 0) + (usage_metadata.thoughts_token_count or 0)
+    try:
+        cost_sink(agent_name='public', model=model, input_tokens=input_tokens, output_tokens=output_tokens)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('cost_sink failed (non-fatal): %s', exc)
+
+
+async def _drive(client, conn, session_id, question, user_id, cost_sink: CostSink | None = None):
     contents = [types.Content(role='user', parts=[types.Part(text=question)])]
     calls = []
     config, model = _config(), _model()
@@ -158,6 +178,7 @@ async def _drive(client, conn, session_id, question, user_id):
         if sum(len(c.model_dump_json()) for c in contents) > MAX_CONTEXT_CHARS:
             raise PublicRuntimeError('Chat context limit reached. Please narrow your question.')
         response = await client.aio.models.generate_content(model=model, contents=contents, config=config)
+        _report_cost(cost_sink, model, getattr(response, 'usage_metadata', None))
         if not response.candidates or not response.candidates[0].content:
             raise PublicRuntimeError('The model did not return an answer.')
         content = response.candidates[0].content
@@ -192,8 +213,17 @@ async def _drive(client, conn, session_id, question, user_id):
 
 
 async def public_run(db_path: Path, session_id: str, question: str, user_id: str,
-                     conversation_id: str | None = None) -> None:
-    """Complete or error an already owner-checked session, with bounded retrieval."""
+                     conversation_id: str | None = None, cost_sink: CostSink | None = None) -> None:
+    """Complete or error an already owner-checked session, with bounded retrieval.
+
+    `cost_sink`, when given, is the same callback `service.py` passes to
+    every other deep-mode backend (built by its `_record_cost` closure):
+    it turns each round's token usage into a `costs` row and a
+    `kind="cost"` session event, which is how the shared cost+time
+    footer (`service.py`'s `_turn_cost_part_from_events`) learns this
+    turn's price. Without it, "cost unknown" is correct — nothing here
+    invents a number the caller didn't ask for.
+    """
     conn = get_connection(db_path)
     client = None
     try:
@@ -204,7 +234,7 @@ async def public_run(db_path: Path, session_id: str, question: str, user_id: str
         emit_plan_event(conn, session_id, agent_name='public', approach='Search and read your Gmail evidence')
         async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
             client = _new_client()
-            answer = await _drive(client, conn, session_id, question, user_id)
+            answer = await _drive(client, conn, session_id, question, user_id, cost_sink=cost_sink)
         elapsed_ms = session_elapsed_ms(conn, session_id)
         emit_writer_and_final(conn, session_id, answer, elapsed_ms=elapsed_ms)
         finalize_session(conn, session_id, status='done', final_answer=answer)

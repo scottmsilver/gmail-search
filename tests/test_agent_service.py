@@ -513,6 +513,43 @@ def test_pi_cost_sink_forwards_cache_counts_to_the_ledger(monkeypatch, tmp_path)
     assert captured.get("input_tokens") == 759_360
 
 
+def test_public_run_gets_the_same_cost_sink_as_every_other_backend(monkeypatch, tmp_path):
+    """Issue #78: on gms.oursilverfamily.com, `_real_run` picked the
+    bounded `public_run` backend for every non-exempt user but never
+    passed it `cost_sink`, unlike `pi_run`/`native_run`/the claudebox
+    stages just below it — so invited deep answers always showed "cost
+    unknown". `public_run` must get the same `_record_cost` closure."""
+    import asyncio
+
+    monkeypatch.setenv("GMS_PUBLIC_ORIGIN", "https://gms.example.test")
+    monkeypatch.setattr(service, "_owner_has_full_runtime", lambda user_id: False)
+
+    captured: dict = {}
+
+    async def fake_public_run(*, db_path, session_id, question, user_id, conversation_id=None, cost_sink=None):
+        captured["has_cost_sink"] = cost_sink is not None
+
+    import gmail_search.agents.runtime_public as rp
+
+    monkeypatch.setattr(rp, "public_run", fake_public_run)
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(service, "get_connection", lambda _p: _FakeConn())
+    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
+    monkeypatch.setattr(service, "_persist_rich_assistant_message", lambda *a, **kw: True)
+
+    async def consume():
+        async for _ in service._real_run(tmp_path / "x.db", "sess-PUB", "q", user_id="u-public"):
+            pass
+
+    asyncio.run(consume())
+
+    assert captured.get("has_cost_sink") is True
+
+
 def test_history_includes_both_deep_battle_answers():
     import json
 

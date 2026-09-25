@@ -21,10 +21,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 from gmail_search.store.cost import record_cost
 
 logger = logging.getLogger(__name__)
+
+# Every deep-mode runtime (pi, claude_native, claudebox stages, the
+# bounded public chat) reports usage through a callback of this shape,
+# built by `service.py`'s `_record_cost` closure and threaded through as
+# `cost_sink`. One alias here, imported by each runtime module, instead
+# of a `Callable[..., None]` re-typed (and occasionally re-typed
+# differently) per file.
+CostSink = Callable[..., None]
 
 
 @dataclass(frozen=True)
