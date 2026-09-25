@@ -29,7 +29,7 @@ Gmail Search fixes this with hybrid search (semantic + BM25 + Gmail signals + yo
 - **Multi-tenant** — with `GMAIL_MULTI_TENANT=1`, several people can use one deployment. Sign-in goes through the silver-oauth broker, only invited emails (`gmail-search invite`) can register, every row carries a `user_id`, and retrieval operations enforce the signed-in user. Arbitrary SQL is disabled. On the public deployment every run is routed to a bounded retrieval loop rather than an agent runtime, because shared arbitrary execution still requires isolation; addresses listed in `GMS_FULL_RUNTIME_EMAILS` are exempt and get the private app's runtimes, model picker and battles on the public origin.
 - **Frontfill that self-heals** — when Gmail's history horizon expires, frontfill falls back to a full sync window without manual intervention. Crawl/sync status is visible in Settings.
 - **Sharded ScaNN index** — bounded-RAM index builder for 100k+ message corpora. Adaptive config (brute force <100, asymmetric hashing above).
-- **Cost-controlled** — hard budget limit, per-operation cost tracking, per-turn cost and elapsed time shown under each chat response (cost reads "cost unknown" instead of a wrong number on the bounded public runtime, which doesn't track it), and per-stage cost for deep mode. Embedding can use Gemini's Batch API (50% cheaper) at large scale.
+- **Cost-controlled** — hard budget limit, per-operation cost tracking, per-turn cost and elapsed time shown under each chat response on both the owner app and the invited/public site (cost reads "cost unknown" instead of a wrong number only when a turn's usage genuinely wasn't recorded), and per-stage cost for deep mode. Embedding can use Gemini's Batch API (50% cheaper) at large scale.
 - **Themes** — light, dark, sepia, slate. Email bodies render in the active theme.
 - **Fully local data** — your email never leaves your machine. The Postgres DB, attachments, and indexes live in a gitignored `data/` directory. Only embedding text, search queries, and chat/deep-mode prompts go to Gemini.
 
@@ -549,7 +549,7 @@ Embedding uses Gemini's `gemini-embedding-2-preview`:
 | 20k messages | ~$5.00 | ~$0.0003/query |
 | 100k messages | ~$25.00 | ~$0.0003/query |
 
-Per-turn chat cost and elapsed time are shown under each assistant message (cost reads "cost unknown" rather than a wrong number when the runtime doesn't track it, e.g. the bounded public runtime). Deep-mode tracks per-stage cost. `gmail-search cost --breakdown` shows exactly where money went. `--budget` flags set hard caps.
+Per-turn chat cost and elapsed time are shown under each assistant message, on both the owner app and the invited/public site — one shared implementation (`agents/cost.py`'s `record_agent_cost`) feeds the same footer for every backend, including the bounded public runtime used on gms.oursilverfamily.com (cost reads "cost unknown" rather than a wrong number only when a turn's usage genuinely wasn't recorded). Deep-mode tracks per-stage cost. `gmail-search cost --breakdown` shows exactly where money went. `--budget` flags set hard caps.
 
 ## Performance
 

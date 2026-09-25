@@ -491,10 +491,10 @@ def _turn_cost_part_from_events(events: list, *, session_id: str) -> dict | None
     `elapsed_ms` on the `final` event) so callers can skip appending
     an empty footer.
 
-    `cost_known` is False whenever no `cost` event fired this turn
-    (true for the bounded public runtime, which never calls
-    `record_agent_cost`) OR a `cost` event's numeric fields couldn't
-    be parsed — nothing writes one today, but this reads rows nothing
+    `cost_known` is False whenever no `cost` event fired this turn (the
+    bounded public runtime's model call failed before any round
+    completed, or the caller didn't pass it a `cost_sink`) OR a `cost`
+    event's numeric fields couldn't be parsed — this reads rows nothing
     here controls, and a malformed figure is deliberately reported as
     unknown rather than a possibly-wrong `$0`. Either way it never
     raises: this function feeds `_build_assistant_parts_from_events`,
@@ -952,7 +952,7 @@ async def _real_run(
 
         public_task = asyncio.create_task(public_run(
             db_path=db_path, session_id=session_id, question=question,
-            user_id=user_id, conversation_id=conversation_id,
+            user_id=user_id, conversation_id=conversation_id, cost_sink=_record_cost,
         ))
         try:
             async for frame in _stream_task_events(poll_conn, session_id, public_task):

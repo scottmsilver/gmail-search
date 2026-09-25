@@ -21,6 +21,7 @@ from typing import Awaitable, Callable
 
 from gmail_search.agents import pi_protocol as pp
 from gmail_search.agents import pi_workflow as wf
+from gmail_search.agents.cost import CostSink
 from gmail_search.agents.deep_events import (
     emit_analyst_events,
     emit_error,
@@ -771,7 +772,7 @@ async def pi_run(
     conversation_id: str | None,
     question: str,
     model: str | None,
-    cost_sink: Callable[..., None] | None,
+    cost_sink: CostSink | None,
     user_id: str | None = None,
     workflow_profile: str | None = None,
 ) -> None:
