@@ -212,8 +212,10 @@ failing_test_files() {
 # (scripts/test.sh prints two: the parallel pass and the pg_exclusive pass).
 test_counts() {
   local log=$1 pass fail
-  pass=$(grep -oE '[0-9]+ passed' "$log" | awk '{s+=$1} END{print s+0}')
-  fail=$(grep -oE '[0-9]+ (failed|error|errors)' "$log" | awk '{s+=$1} END{print s+0}')
+  # grep exits 1 on no match; under pipefail that fires the ERR trap inside
+  # this command substitution, and on_err's FAILED line becomes the output.
+  pass=$({ grep -oE '[0-9]+ passed' "$log" || true; } | awk '{s+=$1} END{print s+0}')
+  fail=$({ grep -oE '[0-9]+ (failed|error|errors)' "$log" || true; } | awk '{s+=$1} END{print s+0}')
   printf '%s %s\n' "${pass:-0}" "${fail:-0}"
 }
 
@@ -406,7 +408,8 @@ publish_one() {
   [ -z "${2:-}" ] || match=(--match-head-commit "$2")
   PR_NUM="" SHORT="" MERGE_SHA=""
   step push "pushing $branch"
-  [ "$DRY_RUN" -eq 1 ] || git -C "$wt" push -q -u origin "$branch"
+  # The pre-push hook runs scripts/test.sh, which needs the test database.
+  [ "$DRY_RUN" -eq 1 ] || loop_test_env git -C "$wt" push -q -u origin "$branch"
 
   step pr "opening the PR"
   body=$(mktemp "$STATE/.prbody.XXXXXX")

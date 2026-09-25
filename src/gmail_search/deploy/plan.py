@@ -28,7 +28,12 @@ IMAGE_INPUTS = (
 )
 NOT_SHIPPED = re.compile(r'^(docs/|tests/|scripts/|\.claude/|\.github/|\.githooks/|web/scripts/)|\.md$|^\.gitignore$'
                          # Example configs and test-only probes: nothing a release or the worker reads.
-                         r'|^deploy/examples/|^deploy/[^/]+\.example\.json$|^deploy/public/probe_[^/]+\.py$')
+                         r'|^deploy/examples/|^deploy/[^/]+\.example\.json$|^deploy/public/probe_[^/]+\.py$'
+                         # Owner-run migration scripts (deploy/public/OWNER_KEY_MIGRATION.md): the
+                         # package phase copies only src/, web/, and WORKER_FILES into a release
+                         # (phases.py:package_phase), so these are never shipped and a change to one
+                         # must not permanently refuse every future deploy (#70).
+                         r'|^deploy/public/migrate_[^/]+\.py$')
 # The controller runs from the main checkout's venv: a dependency change needs
 # `uv sync` there, which is the owner's step, not the deployer's.
 DEPENDENCIES = {'pyproject.toml', 'uv.lock', 'web/package.json', 'web/package-lock.json', 'web/bun.lock'}

@@ -40,9 +40,16 @@ def test_dependency_and_unknown_deploy_paths_need_the_owner():
     'deploy/examples/test.env.example',
     'deploy/deploy.example.json',
     'deploy/public/probe_bm25_deleted_statistics.py',
+    'deploy/public/migrate_mixed_text_owner_partitions.py',
+    'deploy/public/migrate_owner_keys.py',
 ])
 def test_example_configs_and_test_probes_are_not_shipped(path):
     assert kinds(path) == ([], [])
+
+
+def test_a_migration_script_change_alongside_a_shipped_change_still_ships():
+    assert kinds('deploy/public/migrate_mixed_text_owner_partitions.py',
+                'src/gmail_search/gateway/search_service.py') == (['controller'], [])
 
 
 @pytest.mark.parametrize('path', [
@@ -51,6 +58,7 @@ def test_example_configs_and_test_probes_are_not_shipped(path):
     'deploy/public/provision_database.py',
     'deploy/public/worker/probe_x.py',
     'deploy/public/worker/probe.sh',
+    'deploy/public/migrate_foo/bar.py',
 ])
 def test_paths_near_the_not_shipped_shapes_still_need_the_owner(path):
     assert kinds(path) == ([], [path])
