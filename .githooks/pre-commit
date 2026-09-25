@@ -31,6 +31,9 @@ if ! "$RUFF" check src/ tests/; then
   exit 1
 fi
 
+# A hook exports GIT_DIR, GIT_INDEX_FILE, …: inherited, tests' `git -C <tmp>` would act on this repository.
+unset $(compgen -e | grep '^GIT_')
+
 echo "[pre-commit] pytest smoke ($SMOKE)…"
 # shellcheck disable=SC2086
 if ! "$PY" -m pytest -q $SMOKE; then

@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 import tempfile
 
-from . import image, phases
+from . import image, lock, phases
 from .config import DEFAULT_PATH, load_config
 from .host import Host
 from .runner import CommandFailed, Runner
@@ -57,6 +57,13 @@ def state_for(main: Path, release: str) -> phases.State:
     return phases.State(main / '.runtime/deploy' / release / 'state.json')
 
 
+def under_land_lock(main: Path, release: str, step) -> None:
+    """Activate and rollback restart services: never alongside a landing or
+    the owner track cutover (scripts/owner-cutover.sh), which hold the same lock."""
+    with lock.held(main / '.runtime/issue-loop/land.lock', f'deploy {release}', wait_seconds=1800):
+        step()
+
+
 def run(argv) -> int:
     args = parse_args(argv)
     runner = Runner()
@@ -92,9 +99,9 @@ def run(argv) -> int:
         {'package': lambda: phases.package_phase(host, main, state, dry_run=args.dry_run),
          'qualify': lambda: phases.qualify_phase(host, main, state),
          'preflight': lambda: phases.preflight_phase(host, main, state),
-         'activate': lambda: phases.activate_phase(host, state),
+         'activate': lambda: under_land_lock(main, release, lambda: phases.activate_phase(host, state)),
          'postcheck': lambda: phases.postcheck_phase(host, main, state),
-         'rollback': lambda: phases.rollback_phase(host, state),
+         'rollback': lambda: under_land_lock(main, release, lambda: phases.rollback_phase(host, state)),
          'clean': lambda: phases.clean_phase(host, main, state)}[name]()
     return 0
 

@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 import re
 
-CONTROLLER, WEB, IMAGE, WORKER = 'controller', 'web', 'image', 'worker'
+CONTROLLER, WEB, IMAGE, WORKER, OWNER = 'controller', 'web', 'image', 'worker', 'owner'
+# The kinds that swap and restart the invited stack; an owner-only release does not.
+INVITED_KINDS = {CONTROLLER, WEB, IMAGE, WORKER}
 
 WORKER_DIR = 'deploy/public/worker/'
 # Files installed in the worker's opt dir, by repo path.
@@ -37,6 +39,10 @@ NOT_SHIPPED = re.compile(r'^(docs/|tests/|scripts/|\.claude/|\.github/|\.githook
 # The controller runs from the main checkout's venv: a dependency change needs
 # `uv sync` there, which is the owner's step, not the deployer's.
 DEPENDENCIES = {'pyproject.toml', 'uv.lock', 'web/package.json', 'web/package-lock.json', 'web/bun.lock'}
+# What an owner release (#52) carries besides src/ and web/: serve's page
+# templates (server.py finds them beside src/) and the watchdog the timer runs.
+OWNER_PATHS = ('templates/', 'scripts/serve_watchdog.sh')
+REVIEWED_SCHEMA = re.compile(r"^REVIEWED_SCHEMA_BLOB = '([0-9a-f]{40})'$", re.M)
 
 
 @dataclass
@@ -49,11 +55,14 @@ class Batch:
         return bool(self.kinds) and not self.manual
 
 
-def classify(paths, guest_files) -> Batch:
-    """Kinds a batch needs, plus the paths no kind covers (those need the owner)."""
+def classify(paths, guest_files, *, owner_track: bool = False) -> Batch:
+    """Kinds a batch needs, plus the paths no kind covers (those need the owner).
+    With an owner track, its own paths are its business (classify_owner)."""
     batch = Batch()
     guest = {WORKER_DIR + name for name in guest_files}
     for path in paths:
+        if owner_track and path.startswith(OWNER_PATHS):
+            continue
         if path in DEPENDENCIES:
             batch.manual.append(path)
         elif path in WORKER_FILES or path in guest or path.startswith(IMAGE_INPUTS):
@@ -76,6 +85,21 @@ def classify(paths, guest_files) -> Batch:
     if IMAGE in batch.kinds:
         batch.kinds.add(WORKER)
     return batch
+
+
+def classify_owner(paths) -> bool:
+    """Whether the owner daemons run anything these paths change: any shipped
+    src/ or web/ path (serve, mcp and supervise import widely), or OWNER_PATHS."""
+    return any(p.startswith(OWNER_PATHS) or (p.startswith(('src/', 'web/')) and not NOT_SHIPPED.search(p))
+               for p in paths)
+
+
+def schema_reviewed(schema_blob: str, checks_source: str) -> bool:
+    """Every owner daemon runs pg_schema.sql against the live database at boot,
+    so an owner release may carry only the blob its own commit declares
+    reviewed (checkout_checks.REVIEWED_SCHEMA_BLOB)."""
+    found = REVIEWED_SCHEMA.search(checks_source)
+    return bool(found) and found.group(1) == schema_blob
 
 
 def decide(running_commit, target_commit, *, target_contains_running, running_contains_target, batch) -> str:

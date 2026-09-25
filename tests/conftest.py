@@ -7,6 +7,22 @@ import pytest
 from gmail_search.config import load_config
 
 
+def _drop_git_env() -> None:
+    """Every GIT_* variable out of this process, so no test's `git -C <tmp>`
+    (nor any subprocess) acts on the repository a git hook exported."""
+    for name in [n for n in os.environ if n.startswith("GIT_")]:
+        del os.environ[name]
+
+
+def pytest_configure(config):
+    _drop_git_env()  # before collection, in every xdist worker too
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_git_env():
+    _drop_git_env()
+
+
 @pytest.fixture
 def data_dir(tmp_path):
     d = tmp_path / "data"

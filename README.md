@@ -309,11 +309,15 @@ src/gmail_search/
     session.py      — Broker sign-in, session cookie, GMAIL_MULTI_TENANT gate
     routes.py       — /api/auth/* (login, callback, me, logout, connect-gmail)
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
-  deploy/           — The invited-service deployer (scripts/deploy.sh; see Deploying):
-                       plan, package, qualify, preflight, activate, postcheck.
+  deploy/           — The deployer (scripts/deploy.sh; see Deploying): the invited
+                       service and the owner track; plan, package, qualify,
+                       preflight, activate, postcheck.
                        notes.py: the "What's new" ledger the package phase writes
+                       owner_units.py: the owner units, their probes, restart order
                        one_checkout.py + checkout_checks.py: scripts/one-checkout.sh,
                        which moves the production checkout onto main and back
+                       owner_cutover.py: scripts/owner-cutover.sh, which moves the
+                       owner units onto owner-current once
     worker_disk.py  — Moves the worker VM's disk to worker.vm_dir and runs it from a unit
                        (scripts/move-worker-disk.sh; see docs/worker-vm-move.md)
   store/
@@ -567,27 +571,36 @@ Benchmarked on 20k messages / 32k embeddings:
 | Topic filter (client-side) | instant |
 | Inbox time-to-glass | instrumented in Settings |
 
-## Deploying (invited service)
+## Deploying
 
 `scripts/deploy.sh` ships a commit (default `origin/main`) as one release of the invited service: the controller
 (`gmail-search-invited-api`), the public web app (`gmail-search-public-web`) and, when they changed, the worker's
-files and Firecracker image. It is repository code (`src/gmail_search/deploy/`, tests in `tests/test_deploy_*.py`),
+files and Firecracker image. Once the owner track exists (below), the same release also ships the owner daemons:
+`gmail-search-serve`, `gmail-search-mcp` (the claude.ai connector), the owner web on :3000 and `gmail-search-supervise`. It is repository code (`src/gmail_search/deploy/`, tests in `tests/test_deploy_*.py`),
 not an agent, and runs six phases, each recorded in `.runtime/deploy/<release>/state.json` so one can be re-run with
 `--phase <name>`:
 
 | Phase | What it does |
 | --- | --- |
-| `plan` | Reads the running release's commit (`QUALIFIED.json`, else a leading sha in `RELEASE`), diffs the target, and classifies the batch: `controller` (`src/`), `web` (`web/`), `image` (guest files, workflow agents, image inputs), `worker` (files installed in the worker's opt dir). Docs/tests/scripts, example configs (`deploy/examples/`, `deploy/*.example.json`) and test-only probes (`deploy/public/probe_*.py`) and owner-run migration scripts (`deploy/public/migrate_*.py`) only, or nothing new, is `skip`; a running release at or past the target is `superseded`; dependency files (`pyproject.toml`, `uv.lock`, web lockfiles) or an unknown `deploy/` path are refused as the owner's step. |
-| `package` | From a clean detached worktree at the target (`~/.wt/deploy-<release>`), builds `<install_root>/public-releases/<release>` from the running release with `api/src` replaced, `next build` when `web/` changed, the worker payload, and the "What's new" notes (below). |
+| `plan` | Reads the running release's commit (`QUALIFIED.json`, else a leading sha in `RELEASE`), diffs the target, and classifies the batch: `controller` (`src/`), `web` (`web/`), `image` (guest files, workflow agents, image inputs), `worker` (files installed in the worker's opt dir). Docs/tests/scripts, example configs (`deploy/examples/`, `deploy/*.example.json`) and test-only probes (`deploy/public/probe_*.py`) and owner-run migration scripts (`deploy/public/migrate_*.py`) only, or nothing new, is `skip`; a running release at or past the target is `superseded`; dependency files (`pyproject.toml`, `uv.lock`, web lockfiles) or an unknown `deploy/` path are refused as the owner's step. With the owner track, it also diffs from `owner-current`'s commit: a shipped `src/` or `web/` path, `templates/` or `scripts/serve_watchdog.sh` adds `owner`, and it refuses when the target's `pg_schema.sql` is not the blob the target's own `REVIEWED_SCHEMA_BLOB` names (serve runs that DDL on the live database at boot). |
+| `package` | From a clean detached worktree at the target (`~/.wt/deploy-<release>`), builds `<install_root>/public-releases/<release>` from the running release with `api/src` replaced, `next build` when `web/` changed, the worker payload, and the "What's new" notes (below). For `owner`, `<install_root>/owner-releases/<release>`: the target's tracked tree (`git archive`), its own `.venv` (`uv sync --locked --extra dev`, hardlinked from the uv cache), and the owner web built against the checkout's `web/.env.local` with the node on `gmail-search-web`'s PATH. |
 | `qualify` | `scripts/test.sh` (under the issue loop's landing lock, `.runtime/issue-loop/land.lock`), ruff, and the web `tsc` and script tests. Needs `GMS_TEST_PG_DSN` (the disposable test database). |
-| `preflight` | Refuses a dirty build tree, a running release that changed since `plan`, or any active run; writes `QUALIFIED.json`. |
-| `activate` | Installs the worker payload (keeping `.prev` copies) and restarts its units, swaps `invited-current` and `public-current`, restarts the controller and web, and waits for the units and health ports. Any failure restores the previous release (and worker files) and says whether that worked. |
-| `postcheck` | The public web answers 200 for `/` and `/c/<id>`, 404 for a malformed id; the health ports are up. Appends to `.runtime/issue-loop/deploys.jsonl`. A failed postcheck leaves the release up and prints `scripts/deploy.sh --phase rollback --release <name>`. |
+| `preflight` | Refuses a dirty build tree, a running release (either track) that changed since `plan`, or any active run; writes `QUALIFIED.json`. |
+| `activate` | Installs the worker payload (keeping `.prev` copies) and restarts its units, swaps `invited-current` and `public-current`, restarts the controller and web, and waits for the units and health ports. For `owner`, it first refuses unless every owner unit answers healthy, then holds the serve watchdog timer, swaps `owner-current`, and restarts serve, mcp, web and supervise in that order, each waited on until it answers as it did before. Any failure restores the previous release on both tracks (and worker files) and says whether that worked. An owner-only release (the owner track catching up) leaves the invited stack running. Activate and rollback hold the landing lock, as the owner cutover does, and refuse when the owner track changed since `plan`. |
+| `postcheck` | The public web answers 200 for `/` and `/c/<id>`, 404 for a malformed id; the health ports are up. For `owner`: `owner-current` is the release, serve's `/healthz?ready=1` answers 200, an unauthenticated `POST /mcp` answers 401 (up, OAuth gate on; no tool call), the owner web 200, and supervise has children. Appends to `.runtime/issue-loop/deploys.jsonl`. A failed postcheck leaves the release up and prints `scripts/deploy.sh --phase rollback --release <name>`. |
 
 `--dry-run` runs plan through preflight into `.runtime/deploy/dry-run/` and never swaps or restarts. `--name <word>`
 names the release `<word>-<date>`. Settings live in `~/.config/gmail-search/deploy.json` (copy
 `deploy/deploy.example.json`; a missing key is named in the error); the worker's host and port come from the invited
 runtime config.
+
+**Owner track.** The owner daemons keep `~/development/gmail-search` as their working directory: `data/`,
+`config.yaml`/`config.local.yaml`, the claudebox and pi mounts under `deploy/`, and `scripts/mcp_admin_token` are state
+there. Only their code moves: ExecStart and supervise's `PATH` go through `owner-current/.venv`, the owner web runs from
+`owner-current/web`, the watchdog from `owner-current/scripts/`. The track is off until `deploy.json` has an `owner`
+block and `owner-current` exists; `scripts/owner-cutover.sh [--dry-run] check|switch|rollback` makes it once (builds the
+first owner release at `invited-current`'s commit, rewrites the installed unit files, restarts in order; rollback puts
+the saved unit files back). See docs/one-checkout-runbook.md, "Owner track cutover".
 
 **What's new.** Every package writes `<release>/web/whats-new.json` (`deploy/notes.py`) from local git history, with
 no GitHub call: each commit between the running release and the target that carries `Fixes #N` becomes an entry

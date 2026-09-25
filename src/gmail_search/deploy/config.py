@@ -30,6 +30,15 @@ class WorkerAccess:
 
 
 @dataclass(frozen=True)
+class OwnerTrack:
+    """The owner daemons' release track (#52). `checkout` stays their working
+    directory (data/, config.yaml, the claudebox and pi mounts); only their
+    code and venv come from `owner-current`."""
+    checkout: Path
+    web_env_local: Path
+
+
+@dataclass(frozen=True)
 class DeployConfig:
     install_root: Path
     registry: Path
@@ -42,6 +51,8 @@ class DeployConfig:
     image_inputs_cache: Path
     services: dict[str, str]
     worker: WorkerAccess
+    # Absent: deploys ship the invited stack only, as before #52.
+    owner: OwnerTrack | None = None
 
     @property
     def releases(self) -> Path:
@@ -50,6 +61,14 @@ class DeployConfig:
     @property
     def current_links(self) -> tuple[Path, Path]:
         return self.install_root / 'invited-current', self.install_root / 'public-current'
+
+    @property
+    def owner_releases(self) -> Path:
+        return self.install_root / 'owner-releases'
+
+    @property
+    def owner_current(self) -> Path:
+        return self.install_root / 'owner-current'
 
 
 def _require(data: dict, key: str, where: Path):
@@ -107,4 +126,10 @@ def load_config(path: Path = DEFAULT_PATH) -> DeployConfig:
             user=req('user', worker), key=_path(req('key', worker)),
             known_hosts=_path(req('known_hosts', worker)),
             opt_dir=req('opt_dir', worker), image_path=req('image_path', worker),
-            vm_dir=_path(worker['vm_dir']) if 'vm_dir' in worker else None))
+            vm_dir=_path(worker['vm_dir']) if 'vm_dir' in worker else None),
+        owner=_owner(data['owner'], path) if 'owner' in data else None)
+
+
+def _owner(block: dict, where: Path) -> OwnerTrack:
+    return OwnerTrack(checkout=_path(_require(block, 'checkout', where)),
+                      web_env_local=_path(_require(block, 'web_env_local', where)))

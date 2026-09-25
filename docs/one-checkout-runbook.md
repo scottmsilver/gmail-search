@@ -295,10 +295,10 @@ Once the switch has held for a day:
 
 ## Keeping it current after the switch
 
-The checkout does not move when a PR merges: `land.sh` only fetches, and no
-deploy writes to it. So `main` changes to serve, MCP or supervise reach them
-only when the owner pulls and restarts, which the loop is not authorized to do.
-This is #52's gap, now about one checkout instead of a stale branch:
+Until the owner track cutover below has run, the checkout does not move when
+a PR merges: `land.sh` only fetches, and no deploy writes to it. So `main`
+changes to serve, MCP or supervise reach them only when the owner pulls and
+restarts:
 
 ```sh
 git -C ~/development/gmail-search pull --ff-only
@@ -310,3 +310,77 @@ systemctl --user restart gmail-search-serve gmail-search-mcp gmail-search-superv
 Never pull while those units keep running on the old code for long. The
 editable install serves new files to any import that happens after the pull
 (the 2026-07 deploy-skew incident).
+
+## Owner track cutover (#52)
+
+After this one-time step, every `scripts/deploy.sh` that changes their code
+ships serve, MCP, the owner web and supervise from
+`~/.local/share/gmail-search/owner-releases/<release>` through the
+`owner-current` symlink, and restarts them with a health check and rollback
+(README, "Deploying"). The checkout stays their working directory: `data/`,
+`config.yaml`, `config.local.yaml`, `deploy/claudebox/` and `deploy/pi/`
+(bind-mounted by the claudebox and pi containers, written by serve relative
+to its cwd) and `scripts/mcp_admin_token` are state there, not code. Tracked
+config read from the cwd (`config.yaml`, `deploy/pi/*.json`) therefore still
+comes from the checkout.
+
+**What changes** (`~/.config/systemd/user/`, previewed by `check`):
+
+| File | Before | After |
+| --- | --- | --- |
+| `gmail-search-serve.service` | `ExecStart=%h/development/gmail-search/.venv/bin/gmail-search serve …` | `%h/.local/share/gmail-search/owner-current/.venv/bin/gmail-search serve …` (`--data-dir` and logs unchanged) |
+| `gmail-search-mcp.service` | `…/development/gmail-search/.venv/bin/python -m …` | `…/owner-current/.venv/bin/python -m …` |
+| `gmail-search-web.service` and `.d/loopback.conf` | `WorkingDirectory=…/development/gmail-search/web`, `…/web/node_modules/.bin/next` | `…/owner-current/web`, `…/owner-current/web/node_modules/.bin/next` (the release links `node_modules` and `.env.local` to the checkout's) |
+| `gmail-search-supervise.service` | `PATH=…/development/gmail-search/.venv/bin:…` and ExecStart | both through `owner-current/.venv` (its children find `gmail-search` on that PATH) |
+| `gmail-search-serve-watchdog.service` | `…/development/gmail-search/scripts/serve_watchdog.sh` | `…/owner-current/scripts/serve_watchdog.sh` |
+
+`WorkingDirectory=%h/development/gmail-search` stays. A unit that names the
+checkout in any other way fails `check` with the line quoted.
+
+**Venv.** Each owner release has its own `.venv`, synced at package time
+with `uv sync --locked --extra dev` from that release's lockfile. That is
+the same set of packages the checkout's venv holds, hardlinked from the uv
+cache: about a second, almost no disk. Its editable install points at the
+release's own `src/`. A rollback therefore restores code and venv together,
+and syncing the checkout's venv for another branch no longer changes what
+the daemons run. The deployer still refuses dependency changes.
+
+**Schema.** Serve runs `pg_schema.sql` on the live database at boot. The
+first release uses `invited-current`'s commit, whose blob `check` compares
+with that commit's own `REVIEWED_SCHEMA_BLOB`. After the cutover, `plan`
+applies the same rule to every target, and `tests/test_deploy_owner.py`
+keeps `main` from changing the file without the constant.
+
+**Steps.** Run these from a worktree of `main` or from the checkout. The
+wrapper does not sync the production venv. Add the `owner` block from
+`deploy/deploy.example.json` to `~/.config/gmail-search/deploy.json` first.
+`switch` and `rollback` hold the landing lock
+(`.runtime/issue-loop/land.lock`), which a deploy's activate and rollback
+also take, and deploys refuse while the cutover records say it has started
+and not finished.
+
+1. `scripts/owner-cutover.sh check`: read-only. Expect every line `ok`:
+   `owner-current` absent, the first release named, the schema reviewed,
+   the six unit files rewriting cleanly, and serve 200, mcp 401, web 200,
+   supervise with children.
+2. `scripts/owner-cutover.sh --dry-run switch` prints each step and changes
+   nothing.
+3. `scripts/owner-cutover.sh switch`. It builds
+   `owner-releases/<invited release>` (about 30 s: archive, venv, `next
+   build`), saves the six files to
+   `~/development/gmail-search/.runtime/owner-cutover/units-before/`, points
+   `owner-current`, rewrites the files, runs `daemon-reload`, holds the
+   watchdog timer, and restarts serve, mcp, web and supervise in order, each
+   waited on until it answers as before. It then checks that every ExecStart
+   now goes through `owner-current`. **Downtime:** each unit's own restart,
+   serve's warm-up the longest; the invited service is untouched. Each step
+   is recorded in `.runtime/owner-cutover/state.json`, so running `switch`
+   again after a failure resumes at the failed step.
+4. Check: `readlink ~/.local/share/gmail-search/owner-current` and
+   `systemctl --user show -p ExecStart gmail-search-mcp`.
+
+**Rollback:** `scripts/owner-cutover.sh [--dry-run] rollback` writes the
+saved unit files back byte for byte, runs `daemon-reload`, restarts in order
+with the same health checks, and removes `owner-current`, keeping the
+release directory. Deploys then go back to shipping the invited stack only,
+and the daemons run the checkout's code again.

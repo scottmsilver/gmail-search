@@ -14,6 +14,10 @@
     "manager": "gmail-full-agent-manager.service",
     "clock_sync": "gmail-worker-clock-sync.service"
   },
+  "owner": {
+    "checkout": "~/development/gmail-search",
+    "web_env_local": "~/development/gmail-search/web/.env.local"
+  },
   "worker": {
     "user": "worker-admin",
     "key": "~/.config/gmail-search/worker/admin",
