@@ -497,3 +497,88 @@ async def test_reranker_is_outside_snapshot_and_cannot_add_foreign_threads(tmp_p
         assert [thread['thread_id'] for thread in result['results']]==['t4','t3','t2','t1']
         assert result['coverage']['reranking']=='applied'
     assert len(calls)==1 and not indexes.entered and reader.open==0
+
+
+def _clustered_rerank_service(tmp_path,monkeypatch,*,seconds_left):
+    """Four equally scored threads (so the rerank fires) and a tool deadline `seconds_left` away."""
+    module=importlib.import_module('gmail_search.gateway.search_service')
+    service,_,token,reader,indexes,_=_service(tmp_path)
+    indexes.ids=([1,2,3,4],[.8]*4)
+    async def hydrate(ids):
+        return Selection(tuple(_embedding(i,'m'+str(i),'t'+str(i)) for i in ids),True)
+    async def lexical(*args,**kwargs):
+        return Selection(tuple(LexicalHit(i,'m'+str(i),1.) for i in range(1,5)),True)
+    reader.queries.hydrate_embeddings=hydrate
+    reader.queries.lexical_messages=lexical
+    service.tool_deadlines=[]
+    def tool_deadline():
+        service.tool_deadlines.append(asyncio.get_running_loop().time()+seconds_left)
+        return service.tool_deadlines[-1]
+    monkeypatch.setattr(module,'tool_deadline',tool_deadline)
+    return module,service,token
+
+
+class _Reranker:
+    """Records the deadline it was given, then behaves as `behaviour` says."""
+    def __init__(self,behaviour):
+        self.behaviour=behaviour
+        self.deadlines=[]
+
+    async def rerank(self,lease,query,threads,*,deadline,check_active):
+        self.deadlines.append(deadline)
+        await check_active()
+        if self.behaviour=='hang':
+            async with asyncio.timeout_at(deadline):
+                await asyncio.Event().wait()
+        if self.behaviour=='unavailable':
+            from gmail_search.gateway.search_reranker import RerankingUnavailable
+            raise RerankingUnavailable()
+        if self.behaviour=='revoked':
+            raise AccessDenied()
+        return [thread.thread_id for thread in reversed(threads)]
+
+
+@pytest.mark.asyncio
+async def test_slow_rerank_returns_the_hybrid_order_inside_the_deadline(tmp_path,monkeypatch):
+    module,service,token=_clustered_rerank_service(tmp_path,monkeypatch,seconds_left=3)
+    service.reranker=reranker=_Reranker('hang')
+    result=await service.search(token.secret,query='draw request')
+    assert result['coverage']['reranking']=='timed_out'
+    assert [thread['thread_id'] for thread in result['results']]==['t1','t2','t3','t4']
+    assert reranker.deadlines==[service.tool_deadlines[0]-module.RERANK_FINISH_MARGIN_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_rerank_is_skipped_when_too_little_time_is_left(tmp_path,monkeypatch):
+    _,service,token=_clustered_rerank_service(tmp_path,monkeypatch,seconds_left=1.2)
+    service.reranker=reranker=_Reranker('reverse')
+    result=await service.search(token.secret,query='draw request')
+    assert result['coverage']['reranking']=='skipped_deadline' and reranker.deadlines==[]
+    assert [thread['thread_id'] for thread in result['results']]==['t1','t2','t3','t4']
+
+
+@pytest.mark.asyncio
+async def test_unavailable_reranker_degrades_to_the_hybrid_order(tmp_path,monkeypatch):
+    _,service,token=_clustered_rerank_service(tmp_path,monkeypatch,seconds_left=5)
+    service.reranker=_Reranker('unavailable')
+    result=await service.search(token.secret,query='draw request')
+    assert result['coverage']['reranking']=='unavailable'
+    assert [thread['thread_id'] for thread in result['results']]==['t1','t2','t3','t4']
+
+
+@pytest.mark.asyncio
+async def test_revocation_during_rerank_still_fails_the_search(tmp_path,monkeypatch):
+    _,service,token=_clustered_rerank_service(tmp_path,monkeypatch,seconds_left=5)
+    service.reranker=_Reranker('revoked')
+    with pytest.raises(AccessDenied):
+        await service.search(token.secret,query='draw request')
+
+
+@pytest.mark.asyncio
+async def test_timing_log_names_phases_and_outcome_but_never_the_query(tmp_path,caplog):
+    service,_,token,_,_,_=_service(tmp_path)
+    with caplog.at_level('INFO',logger='gmail_search.gateway.timing'):
+        await service.search(token.secret,query='draw request')
+    [line]=[record.getMessage() for record in caplog.records if record.name=='gmail_search.gateway.timing']
+    assert line.startswith('search disabled ') and 'embed=' in line and 'rerank=' in line
+    assert 'draw' not in line and 'request' not in line
