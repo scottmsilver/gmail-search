@@ -5,6 +5,8 @@ an unpatched engine trips `assertion failed: item_pointer_is_valid(ctid)` when
 a retained leaf is reindexed and then searched. See
 docs/qualification/retained-reader-root-cause.md.
 """
+import time
+
 from psycopg import sql
 import pytest
 
@@ -147,3 +149,101 @@ def test_phase_two_failure_leaves_gate_and_witness_recoverable(mixed_source, tmp
     resumed, _ = resumed_controller(source, registry_path, controller.plan)
     ready = resumed.publish(pending)
     assert ready.state == 'READY' and admin.status() == ready
+
+
+def published_up_to_rebuild(source, tmp_path):
+    """Phase two stopped right after committing INDEXES_REBUILT, gate still INDEX_PENDING."""
+    implementation, controller, admin, snapshot, _ = setup(source, tmp_path)
+    pending = controller.advance(snapshot)
+
+    def stop(stage):
+        if stage == 'phase2_committed':
+            raise RuntimeError('synthetic stop after the rebuild commit')
+    crashing, _ = resumed_controller(source, tmp_path / 'registry.sqlite', controller.plan, checkpoint=stop)
+    with pytest.raises(AccessDenied):
+        crashing.publish(pending)
+    return implementation, controller, admin, pending
+
+
+def test_committed_rebuild_that_fails_qualification_is_rebuilt_on_retry(mixed_source, tmp_path):
+    """#55: INDEXES_REBUILT used to skip the rebuild forever once qualification refused it."""
+    source = mixed_source
+    _, controller, admin, pending = published_up_to_rebuild(source, tmp_path)
+    # Leave the committed index out of step with its leaf without changing any
+    # inventoried count: the reinserted row is indexed a second time, so the
+    # index holds one more document than the leaf has live rows.
+    source.execute('''WITH gone AS (DELETE FROM propositions WHERE id=(SELECT min(id) FROM propositions
+        WHERE user_id='alice') RETURNING *) INSERT INTO propositions SELECT * FROM gone''')
+    stale = leaf_bm25(source, 'propositions', 'alice')
+
+    resumed, _ = resumed_controller(source, tmp_path / 'registry.sqlite', controller.plan)
+    ready = resumed.publish(pending)
+
+    assert ready.state == 'READY' and admin.status() == ready
+    rebuilt = leaf_bm25(source, 'propositions', 'alice')
+    assert rebuilt[0] == stale[0] and rebuilt[1] != stale[1], 'the unqualified index was not rebuilt'
+
+
+def test_rebuild_waits_for_an_older_transaction_elsewhere_on_the_cluster(mixed_source, tmp_path):
+    """The rebuild's own snapshot takes running xids from every database as its xmin (#55)."""
+    import os
+    import threading
+    import psycopg
+    source = mixed_source
+    _, controller, admin, snapshot, _ = setup(source, tmp_path)
+    pending = controller.advance(snapshot)
+    released = threading.Event()
+    older = psycopg.connect(os.environ['GMS_TEST_PG_DSN'])  # the cluster's postgres database
+    older.execute('SELECT pg_current_xact_id()')  # assigns and holds an xid, writes nothing
+
+    def release():
+        time.sleep(1)
+        released.set()
+        older.rollback()
+    seen = []
+
+    def watch(stage):
+        if stage == 'retained_vacuumed':
+            seen.append(released.is_set())
+    try:
+        resumed, _ = resumed_controller(source, tmp_path / 'registry.sqlite', controller.plan, checkpoint=watch)
+        threading.Thread(target=release, daemon=True).start()
+        assert resumed.publish(pending).state == 'READY'
+    finally:
+        released.wait(5)
+        older.close()
+    assert seen == [True], 'phase two vacuumed while an older transaction was still running'
+
+
+def test_rebuild_wait_is_bounded(mixed_source, tmp_path, monkeypatch):
+    """A transaction that outlasts the wait does not block phase two: VACUUM ignores
+    other databases' transactions, and qualification still decides READY."""
+    import os
+    import psycopg
+    source = mixed_source
+    implementation, controller, admin, snapshot, _ = setup(source, tmp_path)
+    monkeypatch.setattr(implementation, 'HORIZON_WAIT_SECONDS', 0.2)
+    pending = controller.advance(snapshot)
+    with psycopg.connect(os.environ['GMS_TEST_PG_DSN']) as older:
+        older.execute('SELECT pg_current_xact_id()')
+        assert controller.publish(pending).state == 'READY'
+        older.rollback()
+
+
+def test_refusal_logs_its_cause_without_database_text(mixed_source, tmp_path, caplog):
+    import psycopg
+    implementation, controller, admin, snapshot, _ = setup(mixed_source, tmp_path)
+    with caplog.at_level('WARNING', logger=implementation.__name__):
+        with pytest.raises(AccessDenied):
+            controller.publish(snapshot)
+    assert 'publish refused: ValueError: Gate/plan binding mismatch (at migrate_mixed_text_owner_partitions.py:' in caplog.text
+    caplog.clear()
+    with caplog.at_level('WARNING', logger=implementation.__name__):
+        implementation._log_refusal('advance', psycopg.errors.UniqueViolation('Key (id)=(synthetic-value)'))
+    assert 'advance refused: UniqueViolation: SQLSTATE 23505' in caplog.text
+    assert 'synthetic-value' not in caplog.text
+    caplog.clear()
+    with caplog.at_level('WARNING', logger=implementation.__name__):
+        implementation._log_refusal('publish', RuntimeError('pid 1 (synthetic-app-name, synthetic-role)'))
+    assert 'publish refused: RuntimeError: (detail withheld)' in caplog.text
+    assert 'synthetic-app-name' not in caplog.text
