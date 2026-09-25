@@ -533,10 +533,21 @@ BEGIN
 END
 $$;
 
+-- Grants on shared objects (the database, schema `public`) are issued only
+-- when missing: re-granting rewrites the shared catalog row, and concurrent
+-- init_db runs in other schemas then fail with "tuple concurrently updated".
 DO $$ BEGIN
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO gmail_analyst', current_database());
+    IF NOT EXISTS (SELECT 1 FROM pg_database d, aclexplode(d.datacl) a
+                   WHERE d.datname = current_database() AND a.privilege_type = 'CONNECT'
+                     AND a.grantee = 'gmail_analyst'::regrole) THEN
+        EXECUTE format('GRANT CONNECT ON DATABASE %I TO gmail_analyst', current_database());
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a
+                   WHERE n.nspname = 'public' AND a.privilege_type = 'USAGE'
+                     AND a.grantee = 'gmail_analyst'::regrole) THEN
+        GRANT USAGE ON SCHEMA public TO gmail_analyst;
+    END IF;
 END $$;
-GRANT USAGE ON SCHEMA public TO gmail_analyst;
 GRANT SELECT ON messages, attachments, message_summaries, thread_summary,
     topics, message_topics, contact_frequency, term_aliases
     TO gmail_analyst;
@@ -545,7 +556,14 @@ GRANT SELECT ON messages, attachments, message_summaries, thread_summary,
 GRANT SELECT ON embeddings TO gmail_analyst;
 -- Everything else (costs, sync_state, conversations, agent_*, etc.)
 -- stays OUT of the analyst's view by omission.
-ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM gmail_analyst;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_default_acl d JOIN pg_namespace n ON n.oid = d.defaclnamespace,
+                   aclexplode(d.defaclacl) a
+               WHERE n.nspname = 'public' AND d.defaclobjtype = 'r'
+                 AND a.grantee = 'gmail_analyst'::regrole) THEN
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM gmail_analyst;
+    END IF;
+END $$;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- FTS (pg_search / paradedb BM25 indexes)
@@ -800,7 +818,13 @@ BEGIN
     END IF;
 END $$;
 
-GRANT USAGE ON SCHEMA public TO gmail_search_reader;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a
+                   WHERE n.nspname = 'public' AND a.privilege_type = 'USAGE'
+                     AND a.grantee = 'gmail_search_reader'::regrole) THEN
+        GRANT USAGE ON SCHEMA public TO gmail_search_reader;
+    END IF;
+END $$;
 -- LLM-facing tables only. Keep this list in sync with TABLE_DOCS in
 -- src/gmail_search/store/db.py — anything documented for the LLM
 -- needs SELECT here; anything in `_INTERNAL_TABLES` must NOT.

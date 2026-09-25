@@ -126,8 +126,9 @@ def test_missing_claim_rejected(public_env, monkeypatch, claim):
         ("exp", "123"),
         ("nonce", "wrong"),
         ("jti", ""),
-        ("exp", int(time.time()) + 3600),
-        ("iat", int(time.time()) + 20),
+        # Stable ids: time-based values in the id differ between xdist workers.
+        pytest.param("exp", int(time.time()) + 3600, id="exp-too-far-ahead"),
+        pytest.param("iat", int(time.time()) + 20, id="iat-in-future"),
     ],
 )
 def test_invalid_claim_rejected(public_env, monkeypatch, claim, value):

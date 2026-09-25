@@ -347,13 +347,15 @@ def _init_db_pg() -> None:
     concurrent CLI starts (supervisor + daemons + server all call
     `init_db` at boot) don't deadlock on `ALTER TABLE … ADD COLUMN
     IF NOT EXISTS` while other sessions hold row-level locks on the
-    same tables for normal writes (heartbeats, upserts). The lock
-    key is a fixed sentinel — no risk of collision with anything
-    else in the app.
+    same tables for normal writes (heartbeats, upserts). The lock is
+    per schema (a fixed class key plus the schema's hash).
     """
     import psycopg
 
-    _INIT_DB_LOCK_KEY = 0x676D_7373_6368_6D61  # "gmsschma" (gmail-search schema)
+    # Two-key advisory lock: a fixed class plus the target schema, so inits
+    # of the same schema serialize (production: `public`) while separate
+    # schemas (one per test) do not queue on each other.
+    _INIT_DB_LOCK_CLASS = 0x676D_7373  # "gmss" (gmail-search schema init)
 
     # The advisory lock serializes concurrent `init_db` calls (supervisor
     # + daemons + server all hit this at boot) — but once inside, the
@@ -366,7 +368,7 @@ def _init_db_pg() -> None:
     with psycopg.connect(_pg_dsn()) as raw:
         with raw.cursor() as cur:
             cur.execute("SET lock_timeout = '3s'")
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_INIT_DB_LOCK_KEY,))
+            cur.execute("SELECT pg_advisory_xact_lock(%s, hashtext(current_schema()))", (_INIT_DB_LOCK_CLASS,))
             try:
                 cur.execute(_read_pg_schema())
                 raw.commit()
