@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from gmail_search.gateway.capabilities import Capabilities
+from gmail_search.gateway.facts_service import FactsIncomplete
 from gmail_search.gateway.registry import AccessDenied, Registry
 from gmail_search.gateway.search_queries import FactVectorRow, LexicalHit, Selection
 from gmail_search.gateway.search_reader import SearchProfile
@@ -155,16 +156,16 @@ async def test_hybrid_owner_boost_and_exact_text_dedup_preserve_contract(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_semantic_last_page_beyond_8000_has_no_lexical_dependency(tmp_path):
+async def test_beyond_full_scan_limit_scores_only_lexical_candidates(tmp_path):
+    # Above FULL_SCAN_MAX_FACTS a whole-corpus scan cannot meet the tool
+    # deadline, so a query with no lexical anchor finds nothing rather than
+    # scanning every fact vector (legacy find_facts behaves the same).
     rows = [fact(i, "unrelated " + str(i), (0.0, 1.0)) for i in range(1, 8002)]
     rows[-1] = fact(8001, "The desired semantic fact")
     service, _, token, reader, _ = compose(tmp_path, rows)
-    result = await service.find_facts(token.secret, query="to be or not to be")
-    assert [row["fact"] for row in result["facts"]] == ["The desired semantic fact"]
-    assert result["coverage"]["examined"] == 8001
-    assert result["coverage"]["selection_complete"] is True
-    assert not reader.queries.tokens
-    assert max(page[2] for page in reader.queries.pages) <= 128
+    with pytest.raises(FactsIncomplete):
+        await service.find_facts(token.secret, query="to be or not to be")
+    assert not reader.queries.pages
 
 
 @pytest.mark.asyncio

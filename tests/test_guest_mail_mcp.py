@@ -470,3 +470,37 @@ def test_mcp_attachment_schema_matches_closed_modes_and_paging():
     for item in invalid:
         with pytest.raises(jsonschema.ValidationError):jsonschema.validate({'items':[item]},schema)
         assert not module._valid_arguments('get_attachment_batch',{'items':[item]})
+
+
+async def _started(server):
+    await server.receive({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                          "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                                     "clientInfo": {"name": "test", "version": "1"}}})
+    await server.receive({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+
+async def _call(server, identifier, name, arguments):
+    await server.receive({"jsonrpc": "2.0", "id": identifier, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}})
+    await server.wait_idle()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_budget_refuses_mail_calls_past_the_limit():
+    module = load_module()
+    tools, emitted = FakeTools(), []
+    server = module.GuestMailMCP(lambda: tools, emitted.append, call_budget=2)
+    await _started(server)
+    for identifier in range(3):
+        await _call(server, identifier, "get_thread_batch", {"thread_ids": ["abc"], "body_limit": 12})
+    assert len(tools.calls) == 2
+    refused = emitted[-1]["result"]
+    assert refused["isError"] and module.BUDGET_SPENT in json.dumps(refused)
+
+
+def test_only_a_server_started_for_a_subagent_is_budgeted():
+    module = load_module()
+    assert module._budget_from_argv(['--subagent']) == module.SUBAGENT_CALL_BUDGET
+    assert module._budget_from_argv([]) is None
+    with pytest.raises(SystemExit):
+        module._budget_from_argv(['--budget=1000'])

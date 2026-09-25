@@ -157,10 +157,17 @@ async def _drain(task):
     return interrupted
 
 
+# Concurrent search sessions. Each may buffer up to SearchLimits.max_session_bytes
+# (128 MB), so 16 bounds worst-case memory near 2 GB; raised from 8/2 so a run's
+# parallel subagents are not refused (2026-09-24).
+MAX_SEARCH_GLOBAL=16
+MAX_SEARCH_PER_OWNER=8
+
+
 class SearchReader:
     def __init__(self,registry,*,profile,admission,limits=None):
         self.registry=registry;self.profile=profile;self.admission=admission;self.limits=limits or SearchLimits()
-        if admission.global_concurrency>8 or admission.owner_concurrency>2:
+        if admission.global_concurrency>MAX_SEARCH_GLOBAL or admission.owner_concurrency>MAX_SEARCH_PER_OWNER:
             raise ValueError('Search admission exceeds qualified profile')
 
     @asynccontextmanager

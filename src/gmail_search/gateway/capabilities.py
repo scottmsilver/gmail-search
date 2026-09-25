@@ -52,7 +52,7 @@ class Capabilities:
         Long operations must call again periodically and before publishing bytes.
         artifact.commit checks the current fence; storage must honor that fence.
         """
-        with self.registry._transaction() as db:
+        with self.registry._transaction(read_only=True) as db:
             return self.registry._lease(self._authorize(db, token, audience, operation))
 
     def revoke(self, token):

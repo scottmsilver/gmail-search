@@ -285,6 +285,9 @@ class BrowserConversations:
             if len(parts) >= 10000:
                 raise AccessDenied()
             seq,event = row['seq'],row['event']
+            if type(seq) is int and seq>last and event.get('type')=='text_delta':
+                last = seq
+                continue  # Live streaming only; the `text` event holds the message.
             if type(seq) is not int or seq<=last or event.get('type') not in mapping:
                 raise AccessDenied()
             last = seq

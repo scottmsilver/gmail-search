@@ -13,6 +13,11 @@ from .data_admission import DataAdmission
 from .provider import _finish
 from .registry import AccessDenied, RunLease
 
+# Concurrent embedding/rerank calls. Every search embeds its query, so a run's
+# parallel subagents need more than the original 4/2 (2026-09-24).
+MAX_PROVIDER_GLOBAL=16
+MAX_PROVIDER_PER_OWNER=8
+
 
 @asynccontextmanager
 async def _owned_stream(context):
@@ -30,7 +35,7 @@ async def _owned_stream(context):
 class _SearchProvider:
     def __init__(self, registry, transport, *, profile, admission):
         if (type(profile) is not self.profile_type or type(admission) is not DataAdmission
-                or admission.global_concurrency>4 or admission.owner_concurrency>2):
+                or admission.global_concurrency>MAX_PROVIDER_GLOBAL or admission.owner_concurrency>MAX_PROVIDER_PER_OWNER):
             raise ValueError('Invalid search provider configuration')
         self._registry=registry
         self._transport=transport

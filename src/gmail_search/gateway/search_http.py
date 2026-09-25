@@ -12,7 +12,7 @@ def add_search_routes(app,service,token_from_request,read_json):
         token=token_from_request(request)
         await service.authorize(token)
         value=await read_json(request)
-        allowed={'query','top_k','date_from','date_to','detail','max_matches'}
+        allowed={'query','top_k','date_from','date_to','detail','max_matches','sender','recipient'}
         if set(value)-allowed or 'query' not in value:
             raise HTTPException(400,'Invalid search request')
         try:

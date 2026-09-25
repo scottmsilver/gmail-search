@@ -398,3 +398,37 @@ test('an admitted worker run shows a starting step before the VM reports in', as
     assert.ok(stages[0].includes('"state":"starting"'), `first stage is starting, got ${stages[0].slice(0,200)}`);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+function workerStream(frames) {
+  return async (url) => String(url).endsWith('/api/auth/me') ? identity()
+    : new Response('event: session\ndata: {"session_id":"run-1","conversation_id":"c1","supports_cancel":true}\n\n'
+        + frames.map(([kind, payload]) => `event: ${kind}\ndata: ${JSON.stringify({payload})}\n\n`).join(''));
+}
+
+function textParts(body) {
+  const lines = body.split('\n').filter(l => l.startsWith('data: {'));
+  const events = lines.map(l => JSON.parse(l.slice(6)));
+  return {
+    starts: events.filter(e => e.type === 'text-start').map(e => e.id),
+    text: events.filter(e => e.type === 'text-delta').map(e => e.delta).join(''),
+  };
+}
+
+test('answer text streams as it is written and the matching final is not repeated', async () => {
+  globalThis.fetch = workerStream([['answer_delta', {text: 'Three '}], ['answer_delta', {text: '4000W heaters.'}],
+    ['final', {text: 'Three 4000W heaters.'}]]);
+  try {
+    const parts = textParts(await (await POST(request({messages, conversation_id:'c1'}))).text());
+    assert.deepEqual(parts.starts, ['deep-stream-' + parts.starts[0].split('deep-stream-')[1]]);
+    assert.equal(parts.text, 'Three 4000W heaters.');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a final that differs from the streamed text is still shown', async () => {
+  globalThis.fetch = workerStream([['answer_delta', {text: 'Draft'}], ['final', {text: 'Final answer'}]]);
+  try {
+    const parts = textParts(await (await POST(request({messages, conversation_id:'c1'}))).text());
+    assert.equal(parts.starts.length, 2);
+    assert.ok(parts.text.endsWith('Final answer'));
+  } finally { globalThis.fetch = originalFetch; }
+});

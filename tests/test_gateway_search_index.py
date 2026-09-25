@@ -347,3 +347,37 @@ def test_real_ah_index_and_missing_required_asset_preflight(tmp_path,monkeypatch
     monkeypatch.setattr(scann_ops_pybind.scann_pybind,'ScannNumpy',forbidden)
     with pytest.raises(indexes.IndexUnavailable):indexes.load_scann_index(bound,path)
     assert not called
+
+
+class CountingIndex(FakeIndex):
+    """Holds each search until `release`, recording the peak overlap."""
+    def __init__(self,release):
+        super().__init__(gate=release)
+        self.active=0;self.peak=0;self.lock=threading.Lock()
+    def search(self,vector,top_k):
+        with self.lock:self.active+=1;self.peak=max(self.peak,self.active)
+        try:return super().search(vector,top_k)
+        finally:
+            with self.lock:self.active-=1
+
+
+def test_one_index_serves_several_searches_at_once_up_to_its_limit():
+    # A parent plus three subagents each search the same owner's index.
+    async def run():
+        release=threading.Event()
+        fake=CountingIndex(release)
+        registry=indexes.OwnerIndexRegistry(max_searches=6,max_searches_per_index=2)
+        await registry.publish(loaded(fake=fake))
+        async def one():
+            async with registry.acquire('alice') as lease:
+                return await lease.search([1,0,0,0],top_k=3,absolute_deadline=time.monotonic()+5)
+        tasks=[asyncio.create_task(one()) for _ in range(3)]
+        for _ in range(200):
+            if fake.active==2:break
+            await asyncio.sleep(.01)
+        assert fake.active==2  # two run together; the third waits for a slot
+        release.set()
+        assert await asyncio.gather(*tasks)==[([1],[.75])]*3
+        assert fake.peak==2
+        await registry.aclose()
+    asyncio.run(run())

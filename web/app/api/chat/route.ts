@@ -192,6 +192,18 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       let finalText = "";
       let workerRunId: string | null = null;
       let finalStartedId: string | null = null;
+      // Answer text streamed while the model writes it (`answer_delta`); the
+      // `final` frame then only closes it, unless the texts differ.
+      const streamed = {
+        id: `deep-stream-${args.loggerId}`, text: "", open: false,
+        append(delta: string) {
+          if (!this.open) { writer.write({ type: "text-start", id: this.id }); this.open = true; }
+          writer.write({ type: "text-delta", id: this.id, delta });
+          this.text += delta;
+        },
+        end() { if (this.open) { writer.write({ type: "text-end", id: this.id }); this.open = false; } },
+        matches(final: string) { return this.text.trim() !== "" && this.text.trim() === final.trim(); },
+      };
       // What we'll persist as the assistant turn. Updated on each
       // terminating branch so the saved version matches what the
       // user saw, including error fallbacks.
@@ -274,11 +286,19 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
                 typeof (data.payload as { text?: unknown })?.text === "string"
                   ? ((data.payload as { text: string }).text as string)
                   : finalText;
-              finalStartedId = `deep-final-${args.loggerId}`;
-              writer.write({ type: "text-start", id: finalStartedId });
-              writer.write({ type: "text-delta", id: finalStartedId, delta: finalText });
-              writer.write({ type: "text-end", id: finalStartedId });
+              streamed.end();
+              if (streamed.matches(finalText)) {
+                finalStartedId = streamed.id;
+              } else {
+                finalStartedId = `deep-final-${args.loggerId}`;
+                writer.write({ type: "text-start", id: finalStartedId });
+                writer.write({ type: "text-delta", id: finalStartedId, delta: finalText });
+                writer.write({ type: "text-end", id: finalStartedId });
+              }
               persistedAssistantText = finalText;
+            } else if (kind === "answer_delta") {
+              const delta = (data.payload as { text?: unknown })?.text;
+              if (typeof delta === "string" && delta) streamed.append(delta);
             } else if (kind === "persist_ok") {
               // Server's _persist_rich_assistant_message just COMMITTED
               // a rich assistant message into conversation_messages.
@@ -291,6 +311,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
               if (workerRunId) writer.write({type: "data-agent-run-finished", transient: true,
                 data: {runId: workerRunId}});
             } else if (kind === "error") {
+              streamed.end();
               finalStartedId = `deep-error-${args.loggerId}`;
               const reason = String((data.payload as { message?: string })?.message ?? "unknown");
               const state = (data.payload as {state?: unknown})?.state;
@@ -328,6 +349,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         await logger.log("error", { message: err });
+        streamed.end();
         if (!finalStartedId) {
           const id = `deep-streamerr-${args.loggerId}`;
           const msg = `_Deep-mode stream error: ${err}_`;

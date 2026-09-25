@@ -7,6 +7,7 @@ undo an external commit whose acknowledgement races cancellation/revocation.
 Input preparation owns its resources until the backend stop acknowledgement.
 """
 import asyncio
+import logging
 import json
 import re
 import time
@@ -20,6 +21,8 @@ _TERMINAL=frozenset(('completed','failed','cancelled'))
 class WorkerBusy(AccessDenied):
     """Every worker slot holds a live run. Refused before admission, so the
     browser is told to wait instead of seeing a run that fails at launch."""
+
+logger=logging.getLogger(__name__)
 
 
 # Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
@@ -236,7 +239,9 @@ class BrowserRuns:
                     heartbeat=time.monotonic()
                 await asyncio.sleep(self.poll_seconds)
         except asyncio.CancelledError:desired='cancelled'
-        except Exception:desired='failed'
+        except Exception as error:
+            desired='failed'
+            logger.warning('run %s failed: %s',lease.run_id[:8],type(error).__name__)
         finally:
             async def cleanup():
                 nonlocal desired
@@ -364,6 +369,6 @@ def event_frame(row):
     """Existing browser SSE envelope; IDs/timing come from the trusted store."""
     event = row['event']
     kind = {'tool_start':'tool_call','tool_result':'tool_result',
-        'text':'writer','status':'status','artifact':'artifact','usage':'usage','error':'error'}[event['type']]
+        'text':'writer','text_delta':'answer_delta','status':'status','artifact':'artifact','usage':'usage','error':'error'}[event['type']]
     return f'event: {kind}\ndata: '+json.dumps(
         {'seq':row['seq'],'agent':'agent','payload':event},ensure_ascii=False)+'\n\n'

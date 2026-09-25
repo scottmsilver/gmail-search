@@ -111,7 +111,9 @@ async def test_v3_core_rejects_inexact_ids_before_network(tmp_path):
 
 
 def test_full_extension_bounds_what_the_model_sees_per_tool_call():
-    source=(ROOT/'guest-agent-mail-mcp.ts').read_text()
+    source=(ROOT/'guest-mail-server.ts').read_text()
+    for extension in ('guest-agent-mail-mcp.ts','guest-agent-subagent-mail-mcp.ts'):
+        assert 'config: mailAdapterConfig(' in (ROOT/extension).read_text()
     # At 8 MiB a single 694 KB thread fetch filled Gemini's 200k-token window:
     # prompts grew to 208k tokens and the run failed. The adapter keeps a
     # preview, names a temp file with the full output, and Pi can page it.

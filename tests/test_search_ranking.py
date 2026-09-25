@@ -31,6 +31,10 @@ def test_ranking_signals_keep_existing_scale():
     assert r._recency_score('invalid') == 0
     assert r._recency_score((datetime.now(timezone.utc) - timedelta(days=60)).isoformat()) == pytest.approx(.5, abs=.001)
     assert r._contact_frequency_score(['Alice <a@example.test>'], {'a@example.test': .7}) == .7
+    assert r._contact_frequency_score(['ALICE@Example.test, "Bob" <b@example.test>'],
+                                      {'a@example.test': .7, 'b@example.test': .9}) == .9
+    # Exact address match, not substring: bob@ is not jimbob@.
+    assert r._contact_frequency_score(['jimbob@example.test'], {'bob@example.test': .9}) == 0.0
 
 
 def test_legacy_engine_reexports_same_result_types_and_helpers():

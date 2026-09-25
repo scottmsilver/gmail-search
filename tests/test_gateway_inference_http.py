@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 
 from gmail_search.gateway.gemini import GeminiProfile, GeminiRunService, MODEL
 from gmail_search.gateway.gemini_http import GeminiHTTPTransport
+from gmail_search.gateway import inference_http
 from gmail_search.gateway.inference_http import add_inference_routes
 from gmail_search.gateway.provider import AnthropicRunService, ProviderProfile
 from gmail_search.gateway.provider_http import AnthropicHTTPTransport
@@ -286,7 +287,10 @@ async def test_google_route_accepts_only_its_exact_sse_query():
 
 
 @pytest.mark.asyncio
-async def test_process_and_owner_admission_reject_before_body_and_release_after_cancel():
+async def test_process_and_owner_admission_reject_before_body_and_release_after_cancel(monkeypatch):
+    monkeypatch.setattr(inference_http, 'INFERENCE_GLOBAL_STREAMS', 4)
+    monkeypatch.setattr(inference_http, 'INFERENCE_OWNER_STREAMS', 2)
+
     class BlockingService:
         def __init__(self):
             self.owners = {'a1': 'alice', 'a2': 'alice', 'b1': 'bob', 'b2': 'bob', 'c': 'carol'}
@@ -362,3 +366,9 @@ async def test_gateway_factory_mounts_optional_inference_with_shared_capability_
             assert result.content == b'data: synthetic\n\n'
             assert result.headers['cache-control'] == 'private, no-store'
     assert len(service.calls) == 2
+
+
+def test_admission_fits_a_parent_and_its_parallel_subagents():
+    # A workflow run: parent plus three researchers stream at once.
+    assert inference_http.INFERENCE_OWNER_STREAMS >= 4
+    assert inference_http.INFERENCE_GLOBAL_STREAMS >= inference_http.INFERENCE_OWNER_STREAMS

@@ -238,11 +238,22 @@ const summarizeDeepStage = (kind: string, payload: unknown): string => {
   return "";
 };
 
+// Guest-measured latency: model_ms = the model deciding before this step,
+// elapsed_ms = the tool running.
+const seconds = (ms: unknown) => (typeof ms === "number" && ms >= 0 ? `${(ms / 1000).toFixed(1)}s` : "");
+
+export const stageTiming = (payload: unknown): string => {
+  if (!payload || typeof payload !== "object") return "";
+  const p = payload as { model_ms?: unknown; elapsed_ms?: unknown };
+  return [seconds(p.model_ms) && `model ${seconds(p.model_ms)}`, seconds(p.elapsed_ms)].filter(Boolean).join(" · ");
+};
+
 const DeepStageBlock = ({ part }: { part: DeepStagePart }) => {
   const [open, setOpen] = useState(false);
   const kind = part.data.kind;
   const label = STAGE_LABELS[kind] ?? kind;
   const summary = summarizeDeepStage(kind, part.data.payload);
+  const timing = stageTiming(part.data.payload);
   return (
     <div className="text-xs">
       <button
@@ -255,6 +266,7 @@ const DeepStageBlock = ({ part }: { part: DeepStagePart }) => {
           <span className="text-neutral-700">{label}</span>
           {summary && <span className="text-neutral-400"> → {summary}</span>}
         </span>
+        {timing && <span className="shrink-0 text-neutral-400 tabular-nums">{timing}</span>}
       </button>
       {open && (
         <div className="mt-1 ml-4 border-l-2 border-neutral-200 pl-3 space-y-2">

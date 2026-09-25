@@ -230,3 +230,15 @@ def test_total_json_nodes_are_bounded(monkeypatch):
     monkeypatch.setattr(inference, 'MAX_JSON_NODES', 5)
     with pytest.raises(InferenceRequestRejected):
         compile(request())
+
+
+def test_tool_schema_accepts_subagent_keywords_and_drops_deprecated():
+    from gmail_search.gateway.inference import _schema
+    schema = {'type': 'object', 'properties': {
+        'args': {'type': 'object', 'maxProperties': 8, 'minProperties': 0},
+        'key': {'type': 'string', 'pattern': '^[a-z]+$'},
+        'old': {'type': 'string', 'deprecated': True}}}
+    out = _schema(schema)
+    assert out['properties']['args']['maxProperties'] == 8
+    assert out['properties']['key']['pattern'] == '^[a-z]+$'
+    assert 'deprecated' not in out['properties']['old']

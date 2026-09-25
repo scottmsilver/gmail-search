@@ -25,6 +25,14 @@ def module(name):
     return importlib.import_module(name)
 
 
+@pytest.fixture(autouse=True)
+def private_jiti_cache(tmp_path,monkeypatch):
+    """Keep prepare() off the host's /tmp/jiti and /tmp/runtime."""
+    runner=module('guest_agent_pi')
+    monkeypatch.setattr(runner,'JITI_CACHE_IMAGE',tmp_path/'no-image-cache')
+    monkeypatch.setattr(runner,'JITI_CACHE',tmp_path/'jiti')
+
+
 def wire(value):
     raw=json.dumps(value).encode()
     return struct.pack('!I',len(raw))+raw
@@ -100,7 +108,7 @@ def test_fixed_argv_and_capability_redaction():
     assert '--mode' in argv and argv[argv.index('--mode')+1]=='rpc'
     assert envelope()['prompt'] not in argv
     names=set(argv[argv.index('--tools')+1].split(','))
-    assert len(names)==16 and 'mail_judge' in names
+    assert len(names)==16 and 'mail_judge' in names and 'subagent' not in names
     assert {'bash','read','edit','write','grep','find','ls'}<=names
     event=runner.normalize({'type':'tool_execution_start','toolName':'bash','args':{'x':'5'*64}},['5'*64])
     assert '5'*64 not in json.dumps(event)
@@ -171,6 +179,27 @@ def test_prepare_pins_configuration_and_keeps_caps_out_of_model_file(tmp_path,mo
     with pytest.raises(FileExistsError):runner.prepare(envelope())
 
 
+
+def test_the_image_extension_cache_seeds_pis_cache(tmp_path,monkeypatch):
+    runner=module('guest_agent_pi')
+    monkeypatch.setattr(runner.os,'chown',lambda *args:None)
+    image=tmp_path/'image-cache';image.mkdir();(image/'index.abc.mjs').write_text('compiled')
+    monkeypatch.setattr(runner,'JITI_CACHE_IMAGE',image)
+    assert runner.seed_jiti_cache() is None
+    assert (tmp_path/'jiti/index.abc.mjs').read_text()=='compiled'
+
+
+def test_a_failed_seed_is_reported_and_leaves_no_partial_cache(tmp_path,monkeypatch):
+    runner=module('guest_agent_pi')
+    image=tmp_path/'image-cache';image.mkdir();(image/'index.abc.mjs').write_text('compiled')
+    monkeypatch.setattr(runner,'JITI_CACHE_IMAGE',image)
+    def refuse(*args):raise PermissionError(1,'denied')
+    monkeypatch.setattr(runner.os,'chown',refuse)
+    assert runner.seed_jiti_cache()=='PermissionError errno=1'
+    assert not (tmp_path/'jiti').exists()
+    monkeypatch.setattr(runner,'JITI_CACHE_IMAGE',tmp_path/'missing')
+    assert runner.seed_jiti_cache()=='no image cache'
+
 class FakeWriter:
     def __init__(self):self.body=b'';self.closed=False;self.aborted=False;self.transport=self
     def write(self,data):self.body+=data
@@ -233,6 +262,7 @@ async def test_full_run_uses_separate_caps_and_drains_bridge(tmp_path,monkeypatc
         async def __call__(self,event):events.append(event)
     monkeypatch.setattr(runner,'start_process',start);monkeypatch.setattr(runner,'EventSink',Sink)
     await runner.run(envelope())
+    events=[{k:v for k,v in e.items() if k not in ('model_ms','elapsed_ms')} for e in events]
     assert events==[{'type':'status','state':'running'}, {'type':'text','text':envelope()['prompt']},
                     {'type':'status','state':'runner_completed'}]
     assert len(processes)==2 and all(p.returncode is not None for p in processes)
@@ -317,3 +347,66 @@ def test_the_opus_profile_points_pi_at_the_gateways_chat_route(tmp_path,monkeypa
     assert (provider['api'],provider['baseUrl'])==('openai-completions','http://127.0.0.1:18080/v1')
     assert [m['id'] for m in provider['models']]==['anthropic/claude-opus-5']
     assert env['OPENROUTER_API_KEY']==opus['inference_capability'] and 'ANTHROPIC_API_KEY' not in env
+
+
+def test_text_deltas_are_normalized_and_redacted():
+    runner=module('guest_agent_pi')
+    update=lambda delta:{'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':delta}}
+    assert runner.normalize(update('Three heaters'))=={'type':'text_delta','text':'Three heaters'}
+    assert runner.normalize(update('key '+'5'*64),['5'*64])=={'type':'text_delta','text':'key [REDACTED]'}
+    assert runner.normalize({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'x'}}) is None
+
+
+@pytest.mark.asyncio
+async def test_delta_buffer_coalesces_by_size_and_time():
+    runner=module('guest_agent_pi')
+    sent,now=[],[0.0]
+    async def emit(event):sent.append(event['text'])
+    buffer=runner.DeltaBuffer(emit,(),clock=lambda:now[0])
+    for word in ('a','b','c'):await buffer.add(word)
+    assert sent==[]                      # small and quick: still buffered
+    now[0]=runner.DELTA_FLUSH_SECONDS
+    await buffer.add('d')
+    assert sent==['abcd']                # time bound reached
+    await buffer.add('x'*runner.DELTA_FLUSH_CHARS)
+    assert sent[-1]=='x'*runner.DELTA_FLUSH_CHARS  # size bound reached
+    await buffer.add('tail');await buffer.flush()
+    assert sent[-1]=='tail'
+
+
+def test_step_clock_times_model_turns_and_tools():
+    runner=module('guest_agent_pi')
+    now=[0.0]
+    steps=runner.StepClock(clock=lambda:now[0])
+    now[0]=2.0
+    start=steps.stamp({'toolCallId':'c1'},{'type':'tool_start','name':'mail_search_emails_batch'})
+    now[0]=3.5
+    result=steps.stamp({'toolCallId':'c1'},{'type':'tool_result','name':'mail_search_emails_batch'})
+    now[0]=4.0
+    answer=steps.stamp({},{'type':'text','text':'done'})
+    assert start['model_ms']==2000 and result['elapsed_ms']==1500 and answer['model_ms']==500
+
+
+def test_subagents_load_only_for_prompts_with_the_routers_planning_hint():
+    runner=module('guest_agent_pi')
+    assert not runner.wants_workflow('what heaters did I buy')
+    assert runner.wants_workflow('compare vendors\n\n'+runner.WORKFLOW_MARKER+' Give each part ...')
+    argv=runner.pi_argv(workflow=True)
+    assert 'subagent' in argv[argv.index('--tools')+1].split(',')
+    assert str(runner.ROOT/'guest-agent-workflow.ts') in argv
+    assert str(runner.ROOT/'guest-agent-workflow.ts') not in runner.pi_argv()
+
+
+@pytest.mark.asyncio
+async def test_startup_report_fires_once_when_pi_is_silent_and_the_run_continues():
+    runner=module('guest_agent_pi')
+    reader=asyncio.StreamReader()
+    proc=type('P',(),{'stdout':reader})()
+    reports=[]
+    async def report():reports.append(1)
+    loop=asyncio.get_running_loop()
+    async def feed():
+        await asyncio.sleep(0.05);reader.feed_data(b'line\n')
+    asyncio.ensure_future(feed())
+    raw,report_at=await runner._next_record(proc,loop.time()+0.01,report)
+    assert raw==b'line\n' and reports==[1] and report_at is None

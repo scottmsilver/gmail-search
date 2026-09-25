@@ -12,9 +12,12 @@ trap 'rm -rf -- "$build_dir"' ERR
 /usr/bin/python3 -I "$script_dir/verify_pi_mcp_runtime_inputs.py" "$runtime_inputs" "$pi_packages" "$build_dir/image"
 cmp "$build_dir/image/pi-pkgs/package-lock.json" "$script_dir/../../pi/pi-pkgs/package-lock.json"
 cmp "$build_dir/image/pi-pkgs/package.json" "$script_dir/../../pi/pi-pkgs/package.json"
-for name in guest-agent-vsock-bridge.py guest_run_bootstrap.py guest_tool_config.py guest_mail_tools.py guest_mail_tool_cli.py guest_mail_mcp.py guest_attachment_transport.py guest_attachment_download.py guest_agent_bootstrap.py guest_agent_pi.py guest_agent_claude.py guest_agent.py guest-agent-mail-mcp.ts; do
+for name in guest-agent-vsock-bridge.py guest_run_bootstrap.py guest_tool_config.py guest_mail_tools.py guest_mail_tool_cli.py guest_mail_mcp.py guest_attachment_transport.py guest_attachment_download.py guest_agent_bootstrap.py guest_agent_pi.py guest_agent_claude.py guest_agent.py guest-agent-mail-mcp.ts guest-mail-server.ts guest-agent-workflow.ts guest-agent-subagent-mail-mcp.ts; do
   cp "$script_dir/$name" "$build_dir/image/"
 done
+cp -r "$script_dir/workflow-agents" "$build_dir/image/"
+# Precompiled Pi extensions (guest_agent_pi seeds /tmp/jiti from these).
+"$script_dir/warm-jiti-cache.sh" "$build_dir/image"
 chmod -R a+rX "$build_dir/image"
 mksquashfs "$build_dir/image" "$build_dir/agent-full.squashfs" -all-root -noappend -comp zstd -processors 2 -mem 256M -no-progress
 sha256sum "$build_dir/agent-full.squashfs" > "$build_dir/SHA256SUMS"

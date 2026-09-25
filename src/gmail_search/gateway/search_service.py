@@ -101,14 +101,15 @@ class RunSearchService:
     async def authorize(self,token):
         return await _thread(self.capabilities.authorize,token,audience='retrieval',operation='search')
 
-    async def search(self,token,*,query,top_k=10,date_from=None,date_to=None,detail='snippet',max_matches=3):
+    async def search(self,token,*,query,top_k=10,date_from=None,date_to=None,detail='snippet',max_matches=3,
+                     sender=None,recipient=None):
         lease=await self.authorize(token)
         _text(query,1000)
         if (not query.strip() or type(top_k) is not int or not 1<=top_k<=100
                 or detail not in ('refs','snippet','summary','full')
                 or type(max_matches) is not int or not 0<=max_matches<=100):
             raise ValueError('Invalid search options')
-        StructuredFilters(date_from=date_from,date_to=date_to)
+        StructuredFilters(from_filter=sender,to_filter=recipient,date_from=date_from,date_to=date_to)
         deadline=tool_deadline()
         async def check():
             current=await self.authorize(token)
@@ -123,7 +124,8 @@ class RunSearchService:
                 await check()
         async def execute():
             async with asyncio.timeout_at(deadline):
-                return await self._execute(lease,query,top_k,date_from,date_to,detail,max_matches,deadline,check)
+                return await self._execute(lease,query,top_k,date_from,date_to,detail,max_matches,deadline,check,
+                                           sender,recipient)
         work=asyncio.create_task(execute())
         watcher=asyncio.create_task(watch())
         try:
@@ -221,7 +223,8 @@ class RunSearchService:
                 break
         return Selection(tuple(rows),complete,None if complete else 'incomplete')
 
-    async def _execute(self,lease,query,top_k,date_from,date_to,detail,max_matches,deadline,check):
+    async def _execute(self,lease,query,top_k,date_from,date_to,detail,max_matches,deadline,check,
+                       sender=None,recipient=None):
         owner=self.owners.get(lease.owner_id)
         if owner is None:
             raise RuntimeError('Search profile is unavailable')
@@ -245,7 +248,9 @@ class RunSearchService:
                     original=parse_query(query)
                 except (ValueError,OverflowError):
                     raise ValueError('Invalid search query') from None
-                filters=StructuredFilters(parsed.from_filter,parsed.to_filter,parsed.subject_filter,parsed.has_attachment,
+                # Explicit sender/recipient win over from:/to: operators in the query text.
+                filters=StructuredFilters(sender or parsed.from_filter,recipient or parsed.to_filter,
+                                          parsed.subject_filter,parsed.has_attachment,
                                           date_from or parsed.date_from,date_to or parsed.date_to)
                 vector=await self.embedder.embed(lease,parsed.text or expanded,deadline=deadline,check_active=check)
                 await check()

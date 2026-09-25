@@ -26,13 +26,17 @@ MAX_RECORDS=10000
 # Concurrent agent VMs. Each is jailed with its own id, netns and vsock socket;
 # a real run peaks near 375 MB of the worker's ~3.5 GB (measured 2026-09-24).
 MAX_ACTIVE_JOBS=5
+# Worker RAM kept for the host itself (it uses ~400 MB). Every admitted VM at
+# its full memory limit must fit in the rest: per-VM cgroups do not bound their
+# sum, so 5 x 1.5 GiB on the 3.9 GB worker could exhaust the host.
+HOST_RESERVE_MIB=640
 
 
 @dataclass(frozen=True)
 class Limits:
-    vcpus:int=1
-    memory_mib:int=1024
-    pids:int=128
+    vcpus:int=2          # matches FULL_LIMITS on the controller (subagent headroom)
+    memory_mib:int=640   # a parent plus three subagents peaked at 486 MB (2026-09-24)
+    pids:int=256
     disk_bytes:int=1024**3
     output_bytes:int=8*1024**2
     wall_seconds:int=900  # FULL_LIMITS.wall_seconds on the controller
@@ -274,12 +278,26 @@ class RuntimeSession:
             self.relay=None
 
 
+def host_memory_mib(meminfo=Path('/proc/meminfo')):
+    for line in meminfo.read_text().splitlines():
+        if line.startswith('MemTotal:'):
+            return int(line.split()[1])//1024
+    raise RuntimeError('Worker memory size unavailable')
+
+
+def require_memory_fits(total_mib):
+    """Refuse to start when every admitted VM at its limit would not fit."""
+    if MAX_ACTIVE_JOBS*Limits().memory_mib>total_mib-HOST_RESERVE_MIB:
+        raise RuntimeError('Agent VM memory limits exceed the worker')
+
+
 def main(backend_factory=None):
     import pwd
     import signal
     from firecracker_backend import SyntheticFullAgentBackend,boundary
     from full_agent_rpc_server import Server
     if len(sys.argv)!=1 or os.geteuid()!=0:raise RuntimeError('Fixed root manager required')
+    require_memory_fits(host_memory_mib())
     if backend_factory is None:
         boundary();backend_factory=SyntheticFullAgentBackend
     backend=backend_factory()

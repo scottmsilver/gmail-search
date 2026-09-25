@@ -445,7 +445,7 @@ async def test_large_filtered_ann_overfetch_retains_hit_beyond_default_pool(tmp_
     reader.queries.lexical_messages=no_lexical
     reader.queries.lexical_attachments=no_lexical
     result=await service.search(token.secret,query='draw from:alice@test')
-    assert requested==[10000]
+    assert requested==[importlib.import_module('gmail_search.gateway.search_service').BROAD_FILTER_ANN_POOL]
     assert result['results'][0]['thread_id']=='t1'
 
 

@@ -78,9 +78,13 @@ def _filename(value):
 
 
 def _search_options(item):
-    allowed={'query','top_k','date_from','date_to','detail','max_matches'}
+    allowed={'query','top_k','date_from','date_to','detail','max_matches','sender','recipient'}
     if type(item) is not dict or set(item)-allowed or 'query' not in item:
         raise ToolError('Invalid search item.')
+    for name in ('sender','recipient'):
+        value=item.get(name)
+        if value is not None and (type(value) is not str or not value.strip() or len(value)>256 or '\x00' in value):
+            raise ToolError('Search sender/recipient must be 1-256 characters.')
     query=item['query']
     if type(query) is not str or not query.strip() or len(query)>1000 or '\x00' in query:
         raise ToolError('Invalid search query.')

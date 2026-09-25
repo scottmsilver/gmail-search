@@ -138,7 +138,9 @@ def _copy(value):
 
 def _schema(value):
     """Explicit JSON Schema subset; references remain inside the supplied schema."""
-    _object(value, '', 'type properties required additionalProperties items enum const default description title $defs definitions $ref anyOf oneOf allOf not minLength maxLength minItems maxItems minimum maximum exclusiveMinimum exclusiveMaximum multipleOf')
+    # minProperties/maxProperties/pattern/deprecated: used by the pi-subagents
+    # `subagent` tool; without them every request carrying it was refused.
+    _object(value, '', 'type properties required additionalProperties items enum const default description title $defs definitions $ref anyOf oneOf allOf not minLength maxLength minItems maxItems minProperties maxProperties pattern deprecated minimum maximum exclusiveMinimum exclusiveMaximum multipleOf')
     output = {}
     for key, item in value.items():
         if key == 'type':
@@ -170,8 +172,13 @@ def _schema(value):
             output[key] = _copy(_array(item, 256, nonempty=True))
         elif key in ('const', 'default'):
             output[key] = _copy(item)  # Inert JSON values, not recursively resolved schemas.
-        elif key in ('minLength', 'maxLength', 'minItems', 'maxItems'):
+        elif key in ('minLength', 'maxLength', 'minItems', 'maxItems', 'minProperties', 'maxProperties'):
             output[key] = _integer(item, 0, 1_000_000)
+        elif key == 'pattern':
+            output[key] = _text(item, 1024, empty=False)
+        elif key == 'deprecated':
+            if type(item) is not bool:
+                _reject()  # Annotation only: validated, then not forwarded.
         else:
             if type(item) not in (int, float) or not math.isfinite(item) or abs(item) > 10**12 or (key == 'multipleOf' and item <= 0):
                 _reject()

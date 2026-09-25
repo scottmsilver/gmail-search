@@ -25,7 +25,8 @@ def test_explicit_v3_config_and_bootstrap_preserve_older_profiles():
     config=module('guest_tool_config'); bootstrap=module('guest_run_bootstrap')
     parsed=config.parse_tool_config(V3)
     assert parsed.profile=='mail-raw-mcp-v3' and parsed.version==3
-    assert parsed.tool_names==config.parse_tool_config(V2).tool_names and len(parsed.tool_names)==8
+    # v3 adds `judge` (typed Jev judgments); v1/v2 keep their tool sets.
+    assert parsed.tool_names==config.parse_tool_config(V2).tool_names+('judge',) and len(parsed.tool_names)==9
     assert config.persisted_payload(parsed)==V3
     value={**V3,'runtime':'claude'}; raw=json.dumps(value).encode(); packet=len(raw).to_bytes(4,'big')+raw
     assert bootstrap.read_config(io.BytesIO(packet).read,expected_profile='mail-raw-mcp-v3')==value
@@ -131,7 +132,7 @@ async def test_raw_union_and_mcp_output_are_profile_specific(setup):
     messages=[]; server=mcp.GuestMailMCP(lambda:core,messages.append);server._ready=True
     await server.receive({'jsonrpc':'2.0','id':1,'method':'tools/list'})
     tools=messages[-1]['result']['tools']
-    assert len(tools)==8 and [t['name'] for t in tools]==list(core.tool_names)
+    assert len(tools)==9 and {t['name'] for t in tools}==set(core.tool_names)
     attachment=next(t for t in tools if t['name']=='get_attachment_batch')
     variants=attachment['inputSchema']['properties']['items']['items']['oneOf']
     assert next(v for v in variants if v['properties']['mode'].get('const')=='raw')['additionalProperties'] is False

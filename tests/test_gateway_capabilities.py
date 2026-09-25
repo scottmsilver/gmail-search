@@ -288,3 +288,26 @@ def test_registry_accepts_private_owned_parent(tmp_path):
     parent.mkdir(mode=0o700)
     registry = Registry(parent / 'registry.sqlite', is_active=lambda owner: True)
     assert registry.start_run('alice', 'conversation', request_key='new').owner_id == 'alice'
+
+
+def test_authorize_does_not_wait_for_the_registry_writer_lock(state):
+    # Parallel subagents check capabilities many times a second per model
+    # stream; holding the writer lock for those reads made writers time out.
+    registry, capabilities, _, _, path = state
+    run = start(registry)
+    token = capabilities.issue(run.run_id, audience='mail', operations={'search'}, ttl=30)
+    writer = sqlite3.connect(path, timeout=0, isolation_level=None)
+    try:
+        writer.execute('BEGIN IMMEDIATE')
+        grant = capabilities.authorize(token.secret, audience='mail', operation='search')
+        assert grant.run_id == run.run_id
+    finally:
+        writer.execute('ROLLBACK')
+        writer.close()
+
+
+def test_a_read_only_check_cannot_write(state):
+    registry, _, _, _, _ = state
+    with pytest.raises(AccessDenied):
+        with registry._transaction(read_only=True) as db:
+            db.execute("INSERT INTO budgets(budget_id,owner_id,ceiling) VALUES('b','alice',1)")

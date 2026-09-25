@@ -8,7 +8,9 @@ import json
 
 from .registry import AccessDenied
 
-_KINDS = {'text','tool_start','tool_result','error','usage','status','artifact'}
+# text_delta: answer text streamed as generated; the matching `text` event still
+# carries each complete message, so replay and the final answer ignore deltas.
+_KINDS = {'text','text_delta','tool_start','tool_result','error','usage','status','artifact'}
 
 
 class Events:

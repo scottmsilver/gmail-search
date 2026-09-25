@@ -25,6 +25,13 @@ _STREAM_HEADERS = {
 }
 
 
+# Concurrent model streams. Per owner covers a parent agent plus its parallel
+# subagents; at 2 the third child of a workflow was refused (429) on its first
+# call (2026-09-24). Global covers MAX_CONCURRENT_RUNS such runs.
+INFERENCE_GLOBAL_STREAMS = 16
+INFERENCE_OWNER_STREAMS = 6
+
+
 class _Admission:
     """Small non-queuing process-local stream limit for one ASGI event loop."""
     def __init__(self):
@@ -37,7 +44,7 @@ class _Admission:
             raise RuntimeError('Invalid authenticated run identity.')
         async with self._lock:
             count = self._owners.get(owner_id, 0)
-            if self._total >= 4 or count >= 2:
+            if self._total >= INFERENCE_GLOBAL_STREAMS or count >= INFERENCE_OWNER_STREAMS:
                 return False
             self._total += 1
             self._owners[owner_id] = count + 1

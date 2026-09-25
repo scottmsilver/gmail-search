@@ -1,5 +1,6 @@
 """Pure shared ranking signals and result types; no database or provider access."""
 import math
+import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -112,17 +113,22 @@ def _thread_size_score(message_count: int) -> float:
     return min(math.log(message_count) / math.log(50), 1.0)
 
 
+_ADDRESS = re.compile(r"[^\s<>\"',;()]+@[^\s<>\"',;()]+")
+
+
+def _addresses(from_addrs: list[str]) -> set[str]:
+    """Lowercased email addresses found in From-style strings ("Name <a@b>")."""
+    return {match.group(0) for addr in from_addrs for match in _ADDRESS.finditer(addr.lower())}
+
+
 def _contact_frequency_score(from_addrs: list[str], freq_map: dict[str, float]) -> float:
-    """Score based on how frequently you interact with thread participants. 0-1."""
+    """Score based on how frequently you interact with thread participants. 0-1.
+
+    A dict lookup per address: scanning every contact for every candidate
+    cost ~1 s per broad search (2026-09-24)."""
     if not from_addrs or not freq_map:
         return 0.0
-    best = 0.0
-    for addr in from_addrs:
-        lower = addr.lower()
-        for key, score in freq_map.items():
-            if key in lower:
-                best = max(best, score)
-    return best
+    return max((freq_map.get(address, 0.0) for address in _addresses(from_addrs)), default=0.0)
 
 
 @dataclass

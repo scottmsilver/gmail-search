@@ -28,7 +28,7 @@ CGROUP = Path('/sys/fs/cgroup/gmail-worker')
 MODULE = Path('/opt/gmail-worker/firecracker_backend.py')
 ATTACHMENT_PIN = '89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068'
 # Separately built full-agent image; historical pins remain unchanged.
-AGENT_FULL_PIN = '2f262066b76f2a93c163c8221825375da8391c15cc18618fbb37b4a3ccf96b72'
+AGENT_FULL_PIN = 'ad91bf033a904d3fda97c5bd5911329cb1f5fa6b2853820c28c0b816aec6bb1b'
 AGENT_PI_MCP_PIN = '478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc'
 AGENT_MCP_PIN = '54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba'
 AGENT_TOOLS_PIN = '4b981cd6a2e1eb2f28acad2d02ac6c365b4ef48b03345eb098578b9a1dd71402'

@@ -266,3 +266,19 @@ def test_a_second_job_launches_while_the_first_runs(tmp_path,monkeypatch):
         h2,p2=request();assert call(m,h2,p2)['status']=='running'
         h3,p3=request();assert call(m,h3,p3)['code']=='busy'
     finally:m.close()
+
+
+def test_every_admitted_vm_at_its_limit_fits_the_worker(tmp_path):
+    # The 3.9 GB production worker: five VMs at their memory limit plus the
+    # host's reserve must fit; per-VM cgroups do not bound the sum.
+    meminfo=tmp_path/'meminfo';meminfo.write_text('MemTotal:        4021720 kB\nMemFree: 1 kB\n')
+    total=mod.host_memory_mib(meminfo)
+    assert total==3927
+    mod.require_memory_fits(total)
+    with pytest.raises(RuntimeError):mod.require_memory_fits(2048)
+
+
+def test_controller_and_manager_agree_on_vm_limits():
+    from gmail_search.gateway.full_agent_remote import FULL_LIMITS
+    limits=mod.Limits()
+    assert (FULL_LIMITS.vcpus,FULL_LIMITS.memory_mib,FULL_LIMITS.pids)==(limits.vcpus,limits.memory_mib,limits.pids)

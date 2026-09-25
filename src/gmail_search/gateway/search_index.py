@@ -24,6 +24,13 @@ class PendingIndex(IndexUnavailable):
 
 
 SEARCH_SLOT_POLL_SECONDS=0.02
+# Concurrent index work. ScaNN search is thread-safe and the searcher is
+# read-only, so one index serves several searches at once. At one search per
+# index, two globally and eight leases, a parent plus three subagents queued
+# past the 5 s tool deadline (499) or were refused (503) (2026-09-24).
+MAX_LEASES=16
+MAX_SEARCHES=6
+MAX_SEARCHES_PER_INDEX=4
 
 
 class IndexBusy(IndexUnavailable):
@@ -139,7 +146,8 @@ class _Lease:
         """Queue behind a running search instead of failing the call: a batch
         of searches from one tool call used to lose all but the first."""
         registry=self._registry
-        while generation.searches or registry._searches>=registry._max_searches:
+        while (generation.searches>=registry._max_searches_per_index
+               or registry._searches>=registry._max_searches):
             if self._closed or registry._closed:raise IndexUnavailable()
             remaining=absolute_deadline-time.monotonic()
             if remaining<=0:raise IndexBusy()
@@ -203,11 +211,13 @@ class OwnerIndexRegistry:
     owner-specific provisioning. Candidate IDs always require owner SQL hydration.
     No loading occurs during acquire, and no disk/global-path fallback exists.
     """
-    def __init__(self,*,max_generations=16,max_leases=8,max_searches=2,max_bindings=4096):
-        for value in (max_generations,max_leases,max_searches,max_bindings):
+    def __init__(self,*,max_generations=16,max_leases=MAX_LEASES,max_searches=MAX_SEARCHES,
+                 max_searches_per_index=MAX_SEARCHES_PER_INDEX,max_bindings=4096):
+        for value in (max_generations,max_leases,max_searches,max_searches_per_index,max_bindings):
             if type(value) is not int or value<1:raise ValueError('Invalid trusted index capacity.')
         self._max_generations=max_generations;self._max_leases=max_leases
-        self._max_searches=max_searches;self._max_bindings=max_bindings
+        self._max_searches=max_searches;self._max_searches_per_index=max_searches_per_index
+        self._max_bindings=max_bindings
         self._active={};self._pending={};self._resident=set()
         self._bindings={};self._sources={};self._resources={}
         self._leases=0;self._searches=0;self._closed=False;self._loop=None

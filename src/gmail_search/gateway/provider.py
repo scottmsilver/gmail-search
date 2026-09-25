@@ -14,6 +14,7 @@ including hidden framing/image tokens. Reserve that worst case before dispatch.
 Missing/invalid usage or interrupted responses charge the entire reservation.
 """
 import asyncio
+import logging
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -24,6 +25,11 @@ from .cli_compat import CLIENT_PROFILES, compile_anthropic_cli_request
 from .registry import AccessDenied
 
 _ENDPOINT = 'https://api.anthropic.com/v1/messages'
+
+logger = logging.getLogger(__name__)
+# Re-authorization interval for an open model stream. At 50 ms, four parallel
+# streams made ~80 registry reads a second (2026-09-24).
+WATCH_SECONDS = .25
 
 
 @dataclass(frozen=True)
@@ -139,8 +145,9 @@ class AnthropicRunService:
         return await asyncio.to_thread(self.capabilities.authorize, token, audience='inference', operation='generate')
 
     async def _watch(self, token):
+        # Every chunk is also authorized; this bounds a stalled stream.
         while True:
-            await asyncio.sleep(.05)
+            await asyncio.sleep(WATCH_SECONDS)
             await self._authorize(token)
 
     @staticmethod
@@ -155,13 +162,16 @@ class AnthropicRunService:
     async def _produce(self, token, body, profile, queue):
         async with self._transport_for(profile).stream(url=self._endpoint(profile), body=body, follow_redirects=False) as response:
             if response.status_code != 200:
+                logger.warning('upstream %s returned %s', profile.model, response.status_code)
                 raise AccessDenied()
             total = 0
             async for chunk in response:
                 if type(chunk) is not bytes or len(chunk) > 1024*1024:
+                    logger.warning('upstream %s sent an invalid chunk', profile.model)
                     raise AccessDenied()
                 total += len(chunk)
                 if total > profile.max_response_bytes:
+                    logger.warning('upstream %s response over %d bytes', profile.model, profile.max_response_bytes)
                     raise AccessDenied()
                 await self._authorize(token)
                 await queue.put(chunk)

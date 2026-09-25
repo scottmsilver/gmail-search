@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 
 from .inference import (_plain_json, _copy, _object, _array, _text, _name,
                         _integer, _boolean, _schema, _reject, MAX_OUTPUT_TOKENS)
+from .escalation import LADDER, LADDER_MODELS, step_of
 from .provider import AnthropicRunService, ProviderProfile
 from .registry import AccessDenied
 
@@ -16,7 +17,7 @@ LEVELS = ('MINIMAL', 'LOW', 'MEDIUM', 'HIGH')
 
 
 def endpoint(model):
-    if model != MODEL:
+    if model not in LADDER_MODELS:
         raise AccessDenied()
     return f'https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse'
 
@@ -123,7 +124,7 @@ class GeminiProfile:
     family: str = 'google-generate-content'
 
     def __post_init__(self):
-        if self.family != 'google-generate-content' or self.model != MODEL or self.thinking_level not in LEVELS:
+        if self.family != 'google-generate-content' or self.model not in LADDER_MODELS or self.thinking_level not in LEVELS:
             raise AccessDenied()
         # Reuse numeric budget limits only; no Anthropic model/client semantics.
         ProviderProfile(self.model, self.input_token_limit, self.output_token_limit,
@@ -134,15 +135,28 @@ class GeminiProfile:
 class GeminiRunService(AnthropicRunService):
     profile_type = GeminiProfile
 
-    def __init__(self, *args, escalation=None, **kwargs):
+    def __init__(self, *args, escalation=None, transports_by_model=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.escalation = escalation
+        self.transports_by_model = transports_by_model
 
     def _effective_profile(self, lease, profile):
-        if self.escalation is None:
+        base = step_of(profile.model, profile.thinking_level)
+        if self.escalation is None or base is None:
             return profile
-        level = self.escalation.level_for_call(lease.run_id, profile.thinking_level)
-        return profile if level == profile.thinking_level else replace(profile, thinking_level=level)
+        model, level = LADDER[self.escalation.step_for_call(lease.run_id, base)]
+        if (model, level) == (profile.model, profile.thinking_level):
+            return profile
+        return replace(profile, model=model, thinking_level=level)
+
+    def _transport_for(self, profile):
+        """One upstream transport per ladder model; each checks its own modelVersion."""
+        if self.transports_by_model is None:
+            return self.transport
+        transport = self.transports_by_model.get(profile.model)
+        if transport is None:
+            raise AccessDenied()
+        return transport
 
     def _endpoint(self, profile):
         return endpoint(profile.model)

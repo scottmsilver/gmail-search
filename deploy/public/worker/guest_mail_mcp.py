@@ -25,6 +25,12 @@ MAX_INPUT_LINE_BYTES = 256 * 1024
 MAX_OUTPUT_LINE_BYTES = 20 * 1024**2
 MAX_OUTSTANDING_CALLS = 2
 MAX_REQUEST_ID_BYTES = 256
+# A parallel mail-researcher child gets this many mail calls; checks are free.
+# Asked in the prompt, children still made ~57 calls each (2026-09-24).
+SUBAGENT_CALL_BUDGET = 10
+BUDGET_FREE_TOOLS = frozenset(('judge', 'describe_schema'))
+BUDGET_SPENT = ('Mail call budget for this subagent is spent. Stop searching: answer now from the evidence '
+                'you already have, and name what is still missing.')
 OUTPUT_SECONDS = 5
 SUPPORTED_PROTOCOL_VERSIONS = frozenset((
     "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25",
@@ -117,8 +123,8 @@ def _tool_definitions(profile=LEGACY_PROFILE):
         {
             "name": "sql_query_batch",
             "description": ("Up to 20 SQL queries over mail metadata: ids, threads, senders, dates, labels, "
-                            "attachment names. Not for finding mail by content: LIKE/ILIKE/regex on body_text, "
-                            "subject or extracted_text is rejected. Use search_emails_batch for that."),
+                            "attachment names. Not for finding mail by content: LIKE/ILIKE/regex on body_text "
+                            "or extracted_text is rejected. Use search_emails_batch for that."),
             "inputSchema": {
                 "type": "object", "properties": {"queries": {**batch, "items": {"type": "string", "minLength": 1}}},
                 "required": ["queries"], "additionalProperties": False,
@@ -165,7 +171,8 @@ def _tool_definitions(profile=LEGACY_PROFILE):
         {
             "name": "search_emails_batch",
             "description": ("The way to find mail by content: up to 20 hybrid searches (BM25 keyword + semantic) "
-                            "with optional date_from/date_to. Read coverage metadata for approximate results "
+                            "with optional date_from/date_to and sender/recipient filters; use these instead of SQL for "
+                            "who-sent-what questions. Read coverage metadata for approximate results "
                             "and clipped bodies."),
             "inputSchema": {
                 "type": "object", "additionalProperties": False, "required": ["searches"],
@@ -178,6 +185,10 @@ def _tool_definitions(profile=LEGACY_PROFILE):
                         "max_matches": {"type": "integer", "minimum": 0, "maximum": 100},
                         "date_from": {"anyOf": [{"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, {"type": "null"}]},
                         "date_to": {"anyOf": [{"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, {"type": "null"}]},
+                        "sender": {"type": "string", "minLength": 1, "maxLength": 256,
+                                   "description": "Only mail whose From contains this (address, domain or name)."},
+                        "recipient": {"type": "string", "minLength": 1, "maxLength": 256,
+                                      "description": "Only mail whose To contains this (address, domain or name)."},
                     },
                 }}},
             },
@@ -369,9 +380,21 @@ def _valid_arguments(name, arguments, *, allow_raw=False, exact_ids=False):
     return False
 
 
+def _budget_from_argv(argv):
+    """SUBAGENT_CALL_BUDGET for a mail-researcher child's server (started with
+    --subagent by guest-agent-subagent-mail-mcp.ts), else no budget."""
+    if argv == ['--subagent']:
+        return SUBAGENT_CALL_BUDGET
+    if argv:
+        raise SystemExit('Unsupported arguments.')
+    return None
+
+
 class GuestMailMCP:
     """One stdio connection with a closed lifecycle and at most two tool calls."""
-    def __init__(self, tools_factory=_tools, emit=None):
+    def __init__(self, tools_factory=_tools, emit=None, call_budget=None):
+        self._call_budget = call_budget
+        self._budgeted_calls = 0
         self._tools_factory = tools_factory
         self._tools_instance = None
         self._emit_callback = emit
@@ -521,6 +544,7 @@ class GuestMailMCP:
                 raise ToolError('Unsupported guest tool.')
             if not _valid_arguments(name,arguments,allow_raw=self._profile==RAW_PROFILE,exact_ids=self._profile==RAW_PROFILE):
                 raise ToolError('Unsupported guest tool arguments for this profile.')
+            self._spend_call(name)
             result = await tools.dispatch(name, arguments)
             await self._emit(_result(identifier, _tool_result(result)))
         except asyncio.CancelledError:
@@ -536,6 +560,13 @@ class GuestMailMCP:
             current = asyncio.current_task()
             if self._active.get(key) is current:
                 self._active.pop(key, None)
+
+    def _spend_call(self, name):
+        if self._call_budget is None or name in BUDGET_FREE_TOOLS:
+            return
+        self._budgeted_calls += 1
+        if self._budgeted_calls > self._call_budget:
+            raise ToolError(BUDGET_SPENT)
 
     async def wait_idle(self):
         while self._active:
@@ -675,10 +706,10 @@ class _Stdout:
             raise
 
 
-async def main():
+async def main(argv=()):
     current = asyncio.current_task()
     output = _Stdout(on_failure=current.cancel)
-    server = GuestMailMCP(emit=output)
+    server = GuestMailMCP(emit=output, call_budget=_budget_from_argv(list(argv)))
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, current.cancel)
@@ -703,4 +734,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(main(sys.argv[1:])))

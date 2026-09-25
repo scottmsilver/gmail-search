@@ -1,8 +1,9 @@
-"""Pick Gemini's thinking level for a run from its question, using Jev.
+"""Pick a run's starting model and thinking level from its question, using Jev.
 
 Jev (TypeSafe's System One model) answers one Choice about how much
-investigation the question needs; code maps the probabilities to a level.
-Any failure falls back to DEFAULT_LEVEL so routing can never block a run.
+investigation the question needs; code maps the probabilities to a step on
+the escalation ladder. Any failure falls back to DEFAULT_STEP so routing can
+never block a run.
 The endpoint and key come from configuration, never from code.
 """
 from dataclasses import dataclass
@@ -11,16 +12,34 @@ import time
 
 import httpx
 
+from .escalation import LADDER
 from .jev import JevConfig, answers_from, request_body
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LEVEL = 'MEDIUM'
 TIMEOUT_SECONDS = 1.5
-# Cheap only when Jev is sure the question is a narrow lookup; deep when it
-# needs complete coverage or aggregation. Everything else stays at MEDIUM.
+# Ladder steps (see escalation.LADDER): flash LOW for a sure lookup, flash
+# MEDIUM to investigate, flash HIGH for exhaustive sweeps; the default is the
+# investigate step. Lookups do not start on flash-lite (step 0): it answered
+# fast but 1 of 3 live runs on 2026-09-24 named the wrong heater model.
+LOOKUP_STEP, INVESTIGATE_STEP, EXHAUSTIVE_STEP = 1, 2, 3
+DEFAULT_STEP = INVESTIGATE_STEP
 LOW_WHEN_LOOKUP_AT_LEAST = 0.8
 HIGH_WHEN_EXHAUSTIVE_AT_LEAST = 0.5
+
+# Asked in the same Jev call: whether the question splits into independent
+# lookups worth running as parallel subagents.
+PARALLEL_QUESTION = {
+    'type': 'noul',
+    'instructions': ('Does answering `question` need several independent email lookups that could run in '
+                     'parallel, such as different senders, months, invoices or sub-questions?'),
+    'criteria': {'true': 'Two or more separate lookups whose results are combined at the end.',
+                 'false': 'One line of investigation, or steps that each depend on the previous one.'},
+}
+PARALLEL_AT_LEAST = 0.6
+PARALLEL_HINT = ('Planning hint: this question has independent parts. Give each part to a mail-researcher '
+                 'subagent, run them in parallel in the foreground (async: false), wait for every result, '
+                 'then combine their findings into one answer.')
 
 EFFORT_QUESTION = {
     'type': 'choice',
@@ -34,13 +53,13 @@ EFFORT_QUESTION = {
 }
 
 
-def level_for(probabilities):
-    """Map Jev's effort probabilities to a Gemini thinking level."""
+def step_for(probabilities):
+    """Map Jev's effort probabilities to a starting ladder step."""
     if probabilities.get('exhaustive', 0.0) >= HIGH_WHEN_EXHAUSTIVE_AT_LEAST:
-        return 'HIGH'
+        return EXHAUSTIVE_STEP
     if probabilities.get('lookup', 0.0) >= LOW_WHEN_LOOKUP_AT_LEAST:
-        return 'LOW'
-    return DEFAULT_LEVEL
+        return LOOKUP_STEP
+    return DEFAULT_STEP
 
 
 @dataclass(frozen=True)
@@ -50,20 +69,24 @@ class EffortRouter:
 
     def _ask(self, question):
         response = self.client.post(self.config.url, timeout=TIMEOUT_SECONDS, headers=self.config.headers,
-            json=request_body({'question': question}, {'effort': EFFORT_QUESTION}))
+            json=request_body({'question': question}, {'effort': EFFORT_QUESTION, 'parallel': PARALLEL_QUESTION}))
         response.raise_for_status()
-        answer = answers_from(response.json())['effort']
-        return answer['probabilities'], answer.get('confidence')
+        answers = answers_from(response.json())
+        effort, parallel = answers['effort'], answers.get('parallel', {})
+        return effort['probabilities'], effort.get('confidence'), parallel.get('noul', 0.0)
 
-    def thinking_level(self, question):
+    def start(self, question):
+        """(model, thinking level, planning hint or None) the run should start with."""
         started = time.perf_counter()
         try:
-            probabilities, confidence = self._ask(question)
+            probabilities, confidence, parallel = self._ask(question)
         except Exception as error:  # Routing is advisory; never fail the run.
-            logger.warning('effort router unavailable (%s); using %s', type(error).__name__, DEFAULT_LEVEL)
-            return DEFAULT_LEVEL
-        level = level_for(probabilities)
-        logger.info('effort router level=%s probabilities=%s confidence=%s %.0fms', level,
+            logger.warning('effort router unavailable (%s); using %s', type(error).__name__, LADDER[DEFAULT_STEP])
+            return (*LADDER[DEFAULT_STEP], None)
+        model, level = LADDER[step_for(probabilities)]
+        hint = PARALLEL_HINT if type(parallel) in (int, float) and parallel >= PARALLEL_AT_LEAST else None
+        logger.info('effort router start=%s/%s parallel=%.2f probabilities=%s confidence=%s %.0fms',
+            model, level, parallel if type(parallel) in (int, float) else -1,
             {k: round(v, 2) for k, v in probabilities.items()}, confidence,
             (time.perf_counter() - started) * 1000)
-        return level
+        return model, level, hint

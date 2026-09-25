@@ -8,6 +8,7 @@ spend remains reserved after cancellation until trusted provider settlement.
 from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
+import sys
 import math
 import os
 from pathlib import Path
@@ -20,6 +21,24 @@ import uuid
 logger = logging.getLogger(__name__)
 # Settlement logs once when spending first crosses each of these fractions.
 BUDGET_WARNING_FRACTIONS = (0.8, 0.95)
+
+
+SLOW_TRANSACTION_SECONDS = 0.5
+# How long a transaction waits for the lock before failing closed. At 2 s,
+# waits of ~1.3 s behind other commits stacked past it under parallel
+# subagents and refused live runs' calls (2026-09-24).
+BUSY_TIMEOUT_SECONDS = 10
+
+
+def _log_slow_transaction(opened, locked, read_only):
+    """Name the caller of a transaction that waited for or held the lock long.
+    Writers wait at most the 2 s busy timeout, then fail as AccessDenied."""
+    now = time.monotonic()
+    if now - opened < SLOW_TRANSACTION_SECONDS:
+        return
+    caller = sys._getframe(3).f_code.co_name
+    logger.warning('registry %s transaction in %s: waited %.0fms, held %.0fms', 'read' if read_only else 'write',
+        caller, (locked - opened) * 1000, (now - locked) * 1000)
 
 
 class AccessDenied(PermissionError):
@@ -155,17 +174,28 @@ class Registry:
                     db.execute(statement)
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, *, read_only=False):
+        """One registry transaction. Writers take the write lock up front
+        (BEGIN IMMEDIATE). A read-only one opens the file read-only and holds
+        only a shared lock, so concurrent checks do not queue on the writer
+        lock: capability checks every 50 ms per model stream made writers time
+        out ("database is locked") once a run had parallel subagents (2026-09-24)."""
         db = None
+        opened = time.monotonic()
         try:
-            db = sqlite3.connect(self.path.absolute().as_uri() + '?mode=rw',
-                uri=True, timeout=2, isolation_level=None)
+            db = sqlite3.connect(self.path.absolute().as_uri() + ('?mode=ro' if read_only else '?mode=rw'),
+                uri=True, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
             db.row_factory = sqlite3.Row
-            db.execute('PRAGMA synchronous=FULL')
-            db.execute('BEGIN IMMEDIATE')
+            if not read_only:
+                db.execute('PRAGMA synchronous=FULL')
+            db.execute('BEGIN DEFERRED' if read_only else 'BEGIN IMMEDIATE')
+            locked = time.monotonic()
             yield db
             db.commit()
-        except sqlite3.Error:
+            _log_slow_transaction(opened, locked, read_only)
+        except sqlite3.Error as error:
+            # SQLite's own message (e.g. "database is locked"); never row data.
+            logger.warning('registry transaction refused: %s: %s', type(error).__name__, error)
             raise AccessDenied() from None
         finally:
             if db is not None:
@@ -205,6 +235,8 @@ class Registry:
         _label(owner_id)
         _units(ceiling)
         with self._transaction() as db:
+            from .maintenance import require_ready_in
+            require_ready_in(db, self._release_identity)
             self._owner(owner_id)
             budget_id = uuid.uuid4().hex
             db.execute('INSERT INTO budgets(budget_id,owner_id,ceiling) VALUES(?,?,?)', (budget_id, owner_id, ceiling))
@@ -310,6 +342,8 @@ class Registry:
         with self._transaction() as db:
             old = db.execute('SELECT r.*,u.budget_id FROM reservations r JOIN runs u USING(run_id) WHERE r.run_id=? AND r.request_key=?', (run_id, request_key)).fetchone()
             if not old or charged > old['units'] or (old['charged'] is not None and charged != old['charged']):
+                logger.warning('settle refused run=%s: %s', run_id[:8], 'no reservation' if not old else
+                    f"charged {charged} > reserved {old['units']}" if charged > old['units'] else 'charge changed')
                 raise AccessDenied()
             if old['charged'] is None:
                 db.execute('UPDATE budgets SET reserved=reserved-?,spent=spent+? WHERE budget_id=?', (old['units'], charged, old['budget_id']))

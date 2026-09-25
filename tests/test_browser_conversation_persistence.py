@@ -29,7 +29,8 @@ def store():
     active = {'alice','bob'}
     allowed = {'run'}
     events = [{'seq':1,'event':{'type':'tool_start','name':'search','args':{'query':'receipts'}}},
-              {'seq':2,'event':{'type':'text','text':'Private draft'}}]
+              {'seq':2,'event':{'type':'text_delta','text':'Private'}},
+              {'seq':3,'event':{'type':'text','text':'Private draft'}}]
     def authorize(owner,conversation,run):
         if owner not in active or run not in allowed:
             raise AccessDenied()
@@ -57,6 +58,9 @@ def test_owner_claim_and_idempotent_rich_answer(store):
         assert rows[0][1][-1] == {'type':'text','text':'Answer'}
         assert rows[0][1][0]['type'] == 'data-deep-stage'
         assert rows[0][1][0]['data']['payload']['name'] == 'search'
+        # Streamed deltas are live-only; the `text` event holds the message.
+        assert all(part['data']['payload']['type'] != 'text_delta'
+                   for part in rows[0][1] if part['type'] == 'data-deep-stage')
     with pytest.raises(AccessDenied):
         instance.persist('bob','conversation','run','Answer')
     with pytest.raises(AccessDenied):

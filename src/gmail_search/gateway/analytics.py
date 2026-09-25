@@ -49,10 +49,11 @@ class QueryRejected(ValueError):
     """Unsupported query; messages contain no input SQL or bound data."""
 
 
-# Free-text columns. A LIKE/regex over these reads every row of the owner's
-# mail (seconds, past the tool deadline); the BM25 search tool answers the
-# same question from an index in milliseconds.
-_FULL_TEXT_COLUMNS = frozenset({'body_text', 'subject', 'extracted_text', 'text',
+# Long free-text columns. A LIKE/regex over these reads every body in the
+# owner's mail (seconds, past the tool deadline); the BM25 search tool answers
+# the same question from an index in milliseconds. Subject stays allowed: it
+# is short, and the gateway's own query_emails_batch filters on it.
+_FULL_TEXT_COLUMNS = frozenset({'body_text', 'extracted_text', 'text',
                                 'chunk_text', 'summary', 'snippet'})
 _PATTERN_OPERATORS = frozenset({'~~', '~~*', '!~~', '!~~*', '~', '~*', '!~', '!~*'})
 

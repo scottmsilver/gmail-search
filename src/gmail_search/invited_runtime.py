@@ -38,7 +38,7 @@ from .gateway.metadata_service import RunMetadataService
 from .gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from .gateway.provider import AnthropicRunService, ProviderProfile, _finish
 from .gateway.effort_router import EffortRouter
-from .gateway.escalation import ThinkingEscalation
+from .gateway.escalation import LADDER_MODELS, RunEscalation
 from .gateway.jev import jev_config_from_env
 from .gateway.judge_http import RunJudgeService
 from .gateway.gemini import MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
@@ -168,6 +168,11 @@ def verify_identities(identities,owners):
 # Agent VMs the worker runs at once (1 vCPU, up to ~1 GB each; the worker has
 # 4 vCPUs and ~3.9 GB, and Firecracker only backs memory a guest touches).
 MAX_CONCURRENT_RUNS=5
+# Concurrent mail queries / embedding calls. Admission refuses (503) rather than
+# waits, and a run's parent plus three subagent children overran 4 global / 2
+# per owner: a quarter of their calls failed (2026-09-24).
+DATA_GLOBAL_CONCURRENCY=16
+DATA_OWNER_CONCURRENCY=8
 # Each guest runtime speaks to the gateway through its own qualified CLI profile.
 CLIENT_PROFILES={'pi':'pi-0.84.4','claude':'claude-2.1.272'}
 # Guests are told this cap; the gateway refuses anything above it.
@@ -197,15 +202,36 @@ def anthropic_transports(provider):
 def _bind_with(service,profile):
     """Bind this exact profile. Never close over a loop variable here: a later
     profile would silently rebind an earlier runtime's service (it did)."""
-    return lambda run_id,prompt=None:service.bind_profile(run_id,profile)
+    def bind(run_id,prompt=None):
+        service.bind_profile(run_id,profile)
+        return None  # No planning hint.
+    return bind
 
 
 def _bind_routed_gemini(service,profile,router):
-    """Bind Gemini with a thinking level Jev picks from this run's question."""
+    """Bind Gemini on the model and thinking level Jev picks from this run's
+    question; return Jev's planning hint (parallel subagents) or None."""
     def bind(run_id,prompt=None):
-        level=router.thinking_level(prompt) if router is not None and prompt else profile.thinking_level
-        return service.bind_profile(run_id,replace(profile,thinking_level=level))
+        if router is None or not prompt:
+            service.bind_profile(run_id,profile)
+            return None
+        model,level,hint=router.start(prompt)
+        service.bind_profile(run_id,replace(profile,model=model,thinking_level=level))
+        if hint and service.escalation is not None:
+            service.escalation.hold(run_id)
+        return hint
     return bind
+
+
+def gemini_transports_by_model(key,default,stack):
+    """One upstream transport per escalation-ladder model (each checks its own
+    modelVersion); the already-open default transport serves its own model."""
+    transports={GEMINI_MODEL:default}
+    for model in LADDER_MODELS:
+        if model not in transports:
+            transports[model]=GeminiHTTPTransport(key,model=model)
+            stack.push_async_callback(_close_async,transports[model])
+    return transports
 
 
 def effort_router_for(jev):
@@ -246,13 +272,25 @@ def _profile_binders(provider,gemini,rates,openrouter=None,router=None):
     return binders
 
 
+MAX_PROMPT_BYTES=16384
+
+
+def with_planning_hint(prompt,hint):
+    """Append the router's hint when it fits the guest's prompt bound."""
+    if not hint:
+        return prompt
+    combined=prompt+'\n\n'+hint
+    return combined if len(combined.encode('utf-8'))<=MAX_PROMPT_BYTES else prompt
+
+
 def envelope_factory(capabilities,provider,rates,*,gemini=None,openrouter=None,router=None):
     binders=_profile_binders(provider,gemini,rates,openrouter,router)
     def envelope(lease,prompt,runtime='pi'):
         # Refuse before launch, not on the guest's first inference call.
         if runtime not in binders:
             raise AccessDenied()
-        binders[runtime](lease.run_id,prompt)
+        hint=binders[runtime](lease.run_id,prompt)
+        prompt=with_planning_hint(prompt,hint)
         tokens={audience:capabilities.issue(lease.run_id,audience=audience,operations=operations,
             ttl=FULL_LIMITS.wall_seconds).secret
             for audience,operations in (
@@ -337,7 +375,12 @@ async def open_runtime(config):
             gate.require_ready()
             return can_run(owner)
         is_active=recently_confirmed(check_owner_and_gate)
-        registry=Registry(config.state_dir/'registry.sqlite',is_active=is_active,release_identity=gate.identity)
+        # The registry checks the gate itself, on the transaction's own
+        # connection. Its owner check must not open a second one: inside a
+        # read-only capability check that deadlocked against a committing
+        # writer ("database is locked") until the busy timeout (2026-09-24).
+        registry=Registry(config.state_dir/'registry.sqlite',is_active=recently_confirmed(can_run),
+            release_identity=gate.identity)
         verify_budgets(registry,config.owners)
         caps=Capabilities(registry)
         events=Events(caps)
@@ -347,8 +390,9 @@ async def open_runtime(config):
         # lag by the cache window; the registry re-reads the gate itself anyway.
         writers=WriterRegistry({o.id:WriterCredential(o.id,o.writer_dsn) for o in config.owners},
             is_active=check_owner_and_gate)
-        admission=DataAdmission(global_concurrency=4,owner_concurrency=2)
-        gateway=QueryGateway(readers,limits=QueryLimits(global_concurrency=4,owner_concurrency=2,
+        admission=DataAdmission(global_concurrency=DATA_GLOBAL_CONCURRENCY,owner_concurrency=DATA_OWNER_CONCURRENCY)
+        gateway=QueryGateway(readers,limits=QueryLimits(global_concurrency=DATA_GLOBAL_CONCURRENCY,
+            owner_concurrency=DATA_OWNER_CONCURRENCY,
             deadline_seconds=TOOL_DEADLINE_SECONDS),admission=admission)
         search_reader=SearchReader(SearchRegistry({o.id:SearchCredential(o.id,o.search_dsn,schema_profile=TEXT)
             for o in config.owners},is_active=is_active),
@@ -371,7 +415,8 @@ async def open_runtime(config):
         stack.push_async_callback(_close_async,embedding_transport)
         rerank_transport=GeminiRerankerHTTPTransport(config.provider.gemini_key)
         stack.push_async_callback(_close_async,rerank_transport)
-        provider_admission=DataAdmission(global_concurrency=4,owner_concurrency=2)
+        provider_admission=DataAdmission(global_concurrency=DATA_GLOBAL_CONCURRENCY,
+            owner_concurrency=DATA_OWNER_CONCURRENCY)
         embedder=GeminiQueryEmbedder(registry,embedding_transport,
             profile=GeminiEmbeddingProfile(config.provider.embedding_units_per_token),admission=provider_admission)
         reranker=GeminiThreadReranker(registry,rerank_transport,
@@ -380,8 +425,9 @@ async def open_runtime(config):
         provider=AnthropicRunService(caps,None,transports_by_client=inference_transports)
         gemini_transport=GeminiHTTPTransport(config.provider.gemini_key,model=GEMINI_MODEL)
         stack.push_async_callback(_close_async,gemini_transport)
-        escalation=ThinkingEscalation()
-        gemini=GeminiRunService(caps,gemini_transport,escalation=escalation)
+        escalation=RunEscalation()
+        gemini=GeminiRunService(caps,gemini_transport,escalation=escalation,
+            transports_by_model=gemini_transports_by_model(config.provider.gemini_key,gemini_transport,stack))
         openrouter=None
         if config.provider.openrouter_key:
             openrouter_transport=OpenRouterHTTPTransport(config.provider.openrouter_key)

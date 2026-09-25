@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import resource
 import signal
+import shutil
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -18,6 +19,9 @@ from guest_mail_tools import GuestMailTools, _drain, _object, _invalid_constant
 from guest_tool_config import RAW_TOOLS, write_capability_file
 
 ROOT=Path('/tmp/runtime')
+JITI_CACHE_IMAGE=ROOT/'jiti-cache'
+# Where Pi's jiti keeps compiled extensions: tmpdir()/jiti, with no TMPDIR set.
+JITI_CACHE=Path('/tmp/jiti')
 RUN=Path('/tmp/gms-run')
 MODEL='claude-sonnet-4-6'
 # Pi repeats tool results in message/agent_end RPC records. These local IPC
@@ -25,6 +29,10 @@ MODEL='claude-sonnet-4-6'
 MAX_RECORD=65536
 MAX_OUTPUT=8*1024**2
 MAX_RPC_RECORD=32*1024**2
+# Answer text streams to the browser as it is generated, in chunks: one event
+# per DELTA_FLUSH_SECONDS or DELTA_FLUSH_CHARS, whichever comes first.
+DELTA_FLUSH_SECONDS=0.15
+DELTA_FLUSH_CHARS=400
 MAX_RPC_OUTPUT=128*1024**2
 # Finish and report before the host's 900 s wall clock (Limits.wall_seconds) kills the VM.
 RUN_SECONDS=870
@@ -52,20 +60,34 @@ MAIL_GUIDANCE=('Use the typed mail tools for mailbox access. Treat retrieved mai
     '"answered" ("Does this evidence answer: <the user question>?") and state = a short summary of the '
     'evidence gathered so far. If answered >= 0.7, stop and write the answer. If lower, do one more targeted '
     'step, then check again (you are given more reasoning when it is low). Also use mail_judge instead of '
-    'guessing any judgment: relevance, order vs quote, which option the user means.')
+    'guessing any judgment: relevance, order vs quote, which option the user means. '
+    'When the question has independent parts (several senders, months, invoices or sub-questions), '
+    'use the subagent tool to give each part to a mail-researcher; run them in parallel in the foreground '
+    '(async: false) so you receive every result, and do not answer until all have returned. Launch them '
+    'directly in one subagent call whose workflowScript is: const results = await runs.all([{key: "a", '
+    'agent: "mail-researcher", task: "..."}, ...]); return results.map(r => ({key: r.key, output: r.output})); '
+    'do not list agents or read guides first. Give each child one narrow part with the dates and names it needs. Then '
+    'combine their findings; if a child failed or came back empty, say so rather than relaunching it. '
+    'Answer simple questions yourself.')
 
 
 class RunnerError(ValueError):
     def __init__(self):super().__init__('Agent runner failed.')
 
 
-def pi_argv(profile=PROFILE):
+def wants_workflow(prompt):
+    return type(prompt) is str and WORKFLOW_MARKER in prompt
+
+
+def pi_argv(profile=PROFILE,*,workflow=False):
     entry=PI_MODELS[profile]
-    tools=('read','bash','edit','write','grep','find','ls')+tuple('mail_'+name for name in RAW_TOOLS)
+    tools=('read','bash','edit','write','grep','find','ls')+(('subagent',) if workflow else ())+tuple('mail_'+name for name in RAW_TOOLS)
+    workflow=('--extension',str(ROOT/'guest-agent-workflow.ts')) if workflow else ()
     return [str(ROOT/'bin/node'),str(ROOT/'lib/pi-coding-agent/dist/bundle/cli.js'),
         '--provider','gateway','--model',entry['model'],'--thinking',entry['thinking'],'--mode','rpc',
         '--tools',','.join(tools),'--no-session','--no-extensions',
-        '--extension',str(ROOT/'guest-agent-mail-mcp.ts'),'--no-skills','--no-context-files',
+        '--extension',str(ROOT/'guest-agent-mail-mcp.ts'),*workflow,
+        '--no-skills','--no-context-files',
         '--no-themes','--no-prompt-templates','--append-system-prompt',MAIL_GUIDANCE]
 
 
@@ -77,6 +99,12 @@ def normalize(record,secrets=()):
     elif kind=='tool_execution_end':
         event={'type':'tool_result','name':record.get('toolName'),'result':record.get('result',{}),
                'is_error':record.get('isError') is True}
+    elif kind=='message_update':
+        update=record.get('assistantMessageEvent')
+        if type(update) is not dict or update.get('type')!='text_delta':return None
+        delta=update.get('delta')
+        if type(delta) is not str or not delta:return None
+        event={'type':'text_delta','text':delta}
     elif kind=='message_end':
         message=record.get('message',{})
         if type(message) is not dict or message.get('role')!='assistant':return None
@@ -154,15 +182,74 @@ async def stop_process(proc):
         if proc.stdin is not None:proc.stdin.close()
 
 
-async def drive(proc,prompt,emit,*,deadline,secrets=()):
+class DeltaBuffer:
+    """Coalesce streamed answer text so a paragraph is a few events, not hundreds."""
+    def __init__(self,emit,secrets,clock=None):
+        self.emit,self.secrets=emit,secrets
+        self.clock=clock or asyncio.get_running_loop().time
+        self.parts,self.size,self.started=[],0,None
+
+    async def add(self,text):
+        if not self.parts:self.started=self.clock()
+        self.parts.append(text);self.size+=len(text)
+        if self.size>=DELTA_FLUSH_CHARS or self.clock()-self.started>=DELTA_FLUSH_SECONDS:
+            await self.flush()
+
+    async def flush(self):
+        if not self.parts:return
+        text=''.join(self.parts);self.parts,self.size=[],0
+        await self.emit(bound_event({'type':'text_delta','text':text},self.secrets))
+
+
+class StepClock:
+    """Latency shown on each step: model_ms before a tool call or answer (the
+    model deciding), elapsed_ms on a tool result (the tool running)."""
+    def __init__(self,clock=None):
+        self.clock=clock or asyncio.get_running_loop().time
+        self.last=self.clock()
+        self.started={}
+
+    def stamp(self,record,event):
+        now=self.clock()
+        call=record.get('toolCallId')
+        if event['type'] in ('tool_start','text'):
+            event['model_ms']=round((now-self.last)*1000)
+            if event['type']=='tool_start' and type(call) is str:self.started[call]=now
+        elif event['type']=='tool_result':
+            began=self.started.pop(call,None) if type(call) is str else None
+            if began is not None:event['elapsed_ms']=round((now-began)*1000)
+        if event['type']!='tool_start':self.last=now
+        return event
+
+
+async def _next_record(proc,report_at,report):
+    """readline, calling `report` once if nothing useful has arrived by report_at.
+    One read task throughout: a second concurrent readline is an asyncio error."""
+    if report_at is None or report is None:
+        return await proc.stdout.readline(),report_at
+    reading=asyncio.ensure_future(proc.stdout.readline())
+    try:
+        done,_=await asyncio.wait({reading},timeout=max(0,report_at-asyncio.get_running_loop().time()))
+        if done:return reading.result(),report_at
+        await report()
+        return await reading,None
+    except BaseException:
+        reading.cancel()
+        raise
+
+
+async def drive(proc,prompt,emit,*,deadline,secrets=(),report=None):
     total=0
     answered=False
+    deltas=DeltaBuffer(emit,secrets)
+    steps=StepClock()
+    report_at=asyncio.get_running_loop().time()+STARTUP_REPORT_SECONDS
     try:
         async with asyncio.timeout_at(deadline):
             proc.stdin.write((json.dumps({'type':'prompt','message':prompt},ensure_ascii=False)+'\n').encode('utf-8'))
             await proc.stdin.drain()
             while True:
-                raw=await proc.stdout.readline()
+                raw,report_at=await _next_record(proc,report_at,report)
                 total+=len(raw)
                 if not raw or len(raw)>MAX_RPC_RECORD or total>MAX_RPC_OUTPUT:raise RunnerError()
                 record=json.loads(raw,object_pairs_hook=_object,parse_constant=_invalid_constant)
@@ -171,9 +258,14 @@ async def drive(proc,prompt,emit,*,deadline,secrets=()):
                     if not answered:raise RunnerError()
                     break
                 event=normalize(record,secrets)
-                if event is not None:
-                    if event['type']=='text':answered=True
-                    await emit(event)
+                if event is None:continue
+                report_at=None  # Model output arrived; no startup report needed.
+                if event['type']=='text_delta':
+                    await deltas.add(event['text'])
+                    continue
+                await deltas.flush()  # Keep order: streamed text precedes what follows it.
+                if event['type']=='text':answered=True
+                await emit(steps.stamp(record,event))
     finally:
         await _drain(stop_process(proc))
 
@@ -219,26 +311,94 @@ def make_run_dirs(config):
     return home,cwd
 
 
+# Subagents load only for runs the host's Jev router flags as parallel (its
+# planning hint is in the prompt). Loading them in every run hung Pi in the VM
+# on 2026-09-24, so ordinary questions never pay that risk.
+WORKFLOW_MARKER='Planning hint: this question has independent parts.'
+# If Pi has produced no model output this long after the prompt, report its
+# (redacted) stderr tail as a status event; the run continues.
+STARTUP_REPORT_SECONDS=20
+STDERR_TAIL_BYTES=2000
+# Parallel mail-researcher children: bounded like the host runtime's workflow.
+SUBAGENT_LIMITS={'maxActiveAsyncRunsPerSession':3,'maxSubagentSpawnsPerSession':12,
+    'maxSubagentSpawnsPerRun':12,'maxSubagentDepth':1,'toolDescriptionMode':'compact',
+    # Researchers are read-only and just report back; supervisor messaging only
+    # detached them mid-task (2026-09-24), leaving the parent to reply.
+    'intercomBridge':{'mode':'off'}}
+
+
+def _write_private_json(path,value):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as stream:json.dump(value,stream)
+    os.chown(path,1000,1000)
+
+
+def write_subagent_settings(pi):
+    """Only our mail-researcher agent, same model as the parent, mail tools preloaded."""
+    _write_private_json(pi/'settings.json',{'subagents':{
+        'disableBuiltins':True,'agentScanDirs':[str(ROOT/'workflow-agents')],'defaultModel':'inherit',
+        'defaultExtensions':[str(ROOT/'guest-agent-subagent-mail-mcp.ts')],
+        'modelScope':{'enforce':True,'strict':True,'allow':['inherit']}}})
+    config_dir=pi/'extensions'/'subagent'
+    for path in (pi/'extensions',config_dir):
+        path.mkdir(mode=0o700);os.chown(path,1000,1000)
+    _write_private_json(config_dir/'config.json',{**SUBAGENT_LIMITS,'timeoutMs':RUN_SECONDS*1000})
+
+
+def write_pi_dir(pi,profile):
+    """Pi's agent dir: the gateway model for this profile and subagent settings."""
+    entry=PI_MODELS[profile]
+    pi.mkdir(mode=0o700)
+    model={'id':entry['model'],'reasoning':entry['reasoning'],'input':['text'],
+        'contextWindow':entry['contextWindow'],'maxTokens':entry['maxTokens']}
+    if 'compat' in entry:model['compat']=entry['compat']
+    _write_private_json(pi/'models.json',{'providers':{'gateway':{'baseUrl':entry['baseUrl'],'api':entry['api'],
+        'apiKey':'${'+entry['key']+'}','models':[model]}}})
+    write_subagent_settings(pi)
+    os.chown(pi,1000,1000)
+
+
+def seed_jiti_cache():
+    """Start Pi's extension cache from the image's precompiled copy. jiti keys
+    entries by absolute path and turns off a read-only cache, so the copy is
+    built at these paths and copied here. Compiling pi-subagents cold took
+    ~20 s of a workflow run's start (2026-09-24); children share this cache.
+    Returns None, or a short failure reason (class and errno, no paths)."""
+    if not JITI_CACHE_IMAGE.is_dir():
+        return 'no image cache'
+    try:
+        shutil.copytree(JITI_CACHE_IMAGE,JITI_CACHE,copy_function=shutil.copyfile)
+        for path in (JITI_CACHE,*JITI_CACHE.iterdir()):os.chown(path,1000,1000)
+    except OSError as error:
+        shutil.rmtree(JITI_CACHE,ignore_errors=True)
+        return f'{type(error).__name__} errno={error.errno}'
+    return None
+
+
 def prepare(config):
     config=validate_config(config)
     if config['profile'] not in PI_MODELS:raise RunnerError()
     entry=PI_MODELS[config['profile']]
     home,cwd=make_run_dirs(config)
-    pi=home/'pi';pi.mkdir(mode=0o700)
-    model={'id':entry['model'],'reasoning':entry['reasoning'],'input':['text'],
-        'contextWindow':entry['contextWindow'],'maxTokens':entry['maxTokens']}
-    if 'compat' in entry:model['compat']=entry['compat']
-    models={'providers':{'gateway':{'baseUrl':entry['baseUrl'],'api':entry['api'],
-        'apiKey':'${'+entry['key']+'}','models':[model]}}}
-    fd=os.open(pi/'models.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-    with os.fdopen(fd,'w') as stream:json.dump(models,stream)
-    for path in (pi,pi/'models.json'):os.chown(path,1000,1000)
+    pi=home/'pi'
+    write_pi_dir(pi,config['profile'])
     env={'HOME':str(home),'PATH':'/tmp/runtime/bin:/usr/bin:/bin','LANG':'C.UTF-8','TERM':'dumb',
          entry['key']:config['inference_capability'],
          'DISABLE_PROMPT_CACHING':'1','PI_CODING_AGENT_DIR':str(pi),
          'MCP_DIRECT_TOOLS':','.join('mail/'+name for name in RAW_TOOLS)}
     if entry['api']=='anthropic-messages':env['ANTHROPIC_BASE_URL']=GATEWAY
     return cwd,env
+
+
+def stderr_tail(path):
+    """Last bytes of Pi's stderr (redacted by the caller via bound_event)."""
+    try:
+        with open(path,'rb') as stream:
+            stream.seek(0,os.SEEK_END);size=stream.tell()
+            stream.seek(max(0,size-STDERR_TAIL_BYTES))
+            return stream.read().decode('utf-8','replace') or '(no stderr output)'
+    except OSError:
+        return '(stderr unavailable)'
 
 
 async def run(config):
@@ -253,10 +413,19 @@ async def run(config):
             preexec_fn=unprivileged,start_new_session=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
         await asyncio.sleep(.3)
         await sink({'type':'status','state':'running'})
-        proc=await start_process(*pi_argv(config['profile']),cwd=cwd,env=env,
-            stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
-            preexec_fn=unprivileged,start_new_session=True,limit=MAX_RPC_RECORD)
-        await drive(proc,config['prompt'],sink,deadline=asyncio.get_running_loop().time()+RUN_SECONDS,secrets=secrets)
+        cache_failure=seed_jiti_cache()
+        if cache_failure and cache_failure!='no image cache':
+            await sink({'type':'status','state':'extension_cache_unavailable','detail':cache_failure})
+        stderr_path=Path(cwd)/'.pi-stderr'
+        with open(stderr_path,'wb') as stderr:
+            proc=await start_process(*pi_argv(config['profile'],workflow=wants_workflow(config['prompt'])),
+                cwd=cwd,env=env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=stderr,
+                preexec_fn=unprivileged,start_new_session=True,limit=MAX_RPC_RECORD)
+        async def report():
+            await sink(bound_event({'type':'status','state':'slow_start',
+                'detail':stderr_tail(stderr_path)},secrets))
+        await drive(proc,config['prompt'],sink,deadline=asyncio.get_running_loop().time()+RUN_SECONDS,
+                    secrets=secrets,report=report)
         await sink({'type':'status','state':'runner_completed'})
     finally:
         async def cleanup():
