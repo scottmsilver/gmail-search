@@ -7,6 +7,7 @@ body, then passes only bounded duplicate-free JSON to that service.
 """
 import asyncio
 import json
+import logging
 import re
 import uuid
 
@@ -16,6 +17,8 @@ from fastapi.responses import StreamingResponse
 from .inference import MAX_REQUEST_BYTES
 from .provider import ReplayRejected
 from .registry import AccessDenied, BudgetExhausted
+
+logger = logging.getLogger(__name__)
 
 _REQUEST_KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z', re.ASCII)
 _STREAM_HEADERS = {
@@ -30,6 +33,15 @@ _STREAM_HEADERS = {
 # call (2026-09-24). Global covers MAX_CONCURRENT_RUNS such runs.
 INFERENCE_GLOBAL_STREAMS = 16
 INFERENCE_OWNER_STREAMS = 6
+
+
+# Refusals that end the run (#21): what the owner is told, by status. A refused
+# call is otherwise invisible: the relay hands the guest an opaque 400.
+_REFUSAL_REASONS = {
+    402: 'The run stopped: {detail}',
+    403: 'The run stopped: its access to the model service was revoked or could not be checked.',
+    429: 'The run stopped: the model service is at capacity. Please try again.',
+}
 
 
 class _Admission:
@@ -140,6 +152,23 @@ def _http_error(error):
     if isinstance(error, TimeoutError):
         return HTTPException(504, 'Inference deadline exceeded')
     return HTTPException(503, 'Inference service unavailable')
+
+
+async def _refused(request, token, error, on_refused):
+    """Log a refusal of a run's model call and report it so the run ends.
+    Returns `error` unchanged: reporting never alters the response."""
+    template = _REFUSAL_REASONS.get(error.status_code)
+    if template is None:
+        return error
+    logger.warning('inference refused %s %d: %s', request.url.path, error.status_code, error.detail)
+    if on_refused is not None:
+        try:
+            await on_refused(token, template.format(detail=error.detail))
+        except asyncio.CancelledError:
+            raise
+        except Exception as failure:
+            logger.warning('inference refusal not reported: %s', type(failure).__name__)
+    return error
 
 
 async def _open(service, token, request_key, body):
@@ -268,19 +297,20 @@ class _InferenceResponse(StreamingResponse):
                 await _release(self._admission, self._owner_id)
 
 
-def add_inference_routes(app, *, anthropic=None, gemini=None, openrouter=None, token_from_request):
-    """Mount only the fixed provider routes selected by trusted startup code."""
+def add_inference_routes(app, *, anthropic=None, gemini=None, openrouter=None, token_from_request, on_refused=None):
+    """Mount only the fixed provider routes selected by trusted startup code.
+
+    `on_refused(token, reason)` is a trusted coroutine told of each refused call."""
     admission = _Admission()
-    if anthropic is not None:
-        _add(app, '/v1/messages', anthropic, token_from_request, admission, query=())
-    if gemini is not None:
-        _add(app, '/v1beta/models/gemini-3.8-flash:streamGenerateContent', gemini,
-             token_from_request, admission, query=(('alt', 'sse'),))
-    if openrouter is not None:
-        _add(app, '/v1/chat/completions', openrouter, token_from_request, admission, query=())
+    routes = (('/v1/messages', anthropic, ()),
+              ('/v1beta/models/gemini-3.8-flash:streamGenerateContent', gemini, (('alt', 'sse'),)),
+              ('/v1/chat/completions', openrouter, ()))
+    for path, service, query in routes:
+        if service is not None:
+            _add(app, path, service, token_from_request, admission, query=query, on_refused=on_refused)
 
 
-def _add(app, path, service, token_from_request, admission, *, query):
+def _add(app, path, service, token_from_request, admission, *, query, on_refused):
     async def generate(request: Request):
         token = token_from_request(request)
         # Deliberately before checking headers that could encourage body reads.
@@ -289,7 +319,7 @@ def _add(app, path, service, token_from_request, admission, *, query):
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            raise _http_error(error) from None
+            raise await _refused(request, token, _http_error(error), on_refused) from None
         try:
             admitted = await admission.acquire(lease.owner_id)
         except asyncio.CancelledError:
@@ -297,7 +327,7 @@ def _add(app, path, service, token_from_request, admission, *, query):
         except Exception as error:
             raise _http_error(error) from None
         if not admitted:
-            raise HTTPException(429, 'Inference capacity is unavailable')
+            raise await _refused(request, token, HTTPException(429, 'Inference capacity is unavailable'), on_refused)
         if tuple(request.query_params.multi_items()) != query:
             await _release(admission, lease.owner_id)
             raise HTTPException(400, 'Inference route parameters are unsupported')
@@ -321,6 +351,6 @@ def _add(app, path, service, token_from_request, admission, *, query):
             raise
         except Exception as error:
             await _release(admission, lease.owner_id)
-            raise _http_error(error) from None
+            raise await _refused(request, token, _http_error(error), on_refused) from None
 
     app.post(path)(generate)

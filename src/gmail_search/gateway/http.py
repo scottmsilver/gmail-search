@@ -77,7 +77,7 @@ def _log_timing(request, response, started):
     log('gateway %s %s %d %.0fms', request.method, request.url.path, response.status_code, elapsed_ms)
 
 
-def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, openrouter=None, events=None, judge=None) -> FastAPI:
+def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=None, search=None, facts=None, metadata=None, attachment_reads=None, raw_attachments=None, attachments=None, anthropic=None, gemini=None, openrouter=None, events=None, judge=None, on_refused=None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware('http')
@@ -153,7 +153,8 @@ def create_gateway_app(service: RunQueryService, *, artifacts=None, retrieval=No
 
     if anthropic is not None or gemini is not None or openrouter is not None:
         from .inference_http import add_inference_routes
-        add_inference_routes(app, anthropic=anthropic, gemini=gemini, openrouter=openrouter, token_from_request=_token)
+        add_inference_routes(app, anthropic=anthropic, gemini=gemini, openrouter=openrouter, token_from_request=_token,
+                             on_refused=on_refused)
 
     if events is not None:
         from .event_http import add_event_routes

@@ -320,3 +320,15 @@ def test_a_question_while_every_worker_is_busy_is_told_to_wait(app_state):
     assert response.status_code == 409
     assert 'still running' in response.json()['detail']
     assert not s.backend.prompts
+
+
+def test_stream_terminal_frame_carries_the_refusal_reason(app_state):
+    s = app_state
+    s.backend.complete = False
+    run = s.client.portal.call(s.runs.start, s.accounts['alice'].owner_id, 'conversation', 'synthetic question')
+    token = s.runs.events.capabilities.issue(run, audience='inference', operations=['generate']).secret
+    s.client.portal.call(s.runs.refuse_capability, token, 'The run stopped: synthetic reason.')
+    replay = s.client.get(f'/api/agent/analyze/{run}/events?conversation_id=conversation', headers=headers(s))
+    kind, frame = frames(replay)[-1]
+    assert kind == 'error'
+    assert frame['payload'] == {'message': 'The run stopped: synthetic reason.', 'state': 'failed'}

@@ -55,6 +55,17 @@ class Capabilities:
         with self.registry._transaction(read_only=True) as db:
             return self.registry._lease(self._authorize(db, token, audience, operation))
 
+    def run_of(self, token):
+        """Trusted lookup: the run a token was issued to, even once revoked or
+        expired, so a refusal can be attributed. None when unknown or malformed."""
+        try:
+            token_hash = _hash(token)
+        except AccessDenied:
+            return None
+        with self.registry._transaction(read_only=True) as db:
+            row = db.execute('SELECT run_id FROM capabilities WHERE token_hash=?', (token_hash,)).fetchone()
+        return row['run_id'] if row else None
+
     def revoke(self, token):
         with self.registry._transaction() as db:
             db.execute('UPDATE capabilities SET revoked=1 WHERE token_hash=?', (_hash(token),))

@@ -1,11 +1,17 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
+from gmail_search.gateway import inference_http
 from gmail_search.gateway.browser_runs import BrowserRuns
 from gmail_search.gateway.capabilities import Capabilities
 from gmail_search.gateway.events import Events
+from gmail_search.gateway.http import _token
+from gmail_search.gateway.inference_http import add_inference_routes
 from gmail_search.gateway.registry import AccessDenied, Registry
 from gmail_search.gateway.worker import WorkerController, WorkerLimits
 
@@ -420,3 +426,124 @@ def test_browser_deadline_leaves_margin_inside_worker_wall_limit(bundle):
     lease=bundle.runs._open('alice','conversation')
     assert lease.deadline==1175.0
     bundle.registry.cancel(lease.run_id)
+
+
+# A refused model call ends its run promptly, with the reason shown and logged (#21).
+OVER_BUDGET = 10**6  # The fixture budget is 1000 tokens.
+
+
+class ModelService:
+    """Authorizes like the real run services, then reserves `units` of budget."""
+    def __init__(self, capabilities, units=1):
+        self.capabilities, self.units = capabilities, units
+
+    async def _authorize(self, token):
+        return await asyncio.to_thread(self.capabilities.authorize, token, audience='inference', operation='generate')
+
+    async def stream(self, token, request_key, body):
+        lease = await self._authorize(token)
+        await asyncio.to_thread(self.capabilities.registry.reserve, lease.run_id, request_key, self.units)
+        yield b'data: synthetic\n\n'
+
+
+def capabilities_of(bundle):
+    return bundle.runs.events.capabilities
+
+
+async def running_run_and_token(bundle):
+    bundle.backend.complete = False
+    run = await bundle.runs.start('alice', 'conversation', 'synthetic question')
+    await wait_state(bundle, run, 'running')
+    token = capabilities_of(bundle).issue(run, audience='inference', operations=['generate'], ttl=600).secret
+    return run, token
+
+
+async def call_model(bundle, token, *, units=1, body=b'{"model":"synthetic"}', on_refused=None):
+    app = FastAPI()
+    add_inference_routes(app, anthropic=ModelService(capabilities_of(bundle), units), token_from_request=_token,
+                         on_refused=on_refused or bundle.runs.refuse_capability)
+    headers = {'authorization': 'Bearer ' + token, 'content-type': 'application/json'}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://gateway') as client:
+        return await client.post('/v1/messages', headers=headers, content=body)
+
+
+def exhaust_budget(bundle, token, monkeypatch):
+    return {'units': OVER_BUDGET}
+
+
+def revoke_token(bundle, token, monkeypatch):
+    capabilities_of(bundle).revoke(token)
+    return {}
+
+
+def fill_admission(bundle, token, monkeypatch):
+    monkeypatch.setattr(inference_http, 'INFERENCE_OWNER_STREAMS', 0)
+    return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('refuse,status,reason', [
+    (exhaust_budget, 402, 'The run stopped: Token budget exhausted'),
+    (revoke_token, 403, 'The run stopped: its access to the model service was revoked'),
+    (fill_admission, 429, 'The run stopped: the model service is at capacity'),
+])
+async def test_refused_call_fails_the_run_with_its_reason(bundle, monkeypatch, caplog, refuse, status, reason):
+    caplog.set_level(logging.WARNING)
+    run, token = await running_run_and_token(bundle)
+    try:
+        response = await call_model(bundle, token, **refuse(bundle, token, monkeypatch))
+        assert response.status_code == status
+        state = await wait_state(bundle, run, 'failed')
+        assert state['reason'].startswith(reason)
+        assert not bundle.backend.handles
+        assert f'inference refused /v1/messages {status}' in caplog.text
+        assert f'run {run[:8]} ended, model call refused: {reason}' in caplog.text
+    finally:
+        await bundle.runs.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_is_not_a_refusal(bundle):
+    run, token = await running_run_and_token(bundle)
+    try:
+        response = await call_model(bundle, token, body=b'{"a":1,"a":2}')
+        assert response.status_code == 400
+        await asyncio.sleep(.1)
+        state = bundle.runs.snapshot('alice', 'conversation', run)
+        assert state['state'] == 'running' and state['reason'] is None
+    finally:
+        await bundle.runs.close()
+
+
+@pytest.mark.asyncio
+async def test_refusal_after_completion_leaves_the_answer(bundle):
+    run, token = await running_run_and_token(bundle)
+    events = capabilities_of(bundle).issue(run, audience='events', operations=['append']).secret
+    bundle.runs.events.append(events, {'type': 'text', 'text': 'Synthetic answer'})
+    bundle.runs.events.append(events, {'type': 'status', 'state': 'runner_completed'})
+    await wait_state(bundle, run, 'completed')
+    response = await call_model(bundle, token)  # A straggling call after the run's access ended.
+    assert response.status_code == 403
+    state = bundle.runs.snapshot('alice', 'conversation', run)
+    assert state['state'] == 'completed' and state['reason'] is None
+    await bundle.runs.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_or_malformed_token_refusal_is_ignored(bundle):
+    for token in ('0' * 64, 'not-a-capability'):
+        await bundle.runs.refuse_capability(token, 'The run stopped: synthetic')
+    assert bundle.runs._refusals == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failing_refusal_hook_never_changes_the_response(bundle, caplog):
+    async def broken(token, reason):
+        raise RuntimeError('synthetic hook failure')
+    run, token = await running_run_and_token(bundle)
+    try:
+        response = await call_model(bundle, token, units=OVER_BUDGET, on_refused=broken)
+        assert response.status_code == 402
+        assert 'inference refusal not reported: RuntimeError' in caplog.text
+    finally:
+        await bundle.runs.close()

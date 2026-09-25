@@ -23,6 +23,12 @@ class WorkerBusy(AccessDenied):
     browser is told to wait instead of seeing a run that fails at launch."""
 
 logger=logging.getLogger(__name__)
+# Refusal reasons kept for replay after their run ends; the oldest go first.
+MAX_REFUSALS=256
+
+
+class RunRefused(Exception):
+    """The gateway refused one of the run's model calls; the run ends (#21)."""
 
 
 # Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
@@ -61,6 +67,8 @@ class BrowserRuns:
         self._cancel_locks={}
         self._worker_lock=asyncio.Lock()
         self._runs=set()
+        self._refusals={}
+        self._live=set()
         self._closed=False
         self._close_task=None
         with self.registry._transaction() as db:
@@ -143,6 +151,21 @@ class BrowserRuns:
             return run_id
         finally:self._admissions.discard(admission)
 
+    async def refuse_capability(self,token,reason):
+        """Trusted inference hook: end the run holding `token` with `reason`.
+        Only while its drive is live: a run that already reported completion
+        keeps its answer, and a late refusal never relabels another failure.
+        The first refusal's reason wins."""
+        run_id=await asyncio.to_thread(self.events.capabilities.run_of,token)
+        if run_id not in self._live or run_id in self._refusals:return
+        self._refusals[run_id]=reason
+        while len(self._refusals)>MAX_REFUSALS:
+            del self._refusals[next(iter(self._refusals))]
+
+    def _raise_if_refused(self,run_id):
+        reason=self._refusals.get(run_id)
+        if reason is not None:raise RunRefused(reason)
+
     def _state(self,run_id,state,answer=''):
         with self.registry._transaction() as db:
             if state=='running':
@@ -211,11 +234,13 @@ class BrowserRuns:
         answer=''
         try:
             entered.set()
+            self._live.add(lease.run_id)  # The guest may call a model as soon as it boots.
             await _settled_call(self.prepare_input,lease,question,runtime)
             await self._worker(self.workers.start,lease.run_id)
             await _settled_call(self._state,lease.run_id,'running')
             cursor,heartbeat=0,time.monotonic()
             while True:
+                self._raise_if_refused(lease.run_id)
                 await _settled_call(self._active,lease.run_id)
                 batch=await _settled_call(self.events.read,lease.owner_id,lease.conversation_id,lease.run_id,after=cursor)
                 completed=False
@@ -231,6 +256,10 @@ class BrowserRuns:
                         break
                 if completed:
                     if not answer.strip():raise ValueError('Worker returned no answer')
+                    # A refusal recorded before completion is processed wins;
+                    # one after it cannot relabel the answer or its publication.
+                    self._raise_if_refused(lease.run_id)
+                    self._live.discard(lease.run_id)
                     await _settled_call(self._complete_run,lease.run_id)
                     desired='completed'
                     break
@@ -239,10 +268,15 @@ class BrowserRuns:
                     heartbeat=time.monotonic()
                 await asyncio.sleep(self.poll_seconds)
         except asyncio.CancelledError:desired='cancelled'
+        except RunRefused as refusal:
+            desired='failed'
+            logger.warning('run %s ended, model call refused: %s',lease.run_id[:8],refusal)
         except Exception as error:
             desired='failed'
+            self._refusals.pop(lease.run_id,None)  # Not the cause of this failure.
             logger.warning('run %s failed: %s',lease.run_id[:8],type(error).__name__)
         finally:
+            self._live.discard(lease.run_id)
             async def cleanup():
                 nonlocal desired
                 try:
@@ -270,7 +304,8 @@ class BrowserRuns:
         # Completion can commit between these reads. Keep the earlier state so
         # SSE cannot terminate using an event page fetched before completion.
         with self.registry._transaction() as db:self._authorize(db,owner,conversation,run_id)
-        return dict(state=state,answer=answer,events=events)
+        reason=self._refusals.get(run_id) if state=='failed' else None
+        return dict(state=state,answer=answer,events=events,reason=reason)
 
     def _request_cancel(self,run_id,owner=None,conversation=None):
         with self.registry._transaction() as db:
