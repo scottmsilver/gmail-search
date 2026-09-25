@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -73,12 +74,24 @@ class FixtureFence:
         assert self.closed
         assert self.source.info.dbname.startswith('gms_owner_partitions_test_')
         # The fixture owns exactly its source connection when each phase begins.
-        pids = self.source.execute('SELECT pid FROM pg_stat_activity WHERE datname=current_database()').fetchall()
-        assert pids == [(self.source.info.backend_pid,)]
+        assert self.client_sessions() == self.owned_sessions()
         self.entries += 1
         yield
         # Releasing inspections must NEVER undo the durable external fence.
         assert self.closed
+
+    def owned_sessions(self):
+        return [(self.source.info.backend_pid,)]
+
+    def client_sessions(self):
+        """Client connections to the fixture database, as the production fence counts them.
+
+        pg_stat_activity also lists PostgreSQL's own background processes, and
+        autovacuum does visit a freshly created fixture database (seen on its
+        pg_shdepend and pg_class). Counting it failed phases at random (#53).
+        """
+        return self.source.execute('''SELECT pid FROM pg_stat_activity
+            WHERE datname=current_database() AND backend_type='client backend' ORDER BY pid''').fetchall()
 
 
 def setup(source, tmp_path, *, checkpoint=lambda stage: None):
@@ -286,3 +299,54 @@ def test_existing_witness_and_inventory_drift_refuses_resume(mixed_source,tmp_pa
     else:mixed_source.execute("SELECT nextval('public.propositions_id_seq')")
     with pytest.raises(AccessDenied):controller.advance(pending)
     assert admin.status() == pending
+
+
+class _FenceBesideALeader(FixtureFence):
+    """The fixture fence, also owning the client that leads a parallel query."""
+    def __init__(self, source, leader):
+        super().__init__(source)
+        self.leader = leader
+
+    def owned_sessions(self):
+        return sorted([*super().owned_sessions(), (self.leader.info.backend_pid,)])
+
+
+def _parallel_worker_running(conn):
+    return conn.execute("""SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+        AND backend_type='parallel worker'""").fetchone() is not None
+
+
+def _hold_beside_a_parallel_worker(fence, *, attempts=5):
+    """Enter the fence while its leader runs a query in a parallel worker.
+
+    A parallel worker stands in for autovacuum: both are non-client rows in
+    pg_stat_activity, but a worker can be started on demand. When every worker
+    slot is busy PostgreSQL runs the query in the leader instead, so each
+    attempt watches for the worker and the test skips if none ever launches.
+    The worker must be visible on both sides of the fence's check.
+    """
+    fence.leader.execute('SET debug_parallel_query=on')
+    fence.leader.execute('SET parallel_setup_cost=0')
+    for _ in range(attempts):
+        query = threading.Thread(target=fence.leader.execute, args=('SELECT pg_sleep(3)',))
+        query.start()
+        try:
+            while query.is_alive():
+                if _parallel_worker_running(fence.source):
+                    with fence.hold(None, deadline=None):
+                        # Still there after the check, so the check saw it.
+                        if _parallel_worker_running(fence.source):
+                            return
+                time.sleep(0.05)
+        finally:
+            query.join(timeout=10)
+            assert not query.is_alive(), 'The parallel query outlived its sleep'
+    pytest.skip('No parallel worker launched to stand in for autovacuum')
+
+
+def test_fixture_fence_counts_client_sessions_only(source):
+    dsn = make_conninfo(os.environ['GMS_TEST_PG_DSN'], dbname=source.info.dbname)
+    with psycopg.connect(dsn, autocommit=True) as leader:
+        fence = _FenceBesideALeader(source, leader)
+        _hold_beside_a_parallel_worker(fence)
+        assert fence.entries == 1
