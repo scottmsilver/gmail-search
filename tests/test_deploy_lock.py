@@ -61,7 +61,8 @@ def test_a_dead_holder_on_this_host_is_taken_over(tmp_path):
     assert not list(tmp_path.glob('land.lock.stale-*'))
 
 
-@pytest.mark.parametrize('line', ['land #5 host=h t', f'land #5 pid={os.getpid() + 999999} host=elsewhere t'])
+@pytest.mark.parametrize('line', ['land #5 host=h t', f'land #5 pid={os.getpid() + 999999} host=elsewhere t'],
+                         ids=['no-pid', 'dead-pid-other-host'])  # stable ids across xdist workers
 def test_no_pid_or_another_host_counts_as_live(tmp_path, line):
     assert lock.holder_is_stale(line) is False
 

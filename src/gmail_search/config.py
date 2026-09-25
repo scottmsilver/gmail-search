@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +55,14 @@ DEFAULTS: dict[str, Any] = {
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    result = base.copy()
+    """`base` with `override` merged in, sharing no nested dicts with either:
+    a shallow copy let callers that mutate the result rewrite DEFAULTS (#26)."""
+    result = copy.deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         else:
-            result[key] = value
+            result[key] = copy.deepcopy(value)
     return result
 
 
