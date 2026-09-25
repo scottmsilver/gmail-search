@@ -7,6 +7,7 @@ those adapters or replace their accounting with guest-supplied usage.
 import asyncio
 from dataclasses import asdict, dataclass, field
 import json
+import logging
 import math
 import re
 import time
@@ -19,17 +20,32 @@ from .registry import AccessDenied
 from .search_index import PendingIndex
 from .search_queries import Selection, StructuredFilters, _text
 from .search_ranking import rank_candidates
+from .search_reranker import RerankingUnavailable
 from .search_vectors import exact_candidates
 from .tool_deadline import tool_deadline
 
 
 # Candidate pool when a structured filter matches too many messages for an
 # exact scan. 3k keeps ~60% of the in-range hits a 10k pool finds (2017 test:
-# 419 vs 710) at a third of the rescoring and hydration cost.
+# 419 vs 710) at a third of the rescoring and hydration cost. Not a deadline
+# lever: hydrating 3000 costs ~95 ms, and ScaNN reorders its 4000 pool anyway (#22).
 BROAD_FILTER_ANN_POOL=3000
 # Owner aliases/contacts change only when the daemons reindex; re-reading
 # ~11k rows on every search cost 0.2-1 s.
 OWNER_CONTEXT_CACHE_SECONDS=60
+# The Gemini rerank (0.8-1.1 s, synthetic candidates, 2026-09-24) is optional.
+# It must finish this long before the tool deadline: the guest's 5 s clock
+# started before ours, so answers published in the last second were still
+# arriving after the guest gave up (499) (#22).
+RERANK_FINISH_MARGIN_SECONDS=1.0
+# Less time than this before the rerank's own deadline: skip it, don't start it.
+RERANK_MIN_SECONDS=1.0
+# Candidates the reranker sees, and how close the top five scores must be for
+# the hybrid order to be too uncertain to trust on its own.
+RERANK_CANDIDATES=30
+RERANK_SCORE_SPREAD=.05
+
+timing_logger=logging.getLogger('gmail_search.gateway.timing')
 
 
 @dataclass(frozen=True)
@@ -80,6 +96,42 @@ def _tokens(text):
 def _remember(reasons,selection,phase):
     if not selection.complete:
         reasons.add(phase+'_'+(selection.reason or 'incomplete'))
+
+
+class _PhaseClock:
+    """Wall time per search phase for the timing log: durations only, never query text."""
+    def __init__(self):
+        self._started=self._last=time.perf_counter()
+        self._phases={}
+
+    def mark(self,phase):
+        now=time.perf_counter()
+        self._phases[phase]=self._phases.get(phase,0.)+now-self._last
+        self._last=now
+
+    def log(self,outcome):
+        phases=' '.join(f'{name}={seconds*1000:.0f}ms' for name,seconds in self._phases.items())
+        timing_logger.info('search %s %.0fms %s',outcome,(time.perf_counter()-self._started)*1000,phases)
+
+
+def _scores_cluster(threads):
+    top_scores=[thread.score for thread in threads[:5]]
+    return len(threads)>3 and max(top_scores)-min(top_scores)<RERANK_SCORE_SPREAD
+
+
+def _rerank_deadline(deadline):
+    """The rerank's own deadline, or None when there is no longer time for one."""
+    finish=deadline-RERANK_FINISH_MARGIN_SECONDS
+    return finish if finish-asyncio.get_running_loop().time()>=RERANK_MIN_SECONDS else None
+
+
+def _reordered(order,candidates,threads):
+    expected={thread.thread_id for thread in candidates}
+    if (not isinstance(order,(tuple,list)) or len(order)!=len(expected)
+            or any(type(tid) is not str for tid in order) or set(order)!=expected):
+        raise RuntimeError('Invalid search reranking response')
+    by_id={thread.thread_id:thread for thread in candidates}
+    return [by_id[tid] for tid in order]+threads[len(candidates):]
 
 
 class RunSearchService:
@@ -229,11 +281,14 @@ class RunSearchService:
         if owner is None:
             raise RuntimeError('Search profile is unavailable')
         reasons=set()
+        clock=_PhaseClock()
         try:
             # Complete the fixed reader's schema/credential qualification before
             # native index loading. This snapshot closes before provider work.
             aliases,contacts=await self._cached_context(lease.owner_id,deadline,check,reasons)
+            clock.mark('context')
             async with self.indexes.acquire(lease.owner_id) as index:
+                clock.mark('index_wait')
                 profile=self.reader.profile
                 if (index.binding.owner_id!=lease.owner_id or index.binding.model!=profile.embedding_model
                         or index.binding.dimensions!=profile.dimensions or self.embedder.model!=profile.embedding_model
@@ -254,6 +309,7 @@ class RunSearchService:
                                           date_from or parsed.date_from,date_to or parsed.date_to)
                 vector=await self.embedder.embed(lease,parsed.text or expanded,deadline=deadline,check_active=check)
                 await check()
+                clock.mark('embed')
                 async with self.reader.session(lease.owner_id,deadline=deadline,check_active=check) as db:
                     candidates=None
                     structured=any(value is not None for value in asdict(filters).values())
@@ -274,6 +330,7 @@ class RunSearchService:
                         ids,scores=await index.search(vector,top_k=BROAD_FILTER_ANN_POOL if candidates is not None else fetch_k,
                                                       absolute_deadline=deadline)
                         reasons.add('approximate_vector_search')
+                    clock.mark('vector')
                     hydrated=await db.hydrate_embeddings(tuple(ids))
                     _remember(reasons,hydrated,'embedding_hydration')
                     allowed=None if candidates is None else frozenset(candidates)
@@ -289,20 +346,24 @@ class RunSearchService:
                         selected_ids=[identifier for identifier in ids if identifier in permitted][:fetch_k]
                         vector_scores={identifier:vector_scores[identifier] for identifier in selected_ids}
                         rows=tuple(row for row in rows if row.id in vector_scores)
+                    clock.mark('embedding_hydration')
                     lexical=await self._lexical(db,parsed.text or expanded,candidates,2000 if has_date else 200,reasons)
                     if expanded.lower()!=query.lower():
                         other=await self._lexical(db,original.text or query,candidates,2000 if has_date else 200,reasons)
                         for mid,score in other.items():lexical[mid]=max(lexical.get(mid,0.),score)
+                    clock.mark('lexical')
                     messages=await self._hydrate(db.hydrate_messages,tuple(lexical),reasons,'message_hydration')
                     _remember(reasons,messages,'message_hydration')
                     thread_ids=tuple(dict.fromkeys([row.thread_id for row in rows]+[row.thread_id for row in messages.rows]))
                     summaries=await self._hydrate(db.hydrate_threads,thread_ids,reasons,'thread_hydration')
                     _remember(reasons,summaries,'thread_hydration')
+                    clock.mark('hydration')
                     ranked=await _thread(rank_candidates,query=parsed.text or expanded,temporal_boost=parsed.temporal_boost,
                         vector_scores=vector_scores,embeddings=rows,lexical_scores=lexical,messages=messages.rows,
                         summaries=summaries.rows,owner_emails=owner.emails,contact_frequency=contacts,top_k=top_k)
                     reasons.update(ranked.reasons)
                     threads=list(ranked.threads)
+                    clock.mark('rank')
                     all_ids=tuple(dict.fromkeys(match.message_id for thread in threads for match in thread.matches))
                     topics=await self._hydrate(db.message_topics,all_ids,reasons,'topic_hydration')
                     _remember(reasons,topics,'topic_hydration')
@@ -313,25 +374,44 @@ class RunSearchService:
                     details=await self._hydrate(db.hydrate_messages,kept_ids,reasons,'detail_hydration',
                                                 body_chars=20_000 if detail=='full' else 200)
                     _remember(reasons,details,'detail_hydration')
-                reranking='disabled' if self.reranker is None else 'not_needed'
-                if self.reranker is not None and len(threads)>3:
-                    top_scores=[thread.score for thread in threads[:5]]
-                    if max(top_scores)-min(top_scores)<.05:
-                        candidates_to_rank=tuple(threads[:30])
-                        order=await self.reranker.rerank(lease,parsed.text or query,candidates_to_rank,
-                                                        deadline=deadline,check_active=check)
-                        expected={thread.thread_id for thread in candidates_to_rank}
-                        if (not isinstance(order,(tuple,list)) or len(order)!=len(expected)
-                                or any(type(tid) is not str for tid in order) or set(order)!=expected):
-                            raise RuntimeError('Invalid search reranking response')
-                        by_id={thread.thread_id:thread for thread in candidates_to_rank}
-                        threads=[by_id[tid] for tid in order]+threads[30:]
-                        reranking='applied'
+                clock.mark('details')
+                threads,outcome=await self._rerank(lease,parsed.text or query,threads,deadline,check)
+                clock.mark('rerank')
                 threads=filter_offtopic(threads)[:top_k]
                 await check()
-                return self._format(threads,details,topics,facets,detail,max_matches,reasons,semantic,reranking,owner.corrector is not None)
+                return self._format(threads,details,topics,facets,detail,max_matches,reasons,semantic,outcome,owner.corrector is not None)
         except PendingIndex:
+            outcome='pending_index'
             return dict(results=[],facets=[],pending_index=True,coverage=dict(complete=False,reasons=['pending_index']))
+        except BaseException as error:
+            outcome=type(error).__name__
+            raise
+        finally:
+            clock.log(outcome)
+
+    async def _rerank(self,lease,query,threads,deadline,check):
+        """Return the threads and the reranking outcome for coverage.
+
+        The rerank is optional. When it cannot finish well inside the tool
+        deadline, the hybrid order stands. Revocation and an invalid order
+        still fail the search, and the caller's final check() still enforces
+        the tool deadline itself.
+        """
+        if self.reranker is None:
+            return threads,'disabled'
+        if not _scores_cluster(threads):
+            return threads,'not_needed'
+        rerank_deadline=_rerank_deadline(deadline)
+        if rerank_deadline is None:
+            return threads,'skipped_deadline'
+        candidates=tuple(threads[:RERANK_CANDIDATES])
+        try:
+            order=await self.reranker.rerank(lease,query,candidates,deadline=rerank_deadline,check_active=check)
+        except TimeoutError:
+            return threads,'timed_out'
+        except RerankingUnavailable:
+            return threads,'unavailable'
+        return _reordered(order,candidates,threads),'applied'
 
     @staticmethod
     def _format(threads,details,topics,facets,detail,max_matches,reasons,semantic,reranking,spellcheck):
