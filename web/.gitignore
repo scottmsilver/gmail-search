@@ -5,3 +5,5 @@ out/
 .env.local
 *.log
 *.tsbuildinfo
+# Written into each release by the deployer (src/gmail_search/deploy/notes.py).
+whats-new.json
