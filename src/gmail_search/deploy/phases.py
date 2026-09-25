@@ -203,6 +203,13 @@ def swap_links(host: Host, target: Path) -> None:
         os.replace(tmp, link)
 
 
+def worker_services_start(config) -> str:
+    """(Re)start the worker's services. The guest does not start them at boot,
+    so everything that boots or updates the worker runs this."""
+    q = shlex.quote
+    return f'systemctl restart {q(config.services["manager"])} {q(config.services["clock_sync"])}'
+
+
 def worker_install_script(config, files, with_image: bool, remote: str) -> str:
     w, q = config.worker, shlex.quote
     lines = ['set -e']
@@ -214,8 +221,7 @@ def worker_install_script(config, files, with_image: bool, remote: str) -> str:
         dest = f'{w.opt_dir}/{name}'
         lines += [f'if [ -f {q(dest)} ]; then cp -a {q(dest)} {q(dest + ".prev")}; fi',
                   f'install -o root -g root -m 0644 {q(remote + "/" + name)} {q(dest)}']
-    lines += [f'systemctl restart {q(config.services["manager"])} {q(config.services["clock_sync"])}',
-              'sleep 2', f'systemctl is-active {q(config.services["manager"])}', f'rm -rf {q(remote)}']
+    lines += [worker_services_start(config), 'sleep 2', f'systemctl is-active {q(config.services["manager"])}', f'rm -rf {q(remote)}']
     return 'sudo -n bash -c ' + q('\n'.join(lines))
 
 
@@ -223,7 +229,7 @@ def worker_restore_script(config, files, with_image: bool) -> str:
     w, q = config.worker, shlex.quote
     paths = ([w.image_path] if with_image else []) + [f'{w.opt_dir}/{name}' for name in files]
     lines = ['set -e'] + [f'if [ -f {q(p + ".prev")} ]; then mv -f {q(p + ".prev")} {q(p)}; fi' for p in paths]
-    lines += [f'systemctl restart {q(config.services["manager"])} {q(config.services["clock_sync"])}']
+    lines += [worker_services_start(config)]
     return 'sudo -n bash -c ' + q('\n'.join(lines))
 
 
