@@ -13,6 +13,9 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 import pytest
 
+# Shares the migration gate/witness with the other mixed-text phase file.
+pytestmark = pytest.mark.pg_exclusive
+
 from gmail_search.gateway.maintenance import MaintenanceAdmin, ReleaseIdentity
 from gmail_search.gateway.partition_profiles import TEXT_OWNER_PARTITIONS_V1 as TEXT
 from gmail_search.gateway.partitions import PARTITION_SCHEMA, partition_name

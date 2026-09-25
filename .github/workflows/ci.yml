@@ -36,5 +36,5 @@ jobs:
     - uses: astral-sh/setup-uv@v5
     - name: Install package + dev deps from the lockfile
       run: uv sync --locked --extra dev
-    - name: pytest (fast suite - integration/perf excluded via pyproject addopts)
-      run: uv run pytest -q
+    - name: pytest (fast suite in parallel - integration/perf excluded)
+      run: GMS_PYTHON=.venv/bin/python scripts/test.sh

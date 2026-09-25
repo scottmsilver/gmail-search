@@ -13,6 +13,9 @@ import time
 from psycopg import sql
 import pytest
 
+# BM25 statistics / plan assertions: needs a quiet database (see scripts/test.sh).
+pytestmark = pytest.mark.pg_exclusive
+
 from gmail_search.gateway.data_admission import DataAdmission
 from gmail_search.gateway.partitions import provision_owner_partitions, partition_name, PARTITION_SCHEMA
 from gmail_search.gateway.partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 as NUMERIC, TEXT_OWNER_PARTITIONS_V1 as TEXT

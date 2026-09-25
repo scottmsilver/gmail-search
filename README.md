@@ -63,6 +63,15 @@ package into a system or conda Python; the daemons pick up whatever `.venv` has 
 dependency bump is `uv lock && uv sync --extra dev` followed by
 `systemctl --user restart gmail-search-supervise.service gmail-search-serve.service gmail-search-mcp.service`.
 
+**Tests.** `scripts/test.sh` runs the fast suite the way the pre-push hook and CI do: every test on
+`GMS_TEST_WORKERS` pytest-xdist workers (default 8, one file per worker), then the tests marked
+`pg_exclusive` (Postgres statistics, plan and shared-migration-gate checks) serially. Database tests
+need `GMS_TEST_PG_DSN` pointing at a disposable ParadeDB (never the live database); each test gets its
+own schema, built only when the test first connects. Turn durability off on that disposable cluster,
+where it only costs time (about 6 minutes against 2 for the suite):
+`psql "$GMS_TEST_PG_DSN" -c "ALTER SYSTEM SET fsync=off" -c "ALTER SYSTEM SET synchronous_commit=off" -c "ALTER SYSTEM SET full_page_writes=off" -c "SELECT pg_reload_conf()"`
+(it persists across restarts).
+
 ### 2. Postgres
 
 Start a Postgres with `pg_search` available and point the project at it with the `DB_DSN` environment variable (default `postgresql://gmail_search:gmail_search@127.0.0.1:5544/gmail_search`, the local docker-compose address). The schema in `src/gmail_search/store/pg_schema.sql` is idempotent and is applied on first connect.

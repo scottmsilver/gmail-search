@@ -8,6 +8,9 @@ docs/qualification/retained-reader-root-cause.md.
 from psycopg import sql
 import pytest
 
+# Shares the migration gate/witness with the other mixed-text phase file.
+pytestmark = pytest.mark.pg_exclusive
+
 from gmail_search.gateway.partitions import PARTITION_SCHEMA, partition_name
 from gmail_search.gateway.registry import AccessDenied
 

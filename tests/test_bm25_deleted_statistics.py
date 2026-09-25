@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+# BM25 statistics / plan assertions: needs a quiet database (see scripts/test.sh).
+pytestmark = pytest.mark.pg_exclusive
+
 SOURCE=Path(__file__).parents[1]/'deploy/public/probe_bm25_deleted_statistics.py'
 
 

@@ -73,7 +73,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio>=1.1", "requests", "ruff>=0.5"]
+dev = ["pytest", "pytest-asyncio>=1.1", "pytest-xdist>=3.6", "requests", "ruff>=0.5"]
 
 [project.scripts]
 gmail-search = "gmail_search.cli:main"
@@ -87,6 +87,7 @@ pythonpath = ["src"]
 markers = [
     "integration: requires live MCP+claudebox+postgres+gmail-search stack; opt-in via pytest -m integration",
     "perf_slow: search perf gate that builds a ~10GB ScaNN engine (~100s) or drives live HTTP; opt-in via pytest -m perf_slow",
+    "pg_exclusive: measures Postgres statistics or query plans, so other sessions' activity changes the result; scripts/test.sh runs these after the parallel pass",
 ]
 addopts = "-m 'not integration and not perf_slow'"
 asyncio_default_fixture_loop_scope = "function"

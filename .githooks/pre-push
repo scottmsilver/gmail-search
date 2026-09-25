@@ -23,8 +23,8 @@ if ! "$RUFF" check src/ tests/; then
   exit 1
 fi
 
-echo "[pre-push] pytest (full fast suite — integration/perf excluded)…"
-if ! "$PY" -m pytest -q; then
+echo "[pre-push] pytest (full fast suite in parallel — integration/perf excluded)…"
+if ! GMS_PYTHON="$PY" "$ROOT/scripts/test.sh"; then
   echo "[pre-push] ✗ tests failed — fix them (or bypass with: git push --no-verify)" >&2
   exit 1
 fi
