@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to ~/.config/gmail-search/deploy.json. Machine settings only; no secrets. Worker host/port come from the invited runtime config's `worker` block.",
+  "install_root": "~/.local/share/gmail-search",
+  "invited_config": "~/.config/gmail-search/invited-runtime.json",
+  "public_web_env": "~/.config/gmail-search/public-web.env",
+  "web_node_modules": "~/development/gmail-search/web/node_modules",
+  "web_local_url": "http://127.0.0.1:3001",
+  "health_host": "127.0.0.1",
+  "health_ports": [8091, 8092, 3001],
+  "image_inputs_cache": "~/.local/share/gmail-search/worker-image/inputs",
+  "services": {
+    "controller": "gmail-search-invited-api.service",
+    "web": "gmail-search-public-web.service",
+    "manager": "gmail-full-agent-manager.service",
+    "clock_sync": "gmail-worker-clock-sync.service"
+  },
+  "worker": {
+    "user": "worker-admin",
+    "key": "~/.config/gmail-search/worker/admin",
+    "known_hosts": "~/.config/gmail-search/worker/known_hosts",
+    "opt_dir": "/opt/gmail-worker",
+    "image_path": "/var/lib/gmail-worker/images/agent-full.squashfs"
+  }
+}
