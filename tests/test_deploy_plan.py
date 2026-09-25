@@ -36,6 +36,26 @@ def test_dependency_and_unknown_deploy_paths_need_the_owner():
     assert kinds('deploy/systemd/x.service')[1] == ['deploy/systemd/x.service']
 
 
+@pytest.mark.parametrize('path', [
+    'deploy/examples/test.env.example',
+    'deploy/deploy.example.json',
+    'deploy/public/probe_bm25_deleted_statistics.py',
+])
+def test_example_configs_and_test_probes_are_not_shipped(path):
+    assert kinds(path) == ([], [])
+
+
+@pytest.mark.parametrize('path', [
+    'deploy/sub/deploy.example.json',
+    'deploy/public/invited-runtime.json.example',
+    'deploy/public/provision_database.py',
+    'deploy/public/worker/probe_x.py',
+    'deploy/public/worker/probe.sh',
+])
+def test_paths_near_the_not_shipped_shapes_still_need_the_owner(path):
+    assert kinds(path) == ([], [path])
+
+
 @pytest.mark.parametrize(('running', 'target', 'contains', 'within', 'paths', 'action'), [
     ('a', 'a', True, True, ['src/x.py'], 'skip'),
     ('b', 'a', False, True, ['src/x.py'], 'superseded'),
