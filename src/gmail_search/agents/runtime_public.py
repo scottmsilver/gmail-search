@@ -20,7 +20,7 @@ from gmail_search.agents import tools as retrieval
 from gmail_search.agents.deep_events import (
     emit_error, emit_plan_event, emit_retriever_events, emit_writer_and_final,
 )
-from gmail_search.agents.session import append_event, finalize_session
+from gmail_search.agents.session import append_event, finalize_session, session_elapsed_ms
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -205,7 +205,8 @@ async def public_run(db_path: Path, session_id: str, question: str, user_id: str
         async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
             client = _new_client()
             answer = await _drive(client, conn, session_id, question, user_id)
-        emit_writer_and_final(conn, session_id, answer)
+        elapsed_ms = session_elapsed_ms(conn, session_id)
+        emit_writer_and_final(conn, session_id, answer, elapsed_ms=elapsed_ms)
         finalize_session(conn, session_id, status='done', final_answer=answer)
     except asyncio.CancelledError:
         emit_error(conn, session_id, PublicRuntimeError('Chat was cancelled.'), agent_name='public')

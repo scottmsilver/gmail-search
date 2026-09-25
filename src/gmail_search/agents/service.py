@@ -52,6 +52,7 @@ from gmail_search.agents.session import (
     finalize_session,
     get_artifact,
     new_session_id,
+    session_elapsed_ms,
     session_owner,
 )
 from gmail_search.auth import require_user_id
@@ -217,15 +218,40 @@ async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         )
         yield _sse("critique", {"seq": seq, "accepted": True})
 
-        # Final
+        # Cost fake: so GMAIL_DEEP_REAL=0 dev/test mode exercises the
+        # same cost-footer path a live turn does, with no model call.
+        cost_payload = {
+            "model": "stub-model",
+            "input_tokens": 123,
+            "output_tokens": 45,
+            "usd": 0.00012,
+            "turn_total_usd": 0.00012,
+        }
+        seq = append_event(conn, session_id=session_id, agent_name="writer", kind="cost", payload=cost_payload)
+        yield _sse("cost", {"seq": seq, "agent": "writer", "payload": cost_payload})
+
+        # Final. Shaped {seq, agent, payload} like every real backend's
+        # forwarded frame (`_sse(ev.kind, {"seq":.., "agent":.., "payload":..})`
+        # in `_stream_task_events` / the claude_code poll loop below) —
+        # the web proxy reads the final answer off `data.payload.text`,
+        # so a differently-shaped stub frame left the stub's answer
+        # text (and now its elapsed_ms) invisible in the chat UI.
+        # elapsed_ms must be read, and the `final` event appended,
+        # BEFORE finalize_session commits status='done' — see
+        # session_elapsed_ms's docstring for the replay race this order
+        # avoids.
+        elapsed_ms = session_elapsed_ms(conn, session_id)
+        final_payload: dict = {"text": draft}
+        if elapsed_ms is not None:
+            final_payload["elapsed_ms"] = elapsed_ms
         seq = append_event(
             conn,
             session_id=session_id,
             agent_name="root",
             kind="final",
-            payload={"text": draft},
+            payload=final_payload,
         )
-        yield _sse("final", {"seq": seq, "text": draft})
+        yield _sse("final", {"seq": seq, "agent": "root", "payload": final_payload})
         finalize_session(conn, session_id, status="done", final_answer=draft)
     except Exception as e:
         logger.exception(f"stub run failed for session {session_id}: {e}")
@@ -431,7 +457,90 @@ def _build_assistant_parts_from_events(
             }
         )
     parts.append({"type": "text", "text": final_text or ""})
+    turn_cost = _turn_cost_part_from_events(events, session_id=session_id)
+    if turn_cost is not None:
+        parts.append(turn_cost)
     return parts
+
+
+def _as_number(value) -> float | None:
+    """Coerce a stored event field to a number, or None if it can't
+    be — used when reading `agent_events.payload` back, JSONB whose
+    shape nothing here controls once it's written. Distinguishing
+    "0" from "couldn't parse" matters: silently treating a malformed
+    figure as 0 would let `_turn_cost_part_from_events` show a
+    confident `$0` for a turn whose real cost is simply unknown to
+    this reader — worse than saying so."""
+    if isinstance(value, bool):  # bool is an int subclass; not a token count
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _turn_cost_part_from_events(events: list, *, session_id: str) -> dict | None:
+    """Reconstruct the bottom-of-bubble cost+time footer from a
+    session's `agent_events` log, mirroring the live accumulation
+    `web/app/api/chat/route.ts` does frame-by-frame while streaming.
+    Without this, the footer the user saw live vanishes on a page
+    reload — the reload path renders straight from `agent_events`,
+    never from the SSE stream route.ts summed.
+
+    Returns None when there's nothing to show (no cost events AND no
+    `elapsed_ms` on the `final` event) so callers can skip appending
+    an empty footer.
+
+    `cost_known` is False whenever no `cost` event fired this turn
+    (true for the bounded public runtime, which never calls
+    `record_agent_cost`) OR a `cost` event's numeric fields couldn't
+    be parsed — nothing writes one today, but this reads rows nothing
+    here controls, and a malformed figure is deliberately reported as
+    unknown rather than a possibly-wrong `$0`. Either way it never
+    raises: this function feeds `_build_assistant_parts_from_events`,
+    and an exception there would cost the WHOLE reconstruction — tool
+    calls included, not just this footer — on reload."""
+    total_input_tokens = 0.0
+    total_output_tokens = 0.0
+    total_usd = 0.0
+    saw_cost_event = False
+    cost_parsed_cleanly = True
+    model: str | None = None
+    elapsed_ms: int | None = None
+    for ev in events:
+        if ev.kind == "cost":
+            payload = ev.payload or {}
+            saw_cost_event = True
+            in_tok = _as_number(payload.get("input_tokens"))
+            out_tok = _as_number(payload.get("output_tokens"))
+            usd = _as_number(payload.get("usd"))
+            if in_tok is None or out_tok is None or usd is None:
+                cost_parsed_cleanly = False
+            else:
+                total_input_tokens += in_tok
+                total_output_tokens += out_tok
+                total_usd += usd
+            model = payload.get("model") or model
+        elif ev.kind == "final":
+            payload = ev.payload or {}
+            candidate = payload.get("elapsed_ms")
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                elapsed_ms = int(candidate)
+    cost_known = saw_cost_event and cost_parsed_cleanly
+    if not cost_known and elapsed_ms is None:
+        return None
+    return {
+        "type": "data-turn-cost",
+        "id": f"tc-{session_id}",
+        "data": {
+            "model": model,
+            "input_tokens": int(total_input_tokens),
+            "output_tokens": int(total_output_tokens),
+            "usd": round(total_usd, 5),
+            "cost_known": cost_known,
+            "elapsed_ms": elapsed_ms,
+        },
+    }
 
 
 def _persist_rich_assistant_message(

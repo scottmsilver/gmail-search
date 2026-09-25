@@ -176,6 +176,28 @@ def fetch_events_after(
         )
 
 
+def session_elapsed_ms(conn, session_id: str) -> int | None:
+    """How long has this session been running, in whole milliseconds,
+    measured against `agent_sessions.started_at` on the DB clock (not
+    process wall-clock — immune to restarts or a caller on a different
+    host than the DB). Returns None if the session row doesn't exist.
+
+    A pure read, no side effects — call it right before writing the
+    `final` event so the number rides on that event. It must run
+    BEFORE `finalize_session`, not after: the SSE replay endpoint
+    (`/api/agent/analyze/<id>/events`) treats `agent_sessions.status
+    in ('done', 'error')` as "stream complete, stop polling" the
+    moment it sees it, with no guarantee the `final` event's INSERT
+    has committed yet if the two writes race. Keeping `finalize_session`
+    strictly last (as it always was) is what keeps that read safe."""
+    row = conn.execute(
+        "SELECT (EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)::bigint AS elapsed_ms "
+        "FROM agent_sessions WHERE id = %s",
+        (session_id,),
+    ).fetchone()
+    return int(row["elapsed_ms"]) if row else None
+
+
 def finalize_session(
     conn,
     session_id: str,
@@ -185,7 +207,11 @@ def finalize_session(
 ) -> None:
     """Close out the session row. `status` is 'done' for a normal
     finish, 'error' when the root agent raised. `finished_at` is
-    stamped server-side so it matches the DB clock."""
+    stamped server-side so it matches the DB clock.
+
+    Must be the LAST write of a turn, strictly after the `final`
+    event is appended — see `session_elapsed_ms`'s docstring for why
+    reversing that order is a replay race, not just a style choice."""
     conn.execute(
         """UPDATE agent_sessions
            SET status = %s, final_answer = %s, finished_at = NOW()

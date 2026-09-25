@@ -28,7 +28,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from gmail_search.agents.session import append_event, finalize_session
+from gmail_search.agents.session import append_event, finalize_session, session_elapsed_ms
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,17 @@ class Orchestrator:
             artifact_ids = list(analysis["artifact_ids"]) if analysis else []
             draft = await self._run_writer(question, plan, evidence, analysis, cite_refs, artifact_ids)
             draft = await self._run_critic_loop(draft, evidence, analysis, cite_refs, artifact_ids)
-            self._emit("root", "final", {"text": draft})
+            # elapsed_ms must be read, and the `final` event written,
+            # BEFORE finalize_session commits status='done' — a
+            # reconnecting client on /api/agent/analyze/<id>/events
+            # stops polling the instant it observes 'done', so if that
+            # commit landed first it could miss the final event in the
+            # gap before its own commit.
+            elapsed_ms = session_elapsed_ms(self.conn, self.session_id)
+            final_payload: dict = {"text": draft}
+            if elapsed_ms is not None:
+                final_payload["elapsed_ms"] = elapsed_ms
+            self._emit("root", "final", final_payload)
             finalize_session(self.conn, self.session_id, status="done", final_answer=draft)
             return draft
         except Exception as e:

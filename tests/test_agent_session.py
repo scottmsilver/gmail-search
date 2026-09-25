@@ -16,6 +16,7 @@ from gmail_search.agents.session import (
     get_artifact,
     new_session_id,
     save_artifact,
+    session_elapsed_ms,
 )
 from gmail_search.store.db import get_connection, init_db
 
@@ -101,6 +102,46 @@ def test_finalize_session_flips_status_and_stamps_finish_time(db_backend):
     assert row["status"] == "done"
     assert row["final_answer"] == "the answer"
     assert row["finished_at"] is not None
+    conn.close()
+
+
+def test_session_elapsed_ms_measures_against_started_at(db_backend):
+    """issue #74: the UI's cost/time footer reads this. It must be
+    callable — and give a real number — WHILE the session is still
+    'running', before `finalize_session` ever runs: every backend
+    calls it, then writes the `final` event, then finalizes, in that
+    order (see `session_elapsed_ms`'s docstring for why that order is
+    load-bearing, not incidental)."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+
+    sid = new_session_id()
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+    elapsed_ms = session_elapsed_ms(conn, sid)
+
+    assert elapsed_ms is not None
+    assert elapsed_ms >= 0
+
+    row = conn.execute(
+        "SELECT status FROM agent_sessions WHERE id = %s",
+        (sid,),
+    ).fetchone()
+    assert row["status"] == "running"
+    conn.close()
+
+
+def test_session_elapsed_ms_missing_row_returns_none(db_backend):
+    """A session id that was never created (shouldn't happen —
+    create_session always runs first) must not raise; the caller's
+    elapsed_ms just comes back None and the UI shows no time."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+
+    elapsed_ms = session_elapsed_ms(conn, "does-not-exist")
+
+    assert elapsed_ms is None
     conn.close()
 
 

@@ -64,7 +64,8 @@ def test_finish_normalizes_before_events_and_storage(monkeypatch):
     monkeypatch.setattr(runtime_pi, "emit_retriever_events", lambda *a, **kw: None)
     monkeypatch.setattr(runtime_pi, "emit_analyst_events", lambda *a, **kw: None)
     monkeypatch.setattr(runtime_pi, "sweep_and_extend_final_text", lambda *a, **kw: kw["base_text"])
-    monkeypatch.setattr(runtime_pi, "emit_writer_and_final", lambda c, sid, text: captured.update(event=text))
+    monkeypatch.setattr(runtime_pi, "session_elapsed_ms", lambda *a, **kw: 0)
+    monkeypatch.setattr(runtime_pi, "emit_writer_and_final", lambda c, sid, text, **kw: captured.update(event=text))
     monkeypatch.setattr(runtime_pi, "finalize_session", lambda *a, **kw: captured.update(saved=kw["final_answer"]))
     runtime_pi._finish_ok(conn, session_id="session-one", workspace="w", conversation_id="c",
                           turn_started_at=0, outcome=runtime_pi.TurnOutcome(final_text="A [ref:message-one]", local_tool_calls=[], usage=None), side_calls=[])

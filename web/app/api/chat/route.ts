@@ -225,17 +225,26 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
       let totalUsd = 0;
+      // False for the bounded "public" runtime, which never emits a
+      // `cost` event at all (it doesn't track per-call spend). The
+      // footer then shows "cost unknown" instead of a misleading $0.
+      let costKnown = false;
+      // Set from the `final` frame's `elapsed_ms` (server wall-clock,
+      // `agent_sessions.finished_at - started_at`). Every backend sets
+      // it once `finalize_session` runs — see deep_events.py.
+      let elapsedMs: number | null = null;
 
       const accumulateCost = (payload: unknown) => {
         if (!payload || typeof payload !== "object") return;
         const p = payload as Record<string, unknown>;
+        costKnown = true;
         if (typeof p.input_tokens === "number") totalInputTokens += p.input_tokens;
         if (typeof p.output_tokens === "number") totalOutputTokens += p.output_tokens;
         if (typeof p.usd === "number") totalUsd += p.usd;
       };
 
       const emitTurnCost = () => {
-        if (totalInputTokens === 0 && totalOutputTokens === 0 && totalUsd === 0) return;
+        if (!costKnown && elapsedMs === null) return;
         writer.write({
           type: "data-turn-cost",
           id: `tc-deep-${args.loggerId}`,
@@ -244,6 +253,8 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
             input_tokens: totalInputTokens,
             output_tokens: totalOutputTokens,
             usd: totalUsd,
+            cost_known: costKnown,
+            elapsed_ms: elapsedMs,
           },
         });
       };
@@ -286,6 +297,9 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
                 typeof (data.payload as { text?: unknown })?.text === "string"
                   ? ((data.payload as { text: string }).text as string)
                   : finalText;
+              if (typeof (data.payload as { elapsed_ms?: unknown })?.elapsed_ms === "number") {
+                elapsedMs = (data.payload as { elapsed_ms: number }).elapsed_ms;
+              }
               streamed.end();
               if (streamed.matches(finalText)) {
                 finalStartedId = streamed.id;

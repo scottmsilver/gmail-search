@@ -177,10 +177,17 @@ def emit_analyst_events(
     )
 
 
-def emit_writer_and_final(conn, session_id: str, text: str) -> None:
+def emit_writer_and_final(conn, session_id: str, text: str, *, elapsed_ms: int | None = None) -> None:
     """Writer panel surfaces the final markdown via `draft`; the root
     event signals turn-complete to the SSE proxy. Both carry the same
-    text so a UI reading either gets the right answer."""
+    text so a UI reading either gets the right answer.
+
+    `elapsed_ms`, when given, is the turn's total wall-clock duration
+    (from `finalize_session`, called by the caller just before this so
+    the number is already known) and rides on the `final` event only —
+    the UI's cost/time footer reads it from there. Omitted rather than
+    written as null so a caller that hasn't computed it yet (or an old
+    caller) leaves the payload exactly as before."""
     append_event(
         conn,
         session_id=session_id,
@@ -188,12 +195,15 @@ def emit_writer_and_final(conn, session_id: str, text: str) -> None:
         kind="draft",
         payload={"text": text},
     )
+    final_payload: dict = {"text": text}
+    if elapsed_ms is not None:
+        final_payload["elapsed_ms"] = elapsed_ms
     append_event(
         conn,
         session_id=session_id,
         agent_name="root",
         kind="final",
-        payload={"text": text},
+        payload=final_payload,
     )
 
 

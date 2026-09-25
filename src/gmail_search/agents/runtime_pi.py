@@ -30,7 +30,7 @@ from gmail_search.agents.deep_events import (
     sweep_and_extend_final_text,
 )
 from gmail_search.agents.pi_rpc import PiRpcClient, PiRpcError
-from gmail_search.agents.session import append_event, finalize_session
+from gmail_search.agents.session import append_event, finalize_session, session_elapsed_ms
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -736,7 +736,8 @@ def _finish_ok(
     from gmail_search.agents.citations import normalize_citations
 
     final_text = normalize_citations(conn, session_id, final_text)
-    emit_writer_and_final(conn, session_id, final_text)
+    elapsed_ms = session_elapsed_ms(conn, session_id)
+    emit_writer_and_final(conn, session_id, final_text, elapsed_ms=elapsed_ms)
     finalize_session(conn, session_id, status="done", final_answer=final_text)
 
 

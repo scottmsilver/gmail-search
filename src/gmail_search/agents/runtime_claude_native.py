@@ -23,7 +23,7 @@ from gmail_search.agents.deep_events import emit_error as _emit_error
 from gmail_search.agents.deep_events import emit_retriever_events as _emit_retriever_events
 from gmail_search.agents.deep_events import emit_writer_and_final as _emit_writer_and_final
 from gmail_search.agents.deep_events import sweep_and_extend_final_text as _sweep_and_extend_final_text
-from gmail_search.agents.session import append_event, finalize_session
+from gmail_search.agents.session import append_event, finalize_session, session_elapsed_ms
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -277,7 +277,8 @@ async def native_run(
             turn_started_at=turn_started_at,
             base_text=result.text,
         )
-        _emit_writer_and_final(conn, session_id, final_text)
+        elapsed_ms = session_elapsed_ms(conn, session_id)
+        _emit_writer_and_final(conn, session_id, final_text, elapsed_ms=elapsed_ms)
         finalize_session(conn, session_id, status="done", final_answer=final_text)
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"native_run failed for session {session_id}: {exc}")

@@ -565,3 +565,99 @@ def test_every_stage_builds_without_a_model_sdk(monkeypatch):
     assert [s.name for s in stages] == ["planner", "retriever", "writer", "critic", "analyst"]
     assert stages[2].model == "writer-model" and stages[3].model == DEFAULT_STAGE_MODEL
     assert stages[4].instruction == "do it" and all(s.instruction for s in stages)
+
+
+def _event(seq: int, agent_name: str, kind: str, payload: dict):
+    from gmail_search.agents.session import SessionEvent
+
+    return SessionEvent(
+        session_id="s1", seq=seq, agent_name=agent_name, kind=kind, payload=payload, created_at="now"
+    )
+
+
+def test_turn_cost_part_none_when_nothing_to_show():
+    # No cost events, no elapsed_ms on `final` — nothing worth a footer.
+    events = [_event(1, "root", "final", {"text": "hi"})]
+    assert service._turn_cost_part_from_events(events, session_id="s1") is None
+
+
+def test_turn_cost_part_sums_cost_events_and_reads_elapsed_from_final():
+    """issue #74: reload must show the same footer the live SSE stream
+    showed — summed cost across every sub-agent stage, plus the total
+    turn time off the `final` event's `elapsed_ms`."""
+    events = [
+        _event(1, "planner", "cost", {"model": "gemini-2.5-flash", "input_tokens": 100, "output_tokens": 20, "usd": 0.001}),
+        _event(2, "writer", "cost", {"model": "gemini-2.5-pro", "input_tokens": 200, "output_tokens": 80, "usd": 0.01}),
+        _event(3, "root", "final", {"text": "done", "elapsed_ms": 5500}),
+    ]
+    part = service._turn_cost_part_from_events(events, session_id="s1")
+    assert part == {
+        "type": "data-turn-cost",
+        "id": "tc-s1",
+        "data": {
+            "model": "gemini-2.5-pro",
+            "input_tokens": 300,
+            "output_tokens": 100,
+            "usd": 0.011,
+            "cost_known": True,
+            "elapsed_ms": 5500,
+        },
+    }
+
+
+def test_turn_cost_part_cost_unknown_when_no_cost_events():
+    """The bounded public runtime never emits a `cost` event — the
+    footer must still show elapsed time, flagged as cost-unknown
+    rather than a misleading $0."""
+    events = [_event(1, "root", "final", {"text": "done", "elapsed_ms": 900})]
+    part = service._turn_cost_part_from_events(events, session_id="s1")
+    assert part["data"]["cost_known"] is False
+    assert part["data"]["elapsed_ms"] == 900
+    assert part["data"]["usd"] == 0.0
+
+
+def test_build_assistant_parts_from_events_appends_turn_cost_last():
+    events = [
+        _event(1, "planner", "cost", {"model": "gemini-2.5-flash", "input_tokens": 10, "output_tokens": 5, "usd": 0.0005}),
+        _event(2, "root", "final", {"text": "the answer", "elapsed_ms": 1200}),
+    ]
+    parts = service._build_assistant_parts_from_events(events, session_id="s1", final_text="the answer")
+    assert parts[-2] == {"type": "text", "text": "the answer"}
+    assert parts[-1]["type"] == "data-turn-cost"
+    assert parts[-1]["data"]["elapsed_ms"] == 1200
+
+
+def test_build_assistant_parts_from_events_no_turn_cost_part_when_nothing_tracked():
+    events = [_event(1, "root", "final", {"text": "the answer"})]
+    parts = service._build_assistant_parts_from_events(events, session_id="s1", final_text="the answer")
+    assert parts[-1] == {"type": "text", "text": "the answer"}
+    assert not any(p.get("type") == "data-turn-cost" for p in parts)
+
+
+def test_turn_cost_part_treats_malformed_cost_fields_as_unknown_not_zero():
+    """A cost event with a non-numeric field must not (a) blow up the
+    whole assistant-part reconstruction (which also carries every
+    reconstructed tool call), or (b) render as a confident `$0` —
+    both flagged by codex during the issue #74 audit. `cost_known`
+    must flip to False so the UI says "cost unknown" instead of
+    showing a wrong number with a straight face."""
+    events = [
+        _event(1, "planner", "cost", {"model": "m", "input_tokens": "not-a-number", "output_tokens": 5, "usd": "oops"}),
+        _event(2, "root", "final", {"text": "done", "elapsed_ms": 100}),
+    ]
+    part = service._turn_cost_part_from_events(events, session_id="s1")
+    assert part["data"]["cost_known"] is False
+    assert part["data"]["usd"] == 0.0
+    assert part["data"]["elapsed_ms"] == 100
+
+
+def test_turn_cost_part_one_malformed_event_does_not_poison_other_clean_ones():
+    """A malformed event drops that event's own contribution and flips
+    cost_known False, but doesn't crash on later, well-formed events."""
+    events = [
+        _event(1, "planner", "cost", {"model": "m", "input_tokens": 100, "output_tokens": 20, "usd": 0.001}),
+        _event(2, "writer", "cost", {"model": "m", "input_tokens": None, "output_tokens": "bad", "usd": 0.02}),
+        _event(3, "root", "final", {"text": "done", "elapsed_ms": 100}),
+    ]
+    part = service._turn_cost_part_from_events(events, session_id="s1")
+    assert part["data"]["cost_known"] is False
