@@ -16,6 +16,7 @@ const routes: Array<[RegExp, string[]]> = [
   [/^\/api\/conversations$/, ["GET"]],
   [/^\/api\/conversations\/[a-zA-Z0-9_-]{6,64}$/, ["GET", "PUT", "DELETE"]],
   [/^\/api\/(search|status|users\/me\/sync-status)$/, ["GET"]],
+  [/^\/api\/whats-new$/, ["GET"]],
     // Battles are available to owners the server reports as capable; the chat
     // route gates that. Without these the battle runs and then 404s on the vote.
     [/^\/api\/battle\/vote$/, ["POST"]],

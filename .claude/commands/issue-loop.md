@@ -459,7 +459,7 @@ else `~/.wt/issue-<n>-*`), stages what the agent changed by explicit path
 top-level directory `origin/main` does not have, such as an agent's
 `scratchpad/`, stops the landing by name before anything is staged, and a
 change that really adds a new top-level directory stages it by hand first),
-commits with the PR title,
+commits with the PR title, the issue's labels as an `Issue-Labels:` trailer (for the deployer's "What's new" notes),
 `Fixes #<n>` and the repo's attribution lines, merges `origin/main`, runs the build checks
 (`uv sync --locked`, ruff, and the web typecheck and script tests when `web/`
 changed), runs the issue's own `tests/test_*.py` files if the diff names any,

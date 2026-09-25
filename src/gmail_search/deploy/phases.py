@@ -11,7 +11,7 @@ from pathlib import Path
 import shlex
 import shutil
 
-from . import image, lock, plan
+from . import image, lock, notes, plan
 from .config import read_env_file
 from .host import Host
 
@@ -103,6 +103,7 @@ def package_phase(host: Host, main: Path, state: State, *, dry_run: bool) -> Non
     (out / 'QUALIFIED.json').unlink(missing_ok=True)
     if plan.WEB in data['kinds']:
         _package_web(host, tree, out, logs)
+    _package_notes(host, main, data, out)
     worker = _package_worker(host, tree, state, data['kinds'], logs)
     (out / 'RELEASE').write_text(f"{data['target'][:7]}: {data['release']} {now()}\n")
     _private(out)
@@ -117,6 +118,16 @@ def _package_web(host: Host, tree: Path, out: Path, logs: Path) -> None:
     env = read_env_file(host.config.public_web_env)
     host.runner.run([out / 'web/node_modules/.bin/next', 'build'], cwd=out / 'web', env=env,
                     log=logs / 'next-build.log')
+
+
+def _package_notes(host: Host, main: Path, data: dict, out: Path) -> None:
+    """This release's "What's new" ledger, on every release: the web reads it at
+    request time, so a controller-only release's entries show without a rebuild."""
+    running = data.get('running')
+    log = git(host, main, *notes.log_args(running, data['target'])) if running else ''
+    previous = notes.read_previous(Path(data['runningDir']) / notes.WHATS_NEW)
+    notes.write(out / notes.WHATS_NEW, notes.merge(data['release'], data['target'][:7],
+                                                   notes.parse_entries(log), previous))
 
 
 def _package_worker(host: Host, tree: Path, state: State, kinds, logs: Path) -> dict:

@@ -311,6 +311,7 @@ src/gmail_search/
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
   deploy/           — The invited-service deployer (scripts/deploy.sh; see Deploying):
                        plan, package, qualify, preflight, activate, postcheck.
+                       notes.py: the "What's new" ledger the package phase writes
                        one_checkout.py + checkout_checks.py: scripts/one-checkout.sh,
                        which moves the production checkout onto main and back
     worker_disk.py  — Moves the worker VM's disk to worker.vm_dir and runs it from a unit
@@ -577,7 +578,7 @@ not an agent, and runs six phases, each recorded in `.runtime/deploy/<release>/s
 | Phase | What it does |
 | --- | --- |
 | `plan` | Reads the running release's commit (`QUALIFIED.json`, else a leading sha in `RELEASE`), diffs the target, and classifies the batch: `controller` (`src/`), `web` (`web/`), `image` (guest files, workflow agents, image inputs), `worker` (files installed in the worker's opt dir). Docs/tests/scripts, example configs (`deploy/examples/`, `deploy/*.example.json`) and test-only probes (`deploy/public/probe_*.py`) and owner-run migration scripts (`deploy/public/migrate_*.py`) only, or nothing new, is `skip`; a running release at or past the target is `superseded`; dependency files (`pyproject.toml`, `uv.lock`, web lockfiles) or an unknown `deploy/` path are refused as the owner's step. |
-| `package` | From a clean detached worktree at the target (`~/.wt/deploy-<release>`), builds `<install_root>/public-releases/<release>` from the running release with `api/src` replaced, `next build` when `web/` changed, and the worker payload. |
+| `package` | From a clean detached worktree at the target (`~/.wt/deploy-<release>`), builds `<install_root>/public-releases/<release>` from the running release with `api/src` replaced, `next build` when `web/` changed, the worker payload, and the "What's new" notes (below). |
 | `qualify` | `scripts/test.sh` (under the issue loop's landing lock, `.runtime/issue-loop/land.lock`), ruff, and the web `tsc` and script tests. Needs `GMS_TEST_PG_DSN` (the disposable test database). |
 | `preflight` | Refuses a dirty build tree, a running release that changed since `plan`, or any active run; writes `QUALIFIED.json`. |
 | `activate` | Installs the worker payload (keeping `.prev` copies) and restarts its units, swaps `invited-current` and `public-current`, restarts the controller and web, and waits for the units and health ports. Any failure restores the previous release (and worker files) and says whether that worked. |
@@ -587,6 +588,16 @@ not an agent, and runs six phases, each recorded in `.runtime/deploy/<release>/s
 names the release `<word>-<date>`. Settings live in `~/.config/gmail-search/deploy.json` (copy
 `deploy/deploy.example.json`; a missing key is named in the error); the worker's host and port come from the invited
 runtime config.
+
+**What's new.** Every package writes `<release>/web/whats-new.json` (`deploy/notes.py`) from local git history, with
+no GitHub call: each commit between the running release and the target that carries `Fixes #N` becomes an entry
+titled by its squash subject. An issue labelled `documentation` is left out; `land.sh` records the issue's labels (not
+`loop:*`) as an `Issue-Labels:` trailer on its commit, and a commit without one is kept. The file is a rolling ledger:
+this release's entries go on top of the running release's copy, capped at 12 releases, and a release with no entries
+carries it forward. The invited/public web serves it at `GET /api/whats-new` (signed-in users; read at request time,
+so a controller-only release shows its entries too) and shows it from "What's new" in the account menu, and once
+automatically when a newer release than the one the browser last saw is live (never on a first visit). A missing or
+malformed file shows "No release notes yet." The owner web on :3000 has neither.
 
 **Worker image.** The image is rebuilt reproducibly: the runtime trees fingerprinted in
 `deploy/public/worker/pi-mcp-runtime-inputs.json` (node `bin/`, `lib/`, locked Pi packages), cached once with
