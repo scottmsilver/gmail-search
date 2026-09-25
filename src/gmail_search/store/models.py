@@ -33,6 +33,9 @@ class Attachment:
     fetch_status: str = "ok"
     # Image-embedding outcome: None (not failed) or "failed_permanent".
     embed_status: str | None = None
+    # Last image-embed failure. Set with embed_status None = a retry is
+    # pending; cleared once a pass embeds every image without failing.
+    embed_error: str | None = None
 
 
 @dataclass
