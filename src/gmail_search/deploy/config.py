@@ -24,6 +24,9 @@ class WorkerAccess:
     known_hosts: Path
     opt_dir: str
     image_path: str
+    # Host directory holding the worker VM's disk and boot files (#27). Only
+    # the disk-move tool reads it, so a config without it still deploys.
+    vm_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -103,4 +106,5 @@ def load_config(path: Path = DEFAULT_PATH) -> DeployConfig:
             host=_require(endpoint, 'host', invited_path), port=int(_require(endpoint, 'port', invited_path)),
             user=req('user', worker), key=_path(req('key', worker)),
             known_hosts=_path(req('known_hosts', worker)),
-            opt_dir=req('opt_dir', worker), image_path=req('image_path', worker)))
+            opt_dir=req('opt_dir', worker), image_path=req('image_path', worker),
+            vm_dir=_path(worker['vm_dir']) if 'vm_dir' in worker else None))
