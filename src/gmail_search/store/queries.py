@@ -294,6 +294,7 @@ def get_attachments_for_message(conn, message_id: str, *, user_id: Optional[str]
             raw_path=r["raw_path"],
             fetch_status=r["fetch_status"],
             embed_status=r["embed_status"],
+            embed_error=r["embed_error"],
         )
         for r in rows
     ]
@@ -324,6 +325,20 @@ def record_image_embed_failure(
     ).fetchone()
     conn.commit()
     return (row["embed_status"] if isinstance(row, dict) else row[0]) if row else None
+
+
+def clear_image_embed_retry(conn, attachment_id: int, *, user_id: Optional[str] = None) -> None:
+    """A pass embedded every remaining image without failing: drop the
+    pending-retry marker (embed_error) so the Phase-2 selection stops
+    picking this attachment. embed_attempts is kept as history, and a
+    failed_permanent row keeps its error."""
+    uid = resolve_write_user_id(conn, user_id=user_id)
+    conn.execute(
+        """UPDATE attachments SET embed_error = NULL
+           WHERE id = %s AND user_id = %s AND embed_status IS NULL""",
+        (attachment_id, uid),
+    )
+    conn.commit()
 
 
 def sanitize_embed_error(error: str) -> str:

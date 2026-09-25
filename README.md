@@ -254,7 +254,7 @@ Every stage is idempotent. Crash anywhere, rerun, it picks up where it left off.
 
 | Table | What | Why |
 |-------|------|-----|
-| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk; `attachments.embed_status` / `embed_error` record image-embed failures that should never be retried |
+| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk; `attachments.embed_status` / `embed_error` record image-embed failures: `failed_permanent` is never retried, while an `embed_error` with no status is a retry pending for the next pass |
 | `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search; reconcile daemon detects drift |
 | `message_summaries` | LLM-generated per-thread summaries (markdown) | Inline in inbox + priority + chat |
 | `contact_frequency` | Log-scaled message count per sender | Boosts results from frequent correspondents |
