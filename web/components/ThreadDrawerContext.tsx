@@ -8,7 +8,7 @@ type Ctx = {
   setOpenThreadId: (id: string | null) => void;
 };
 
-const ThreadDrawerCtx = createContext<Ctx | null>(null);
+export const ThreadDrawerCtx = createContext<Ctx | null>(null);
 
 // Open-thread state lives in the URL (?thread=ID) so it survives reload
 // and can be bookmarked / shared. Both /search and / (chat) read the same

@@ -28,7 +28,7 @@ CGROUP = Path('/sys/fs/cgroup/gmail-worker')
 MODULE = Path('/opt/gmail-worker/firecracker_backend.py')
 ATTACHMENT_PIN = '89bf4da702506dadacc5cd08b9f4d737f27abb592eb35b7a768cc22d590f9068'
 # Separately built full-agent image; historical pins remain unchanged.
-AGENT_FULL_PIN = 'ad91bf033a904d3fda97c5bd5911329cb1f5fa6b2853820c28c0b816aec6bb1b'
+AGENT_FULL_PIN = 'b71e81e8e481113280a48661bc157741aa3961bf9d708179ca68fc5a65dd9d39'
 AGENT_PI_MCP_PIN = '478461755f2f344572bb0784685205fb173795bb5e3acae6fe523fb73dc62bbc'
 AGENT_MCP_PIN = '54303c8873abc96c27ea8cc99930e4713016a5d1b091376ed858a472f58ba7ba'
 AGENT_TOOLS_PIN = '4b981cd6a2e1eb2f28acad2d02ac6c365b4ef48b03345eb098578b9a1dd71402'
@@ -342,6 +342,32 @@ class SyntheticAttachmentBackend(FirecrackerBackend):
     profile = 'attachment'
 
 
+def guest_command(profile):
+    """The one line typed into the guest's PID 1 shell for a fixed profile.
+
+    The shell outlives whatever it runs, so a failed full-agent runner would
+    leave its VM up until the deadline (#37). Powering off makes the VMM exit;
+    the supervisor then marks the run stopped and the controller's next
+    heartbeat, refused renewal, ends the run. Success keeps the VM for the
+    controller to stop, so a heartbeat never races an unread answer.
+    """
+    if profile == 'attachment':
+        return (b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; '
+                b'mount -t tmpfs -o size=128m,mode=1777,nodev,nosuid tmpfs /tmp; '
+                b'mkdir /tmp/parser; mount -t squashfs -o ro /dev/vdb /tmp/parser; '
+                b'/usr/bin/python3 -I /tmp/parser/guest-attachment-parser.py\n')
+    if profile in ('agent', 'agent_tools', 'agent_mcp', 'agent_pi_mcp', 'agent_full'):
+        return (b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; '
+                b'mount -t tmpfs -o size=256m,mode=1777,nodev,nosuid tmpfs /tmp; '
+                b'mkdir /tmp/runtime; mount -t squashfs -o ro /dev/vdb /tmp/runtime; '
+                b'/usr/bin/ip link set lo up; /usr/bin/python3 -I /tmp/runtime/' +
+                {'agent_tools': b'guest-mail-tools-smoke.py\n', 'agent_mcp': b'guest-mail-mcp-smoke.py\n',
+                 'agent_pi_mcp': b'guest-pi-mail-mcp-smoke.py\n',
+                 'agent_full': b'guest_agent.py || /sbin/reboot -f\n',
+                 'agent': b'guest-agent-smoke.py\n'}[profile])
+    return b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; echo GMAIL_BACKEND_SYNTHETIC_HELLO; cat /proc/net/dev; cat /proc/mounts\n'
+
+
 def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, serial_output=True):
     boundary_check()
     checked_handle(handle)
@@ -439,22 +465,7 @@ def supervise(handle, *, boundary_check=boundary, image_prepare=prepare_images, 
                     log.flush()
                     written += len(chunk)
                 if not sent and time.monotonic() - boot_at >= 3:
-                    if profile == 'attachment':
-                        command = (b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; '
-                                   b'mount -t tmpfs -o size=128m,mode=1777,nodev,nosuid tmpfs /tmp; '
-                                   b'mkdir /tmp/parser; mount -t squashfs -o ro /dev/vdb /tmp/parser; '
-                                   b'/usr/bin/python3 -I /tmp/parser/guest-attachment-parser.py\n')
-                    elif profile in ('agent', 'agent_tools', 'agent_mcp', 'agent_pi_mcp', 'agent_full'):
-                        command = (b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; '
-                                   b'mount -t tmpfs -o size=256m,mode=1777,nodev,nosuid tmpfs /tmp; '
-                                   b'mkdir /tmp/runtime; mount -t squashfs -o ro /dev/vdb /tmp/runtime; '
-                                   b'/usr/bin/ip link set lo up; /usr/bin/python3 -I /tmp/runtime/' +
-                                   {'agent_tools': b'guest-mail-tools-smoke.py\n', 'agent_mcp': b'guest-mail-mcp-smoke.py\n',
-                                    'agent_pi_mcp': b'guest-pi-mail-mcp-smoke.py\n',
-                                    'agent_full': b'guest_agent.py\n',
-                                    'agent': b'guest-agent-smoke.py\n'}[profile])
-                    else:
-                        command = b'mount -t proc proc /proc; mount -t sysfs sysfs /sys; echo GMAIL_BACKEND_SYNTHETIC_HELLO; cat /proc/net/dev; cat /proc/mounts\n'
+                    command = guest_command(profile)
                     proc.stdin.write(command)
                     proc.stdin.flush()
                     sent = True
