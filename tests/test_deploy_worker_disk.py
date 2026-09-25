@@ -35,7 +35,7 @@ class FakeMachine:
 
     def __init__(self, proc: Path, *, healthy=True):
         self.proc, self.healthy, self.calls, self.active = proc, healthy, [], set()
-        self.stop_works = True
+        self.stop_works, self.manager_up = True, False
         self.chain = [{'filename': 'worker.qcow2', 'backing-filename': 'base.qcow2'}, {'filename': 'base.qcow2'}]
 
     def spawn(self, pid: int, argv, exe=None):
@@ -57,6 +57,17 @@ class FakeMachine:
     def boot(self, unit: str, vm_dir: str):
         self.spawn(max(self.pids(), default=100) + 1, worker_disk.qemu_argv(Path(vm_dir), '127.0.0.1', 22093))
         self.active.add(unit)
+        self.manager_up = False  # disabled in the guest: nothing starts it at boot
+
+    def guest(self, command: str) -> int:
+        """A guest whose manager runs only once something starts it."""
+        if not (self.healthy and self.pids()):
+            return 255
+        if 'systemctl restart mgr.service clock.service' in command:
+            self.manager_up = True
+        if 'is-active' in command:
+            return 0 if self.manager_up else 3
+        return 0
 
     def run(self, args, check=True, **kw):
         args = [str(a) for a in args]
@@ -69,7 +80,7 @@ class FakeMachine:
             self.active.clear()
             return 255  # the connection drops as the guest powers off
         if args[0] == 'ssh':
-            return 0 if self.healthy and self.pids() else 1
+            return self.guest(args[-1])
         if args[:3] == ['systemctl', '--user', 'start']:
             self.boot(args[3], self.unit_vm_dir())
         if args[:2] == ['systemctl', '--user'] and '--now' in args and self.stop_works:
@@ -365,6 +376,56 @@ def test_move_copies_verifies_switches_and_leaves_the_source_alone(world):
     assert [s[0] if s[0] != 'systemctl' else ' '.join(s[2:4]) for s in steps] == [
         'ssh', 'cp', 'daemon-reload', 'enable gmail-production-worker.service', 'start gmail-production-worker.service']
     assert not mover.land_lock.exists() and leftovers(mover) == []
+
+
+def guest_commands(machine):
+    return [c[-1] for c in machine.calls if c[0] == 'ssh']
+
+
+def test_move_starts_the_guest_services_after_boot(world):
+    mover, machine, _, _, _ = world
+    mover.move(None, dry_run=False)
+    commands = guest_commands(machine)
+    starts = [i for i, c in enumerate(commands) if 'systemctl restart mgr.service clock.service' in c]
+    assert len(starts) == 1 and 'is-active' in commands[-1] and starts[0] < len(commands) - 1
+    assert machine.manager_up
+
+
+def fail_first_install(mover, monkeypatch):
+    real = mover.install_unit
+    calls = {'n': 0}
+
+    def install_unit():
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError('synthetic failure after the copy')
+        real()
+    monkeypatch.setattr(mover, 'install_unit', install_unit)
+
+
+def test_the_fallback_starts_the_guest_services_too(world, monkeypatch):
+    mover, machine, source, _, _ = world
+    fail_first_install(mover, monkeypatch)
+    with pytest.raises(RuntimeError, match=f'back on {source}: yes'):
+        mover.move(None, dry_run=False)
+    assert worker_disk.disk_dir(worker_disk.find_vm(mover.proc_root)[1]) == source and machine.manager_up
+
+
+def test_a_rerun_after_the_fallback_copies_again_and_boots_the_fresh_copy(world, monkeypatch):
+    mover, machine, source, _, _ = world
+    fail_first_install(mover, monkeypatch)
+    with pytest.raises(RuntimeError, match='yes'):
+        mover.move(None, dry_run=False)
+    first = json.loads((mover.vm_dir / '.moved-from').read_text())
+    with open(source / 'worker.qcow2', 'r+b') as disk:  # the legacy VM writes on
+        disk.write(b'newer guest state')
+    mover.move(None, dry_run=False)
+    marker = json.loads((mover.vm_dir / '.moved-from').read_text())
+    assert marker['sourceFingerprint'] != first['sourceFingerprint']
+    assert (mover.vm_dir / 'worker.qcow2').read_bytes()[:17] == b'newer guest state'
+    assert worker_disk.verify_copy(source, mover.vm_dir, ignore=frozenset({'.moved-from', 'boot.sh'})) == []
+    assert worker_disk.disk_dir(worker_disk.find_vm(mover.proc_root)[1]) == mover.vm_dir
+    assert leftovers(mover) == [] and machine.manager_up
 
 
 def test_move_is_idempotent(world, capsys):

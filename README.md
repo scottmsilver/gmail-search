@@ -310,7 +310,9 @@ src/gmail_search/
     routes.py       — /api/auth/* (login, callback, me, logout, connect-gmail)
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
   deploy/           — The invited-service deployer (scripts/deploy.sh; see Deploying):
-                       plan, package, qualify, preflight, activate, postcheck
+                       plan, package, qualify, preflight, activate, postcheck.
+                       one_checkout.py + checkout_checks.py: scripts/one-checkout.sh,
+                       which moves the production checkout onto main and back
     worker_disk.py  — Moves the worker VM's disk to worker.vm_dir and runs it from a unit
                        (scripts/move-worker-disk.sh; see docs/worker-vm-move.md)
   store/
@@ -392,6 +394,8 @@ deploy/
 scripts/
   serve_watchdog.sh — Probes /healthz?ready=1 (includes the search canary)
                        and restarts serve after consecutive failures
+  one-checkout.sh   — check | switch | rollback [--dry-run]: moves the production
+                       checkout onto main in one window (docs/one-checkout-runbook.md)
 ```
 
 The MCP server (`uv run python -m gmail_search.agents.mcp_tools_server`, port 7878) is
@@ -620,7 +624,8 @@ Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB
 ## Working through GitHub issues
 
 Changes go through issues with the issue loop (`.claude/commands/issue-loop.md`, ported from wezterm-web): run
-`/loop /issue-loop` in Claude Code from a checkout of `main`. Each tick triages the owner's open issues, dispatches up to
+`/loop /issue-loop` in Claude Code from a checkout of `main` (today the `~/development/gmail-search-main` worktree;
+`~/development/gmail-search` itself once it has moved onto `main`, see `docs/one-checkout-runbook.md`). Each tick triages the owner's open issues, dispatches up to
 four issue agents (each in its own `~/.wt/issue-<n>-<slug>` worktree) that post a plan, fix test-first, run the audit
 (pip-audit plus codex, or agy) and stop at "ready" with the change uncommitted. Nothing lands until the owner comments
 exactly `land` on the issue (or says so in the session); then `.claude/issue-loop/land.sh <n>` commits, merges

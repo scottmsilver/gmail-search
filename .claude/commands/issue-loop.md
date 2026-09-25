@@ -18,6 +18,14 @@ engineering. Keep this context small: it has to survive many hours of ticks.
 
 Arguments: `$ARGUMENTS` (if non-empty, only these issue numbers are in scope).
 
+**Where it runs.** From a checkout of `main`. Loop state (the ledger, the
+landing lock, deploy records) lives in `.runtime/` of the checkout that holds
+`.git`, `~/development/gmail-search`, whichever checkout the loop runs from
+(`lib.sh`'s `loop_main_checkout`). Until #57's switch
+(`docs/one-checkout-runbook.md`) that checkout is on an old branch, so the loop
+runs from the `~/development/gmail-search-main` worktree; after it, from
+`~/development/gmail-search` itself.
+
 ## What invoking this grants
 
 The user invoking `/issue-loop` authorizes, for the run of this loop only:
@@ -315,8 +323,9 @@ Spawn with `name: "issue-<n>"`, the model from the table, background. Fill in
 > `git worktree add ~/.wt/issue-<n>-<slug> -b fix/issue-<n>-<slug> origin/main`.
 > In it: `uv sync --locked --extra dev` (the worktree's own `.venv`), and if the
 > change touches `web/`, `ln -s ~/development/gmail-search/web/node_modules
-> web/node_modules`. Work only in that worktree. Never touch the main checkout
-> (it has other sessions' uncommitted work) or another agent's worktree.
+> web/node_modules`. Work only in that worktree. Never touch the production
+> checkout `~/development/gmail-search` (every owner daemon runs from it, and it
+> may hold other sessions' uncommitted work) or another agent's worktree.
 >
 > **Hard rules.**
 > - Never `git stash` (the stack is shared across worktrees). Stage by

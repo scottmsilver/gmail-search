@@ -83,8 +83,10 @@ It then prints the steps, the new `boot.sh` and the unit. Read them.
       `worker-vm`. A copy that fails the check is removed. The tool never deletes a directory it did not just create;
       if a crash leaves an older `worker-vm.partial-*` behind, delete it by hand;
    4. writes `worker-vm/boot.sh` and the unit, then runs `daemon-reload` and `enable`;
-   5. starts the unit and waits up to 300 s for three things: the unit active, SSH answering with the pinned host key,
-      and the guest's `gmail-full-agent-manager.service` active.
+   5. starts the unit and waits up to 300 s for the unit to be active and SSH to answer with the pinned host key. It
+      then starts the guest services the way the deployer does (`sudo -n systemctl restart gmail-full-agent-manager.service
+      gmail-worker-clock-sync.service`; the manager is disabled in the guest, so nothing starts it at boot, #64) and
+      waits for the manager to be active. The fallback below does the same.
 
    If anything after the stop fails, the tool stops the unit and boots the untouched source again as the transient
    unit `gmail-production-worker-legacy`. It then says whether the source came back. It never starts a second VM
@@ -104,7 +106,9 @@ Re-running `move` is safe at any point:
 - If the tool stopped after the copy was made and nothing in the source has changed since (every entry's mode, size
   and mtime), it checks the kept copy against the source again (sha256 included) before booting it. A copy that no
   longer matches is never booted: the source comes back up, and you decide.
-- If the source has run again since the copy (it was restored), it makes a fresh copy.
+- If the source has run again since the copy (for example, the fallback booted it), it makes a fresh copy. The older copy
+  in `worker-vm/` is renamed aside only after the fresh one verifies, then removed, and the fresh copy is the one that
+  boots.
 
 ## Rollback (inside the window only)
 
@@ -125,6 +129,9 @@ roll back after a deploy has touched the worker. Fix forward instead.
   `rm -rf ~/development/gmail-search/worktrees/full-agents-20260915/data/production-worker`.
 - The copy includes `keys/` and the `*-authorized-keys` files. The directory stays mode 0700.
   `~/.local/share/gmail-search` is 0775, but its parent `~/.local/share` is 0700.
+- **After a host reboot**, the unit brings the VM back, but the guest manager stays down until something starts it
+  (it is disabled in the guest). Until #65 is resolved, run `ssh … sudo -n systemctl restart
+  gmail-full-agent-manager.service gmail-worker-clock-sync.service`, or deploy.
 - Stopping the unit powers the guest off over SSH. If that fails, systemd sends qemu SIGTERM after 180 s.
 - A new machine (#25) needs the `worker-vm/` directory, the `vm_dir` line above, and
   `scripts/move-worker-disk.sh` (or the unit it renders).
