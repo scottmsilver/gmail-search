@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -34,6 +35,7 @@ from typing import Callable
 from . import lock
 from .config import DEFAULT_PATH, DeployConfig, load_config
 from .host import Host
+from .phases import worker_services_start
 from .runner import CommandFailed, Runner
 
 VM_NAME = 'gmail-production-worker'
@@ -389,18 +391,26 @@ class Mover:
         self.systemctl('daemon-reload')
         self.systemctl('enable', UNIT)
 
-    def wait_worker(self, unit: str) -> None:
-        """The unit active, the pinned SSH host key answering, the guest manager active."""
-        manager, waited = self.host.config.services['manager'], 0
-        while True:
-            if self.host.unit_active(unit) and self.host.worker_ssh(
-                    f'sudo -n systemctl is-active --quiet {manager}', check=False) == 0:
-                say(f'healthy: {unit} active, worker SSH and {manager} answer')
-                return
+    def wait_until(self, what: str, ready: Callable[[], bool]) -> None:
+        waited = 0
+        while not ready():
             if waited >= self.health_seconds:
-                raise RuntimeError(f'worker not healthy {waited}s after starting {unit}')
+                raise RuntimeError(f'worker not healthy: no {what} {waited}s after starting it')
             self.sleep(5)
             waited += 5
+
+    def guest_answers(self, command: str) -> bool:
+        return self.host.worker_ssh(command, check=False) == 0
+
+    def wait_worker(self, unit: str) -> None:
+        """The unit active and the pinned SSH host key answering; then the guest
+        services started as the deployer starts them (the guest does not start
+        them at boot); then the manager active."""
+        manager = shlex.quote(self.host.config.services['manager'])
+        self.wait_until(f'{unit} with worker SSH', lambda: self.host.unit_active(unit) and self.guest_answers('true'))
+        self.host.worker_ssh('sudo -n ' + worker_services_start(self.host.config))
+        self.wait_until(f'active {manager}', lambda: self.guest_answers(f'sudo -n systemctl is-active --quiet {manager}'))
+        say(f'healthy: {unit} active, worker SSH answers, {manager} started and active')
 
     def start_source(self, source: Path) -> None:
         self.refuse_second_vm()
@@ -461,9 +471,11 @@ class Mover:
                  if running else 'the VM is not running: nothing to stop',
                  f'{self.vm_dir} already holds a verified copy: skip the copy' if copied else
                  f'copy {source} ({allocated_bytes(source)} bytes allocated) to a new {self.vm_dir.name}.partial-* '
-                 'directory, verify size, mode, sparseness and sha256 of every file, rename into place',
+                 'directory, verify size, mode, sparseness and sha256 of every file, rename into place'
+                 + (f' (the older copy at {self.vm_dir} is set aside, then removed)' if self.vm_dir.exists() else ''),
                  f'write {self.vm_dir}/boot.sh and {self.unit_path()}, daemon-reload, enable {UNIT}',
-                 f'start {UNIT}, wait up to {self.health_seconds}s for SSH and the guest manager',
+                 f'start {UNIT}; once SSH answers, `{worker_services_start(self.host.config)}` in the guest '
+                 f'(the deployer\'s command); wait for the manager (each wait up to {self.health_seconds}s)',
                  f'on any failure after the stop: stop {UNIT}, boot {source} again as {LEGACY_UNIT}']
         say(f'dry run: source {source}, target {self.vm_dir}; read-only checks passed')
         say('argv check: rendered command line equals the running one with only the directory changed'
