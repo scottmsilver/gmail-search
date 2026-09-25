@@ -4,6 +4,7 @@
 //   * multi-tenant off (single-pool legacy): gear trigger → dropdown
 //     with just Settings. Same affordance shape so the UI doesn't
 //     have a different right-side element across modes.
+//   * invited/public web: a "What's new" item after Settings (#73).
 
 "use client";
 
@@ -11,6 +12,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/components/AuthContext";
+import { WhatsNewDialog, useWhatsNew } from "@/components/WhatsNew";
 import { cn } from "@/lib/utils";
 
 const GearIcon = () => (
@@ -21,8 +23,9 @@ const GearIcon = () => (
 );
 
 export function AvatarMenu() {
-  const { multiTenant, user, signOut } = useAuth();
+  const { multiTenant, user, signOut, publicMode } = useAuth();
   const [open, setOpen] = useState(false);
+  const whatsNew = useWhatsNew(!!publicMode);
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Click-outside + Escape close. Native <details> would do this for
@@ -114,6 +117,21 @@ export function AvatarMenu() {
             >
               Settings
             </Link>
+            {publicMode ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  whatsNew.show();
+                }}
+                className={cn(
+                  "w-full rounded px-2 py-1.5 text-left text-xs",
+                  "transition hover:bg-accent hover:text-accent-foreground",
+                )}
+              >
+                What&apos;s new
+              </button>
+            ) : null}
             {isSignedIn && user?.is_admin ? (
               <Link
                 href="/admin"
@@ -171,6 +189,7 @@ export function AvatarMenu() {
           </div>
         </div>
       ) : null}
+      {publicMode ? <WhatsNewDialog doc={whatsNew.doc} open={whatsNew.open} onClose={whatsNew.close} /> : null}
     </div>
   );
 }

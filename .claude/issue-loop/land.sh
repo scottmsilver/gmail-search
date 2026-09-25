@@ -361,6 +361,22 @@ stage_worktree() {
   fi
 }
 
+# The issue's labels, minus the loop's own, as a commit trailer. The deployer's
+# "What's new" notes leave out documentation-labelled issues without asking
+# GitHub at deploy time (#73). Best effort: no labels or a failed lookup gives
+# no trailer (the failure is warned), and the deployer then shows the issue.
+# Commas and line breaks inside a label name become spaces, so a label cannot
+# pose as two labels or add a line to the message.
+labels_trailer() {
+  local labels
+  if ! labels=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q \
+      '[.labels[].name | select(startswith("loop:") | not) | gsub("[,\r\n]"; " ")] | join(", ")'); then
+    loop_warn "#$ISSUE: could not read its labels; no Issue-Labels trailer"
+    labels=""
+  fi
+  [ -z "$labels" ] || printf 'Issue-Labels: %s\n' "$labels"
+}
+
 prepare_one() {
   local msg
   step stage "staging the agent's work by explicit path"
@@ -371,6 +387,7 @@ prepare_one() {
 
 Fixes #$ISSUE
 
+$(labels_trailer)
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   if [ -n "$SESSION_URL" ]; then
     msg="$msg
