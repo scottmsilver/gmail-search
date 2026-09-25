@@ -26,6 +26,10 @@ _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
     # NAME=value where NAME ends with KEY/TOKEN/SECRET/PASSWORD (redact the value only).
     re.compile(r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))=(\S+)"),
+    # URL userinfo — the password half of scheme://user:pass@host. Egress-proxy
+    # URLs and Postgres DSNs both carry credentials this way, and both show up
+    # verbatim in connection-error messages we persist.
+    re.compile(r"://[^/\s:@]+:([^/\s@]+)@"),
 )
 
 

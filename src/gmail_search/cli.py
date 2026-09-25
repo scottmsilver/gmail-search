@@ -611,6 +611,53 @@ def reindex(ctx, loop, quantum, min_new, max_age, email):
         _time.sleep(quantum)
 
 
+_CRAWL_BACKOFF_CAP_S = 300
+# Enough doublings to reach the cap from any sane interval, with no more.
+_CRAWL_BACKOFF_MAX_DOUBLINGS = 32
+
+
+def _record_crawl_failure(progress, exc: Exception) -> None:
+    """Publish a crawl failure to `job_progress` AS a failure.
+
+    Two hazards this navigates. `progress.heartbeat()` used to be called here
+    and bumped the same `updated_at` the supervisor reads for staleness, so a
+    permanently broken daemon looked alive and was never respawned while it
+    did no work for four days. And `detail` renders in the Settings UI, while
+    a crawl exception can quote the egress-proxy URL, a Postgres DSN, or a
+    crawled URL carrying a magic-link token — so the message is redacted
+    before it is stored. The write is best-effort: Postgres being down is one
+    of the failures this path reports, and it must not skip the backoff.
+    """
+    from gmail_search.agents.pi_protocol import redact_secrets
+
+    try:
+        progress.finish("error", f"{type(exc).__name__}: {redact_secrets(str(exc))[:120]}")
+    except Exception:  # noqa: BLE001
+        logger.debug("could not record crawl failure in job_progress", exc_info=True)
+
+
+def _crawl_backoff_s(consecutive_failures: int, interval: int) -> float:
+    """Geometric backoff after a failed crawl batch, capped at 5 minutes.
+
+    A crawl crash is usually permanent until a human intervenes, and the
+    happy-path `interval` is 2s. Retrying a doomed call that fast is what
+    produced 153,985 log lines and 465 MB of crawl.log in four days — and,
+    with a per-attempt fd leak, exhausted the process's file descriptors in
+    19 minutes.
+    """
+    # Floors matter as much as the cap: `--interval 0` would otherwise make a
+    # failing loop spin with no sleep at all, and an interval above the cap
+    # would make it retry FASTER when broken than when healthy.
+    # The exponent is clamped, not just the result: at the 300s cap, 1025
+    # consecutive failures is only ~85h of continuous breakage — less than the
+    # 93h outage this function exists for — and `float(2 ** 1024)` raises
+    # OverflowError, which would crash the daemon from inside its own error
+    # handler and skip the very sleep being computed here.
+    step = min(max(1, consecutive_failures), _CRAWL_BACKOFF_MAX_DOUBLINGS)
+    base = max(1.0, float(interval))
+    return min(base * (2 ** (step - 1)), max(base, _CRAWL_BACKOFF_CAP_S))
+
+
 @main.command(help="Crawl pending URL stubs (fast/slow lane). --loop runs as a daemon.")
 @common_options
 @click.option("--loop", is_flag=True, help="Run continuously as a daemon.")
@@ -657,6 +704,11 @@ def crawl(ctx, loop, interval, concurrency, limit):
     click.echo(
         f"crawl daemon: batches of {limit}, HTTP concurrency {concurrency}, memory-aware browser pool, every {interval}s"
     )
+    # A crash here is usually environmental and permanent (a Playwright
+    # upgrade with no matching browser build, Postgres down). Retrying that
+    # every `interval` seconds is what turned one bad deploy into a four-day
+    # outage on 2026-09-15, so failures back off and stop claiming health.
+    consecutive_failures = 0
     while True:
         try:
             # Continuous worker-pool (run_continuous): keeps the HTTP pool
@@ -667,6 +719,7 @@ def crawl(ctx, loop, interval, concurrency, limit):
             r = _asyncio.run(
                 _crawl_run_continuous(db_path, http_concurrency=concurrency, browser_cap=browser_cap, target=limit)
             )
+            consecutive_failures = 0
             progress.update(
                 "crawl" if r["total"] else "idle",
                 r["done"],
@@ -674,8 +727,11 @@ def crawl(ctx, loop, interval, concurrency, limit):
                 f"{r['done']}/{r['total']} fetched, {r['failed']} failed",
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"crawl loop error: {e}")
-            progress.heartbeat()
+            consecutive_failures += 1
+            logger.warning(f"crawl loop error (attempt {consecutive_failures}): {e}")
+            _record_crawl_failure(progress, e)
+            _time.sleep(_crawl_backoff_s(consecutive_failures, interval))
+            continue
         _time.sleep(interval)
 
 
