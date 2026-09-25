@@ -34,7 +34,10 @@ class State:
     def set(self, **patch):
         self.data.update(patch)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=2) + '\n')
+        # Written aside and renamed, so a crash mid-write leaves the old record.
+        scratch = self.path.with_name(self.path.name + '.tmp')
+        scratch.write_text(json.dumps(self.data, indent=2) + '\n')
+        os.replace(scratch, self.path)
 
     def need(self, *keys):
         missing = [k for k in keys if k not in self.data]
