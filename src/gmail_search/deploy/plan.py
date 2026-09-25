@@ -26,7 +26,9 @@ IMAGE_INPUTS = (
     'deploy/public/worker/warm_jiti_cache.py', 'deploy/public/worker/pi-mcp-runtime-inputs.json',
     'deploy/pi/pi-pkgs/package.json', 'deploy/pi/pi-pkgs/package-lock.json',
 )
-NOT_SHIPPED = re.compile(r'^(docs/|tests/|scripts/|\.claude/|\.github/|\.githooks/|web/scripts/)|\.md$|^\.gitignore$')
+NOT_SHIPPED = re.compile(r'^(docs/|tests/|scripts/|\.claude/|\.github/|\.githooks/|web/scripts/)|\.md$|^\.gitignore$'
+                         # Example configs and test-only probes: nothing a release or the worker reads.
+                         r'|^deploy/examples/|^deploy/[^/]+\.example\.json$|^deploy/public/probe_[^/]+\.py$')
 # The controller runs from the main checkout's venv: a dependency change needs
 # `uv sync` there, which is the owner's step, not the deployer's.
 DEPENDENCIES = {'pyproject.toml', 'uv.lock', 'web/package.json', 'web/package-lock.json', 'web/bun.lock'}
