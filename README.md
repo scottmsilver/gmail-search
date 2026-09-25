@@ -309,6 +309,8 @@ src/gmail_search/
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
   deploy/           — The invited-service deployer (scripts/deploy.sh; see Deploying):
                        plan, package, qualify, preflight, activate, postcheck
+    worker_disk.py  — Moves the worker VM's disk to worker.vm_dir and runs it from a unit
+                       (scripts/move-worker-disk.sh; see docs/worker-vm-move.md)
   store/
     db.py           — psycopg connection (DB_DSN), schema apply, TABLE_DOCS
     schema_profile.py — Which mailbox shape this process talks to; bound to
@@ -587,6 +589,14 @@ files (the list in `prepare-full-agent-runtime.sh`) and workflow agents, with th
 timestamps. The built image must equal `AGENT_FULL_PIN` in `firecracker_backend.py`: a change to guest files runs
 `scripts/deploy.sh --update-pin` (writes the pin, uncommitted) and commits it with the change; a deploy never writes
 the pin.
+
+**Worker VM host files.** The worker VM (`qemu -name gmail-production-worker`) boots from one directory holding its
+disk, seed image and `boot.sh`. Its home is `worker.vm_dir` in `deploy.json` (example:
+`~/.local/share/gmail-search/worker-vm`), run by the user unit `gmail-production-worker.service`, whose `ExecStop` powers
+the guest off over the admin SSH key before systemd stops qemu. `scripts/move-worker-disk.sh [--dry-run]
+move|rollback|status` moves it there from wherever it runs now. The move holds the landing lock, refuses while a run
+is active, and copies sparse with a size, mode and sha256 check before switching. It never modifies the source. The
+owner picks the window: `docs/worker-vm-move.md`.
 
 ## Logging & observability
 

@@ -83,9 +83,9 @@ class Host:
         return ['-i', str(w.key), '-o', f'UserKnownHostsFile={w.known_hosts}', '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', port_flag, str(w.port)]
 
-    def worker_ssh(self, command: str, *, log: Path | None = None) -> None:
+    def worker_ssh(self, command: str, *, log: Path | None = None, check: bool = True) -> int:
         w = self.config.worker
-        self.runner.run(['ssh', *self._ssh_options('-p'), f'{w.user}@{w.host}', command], log=log)
+        return self.runner.run(['ssh', *self._ssh_options('-p'), f'{w.user}@{w.host}', command], log=log, check=check)
 
     def worker_upload(self, files: list[Path], remote_dir: str) -> None:
         w = self.config.worker

@@ -19,6 +19,7 @@
     "key": "~/.config/gmail-search/worker/admin",
     "known_hosts": "~/.config/gmail-search/worker/known_hosts",
     "opt_dir": "/opt/gmail-worker",
-    "image_path": "/var/lib/gmail-worker/images/agent-full.squashfs"
+    "image_path": "/var/lib/gmail-worker/images/agent-full.squashfs",
+    "vm_dir": "~/.local/share/gmail-search/worker-vm"
   }
 }
