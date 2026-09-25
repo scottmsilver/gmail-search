@@ -36,3 +36,4 @@ worktrees/
 
 # Symlink to the main checkout's install; machine-specific.
 web/node_modules
+.runtime/
