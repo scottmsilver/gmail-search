@@ -129,7 +129,11 @@ const AssistantMessage = () => (
 type StopControls = {onStop?: () => Promise<void>; stopping?: boolean; stopError?: string | null};
 
 const Composer = ({onStop, stopping, stopError}: StopControls) => (
-  <ComposerPrimitive.Root className="px-4 sm:px-6 md:px-8 pb-3 pt-1 bg-white">
+  // `pb-[calc(...+env(safe-area-inset-bottom))]`: layout.tsx's `viewportFit:
+  // "cover"` lets the page draw under the iPhone home-indicator area, so the
+  // composer needs its own bottom inset or its controls sit behind it.
+  // `env()` is 0 on devices without a safe area, so this is a no-op there.
+  <ComposerPrimitive.Root className="px-4 sm:px-6 md:px-8 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-1 bg-white">
     <CorpusStatus />
     {/* Below sm the model-picker label ("3.1 Flash Lite · high ▾") eats
         ~140px of a 390px viewport and squeezes the input to two cramped
