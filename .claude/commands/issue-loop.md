@@ -48,8 +48,9 @@ branches other than an issue's own merged branch, anything that writes to the
 **live database** (Postgres on port 5544: schema changes, migrations,
 backfills, `ALTER`/`GRANT` on it), changing `~/.config/gmail-search/*`
 (credentials, budgets, runtime config), restarting the non-invited daemons
-(`gmail-search-serve`, `-mcp`, `-supervise`), or any action on issues the loop
-skips. Those still need the user.
+(`gmail-search-serve`, `-mcp`, `-supervise`, `-web`) by any path other than
+`scripts/deploy.sh`'s activate and rollback (#52), or any action on issues the
+loop skips. Those still need the user.
 
 ### What counts as the owner's go-ahead
 
@@ -522,7 +523,7 @@ the commit message and the PR body, and touches nothing.
 `scripts/deploy.sh [--dry-run] [--name <word>] [--target <ref>] [--phase <name>] [--release <name>]`
 
 The deployer is repository code (`src/gmail_search/deploy/`, tests in
-`tests/test_deploy_*.py`); the README's "Deploying (invited service)" section is
+`tests/test_deploy_*.py`); the README's "Deploying" section is
 its full description. Run it yourself, in the foreground, after a landing and
 after nothing else. `--name` is a short word for the change; the release is
 `<word>-<date>`.
@@ -534,8 +535,11 @@ against the running release's commit; classify controller, web, image, worker),
 under the landing lock, ruff, web checks), `preflight` (refuses a dirty tree, a
 running release that changed, or **any active user run**), `activate` (swap the
 release symlinks, restart the invited controller and public web, and the worker
-when its files changed; any failure restores the previous release and says
-whether that worked), `postcheck` (health ports and public web routes).
+when its files changed; with the owner track, also swap `owner-current` and
+restart serve, mcp, the owner web and supervise in order; any failure restores
+the previous release on both tracks and says whether that worked), `postcheck`
+(health ports, public web routes, and the owner units' probes, MCP's
+unauthenticated 401 among them).
 
 What it refuses, and you hand to the owner rather than working around:
 
@@ -543,6 +547,10 @@ What it refuses, and you hand to the owner rather than working around:
   re-run from `--phase preflight`; never stop a user's run to deploy.
 - **Dependency changes** (`pyproject.toml`, `uv.lock`, web lockfiles): the
   services' venv is synced by hand.
+- **An unreviewed startup schema.** Serve runs `pg_schema.sql` on the live
+  database at boot, so the owner track ships only the blob the target's own
+  `REVIEWED_SCHEMA_BLOB` names (`tests/test_deploy_owner.py` holds `main` to
+  it). Changing either is the owner's review against the live catalog.
 - **An image whose hash is not the committed pin.** A change to guest files
   must carry its pin (`scripts/deploy.sh --update-pin`, committed with the
   change); a deploy never writes the pin.

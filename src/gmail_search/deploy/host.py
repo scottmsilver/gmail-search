@@ -9,7 +9,7 @@ import socket
 import sqlite3
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from .config import DeployConfig
@@ -54,6 +54,9 @@ class Host:
     active_runs: Callable[[Path], int] = _active_runs
     sleep: Callable[[float], None] = time.sleep
     health_seconds: int = HEALTH_SECONDS
+    # The owner units' owner_units.Machine, made on first use (phases.owner_machine);
+    # tests put a fake here.
+    owner_units: Any = None
 
     # ── local services ───────────────────────────────────────────────
     def restart(self, *units: str) -> None:

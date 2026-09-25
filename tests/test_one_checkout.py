@@ -101,15 +101,6 @@ def test_allow_unmerged_refuses_short_shas():
 
 
 # ── a throwaway production checkout ─────────────────────────────────
-@pytest.fixture(autouse=True)
-def _no_inherited_git_env(monkeypatch):
-    """A git hook (pre-push runs this suite) exports GIT_DIR, GIT_INDEX_FILE
-    and friends; inherited, they point every git call below at the real
-    repository instead of the throwaway one."""
-    for name in [n for n in oc.os.environ if n.startswith('GIT_')]:
-        monkeypatch.delenv(name)
-
-
 def git(cwd, *args) -> str:
     return subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
 
