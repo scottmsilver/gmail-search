@@ -6,8 +6,11 @@
 # only around its own suite. Both write who they are and a pid, so a lock left
 # behind by a dead process can be told apart from one that is still working.
 
-# Absolute path of the MAIN checkout, even when called from a linked worktree:
-# the lock, the ledger and the deploy log are shared state and live there.
+# Absolute path of the checkout that holds .git (~/development/gmail-search, the
+# one production runs from), even when called from a linked worktree: the lock,
+# the ledger and the deploy log are shared state and live there. It is found
+# from the git common dir, not from its branch, so it is the same before and
+# after that checkout moves onto `main` (#57).
 loop_main_checkout() {
   local from=${1:-.} common
   common=$(git -C "$from" rev-parse --path-format=absolute --git-common-dir)
