@@ -78,6 +78,55 @@ test('legacy deep:false requests still run deep analysis and preserve backend/mo
     assert.equal(body.model,'openrouter/meta/muse-spark-1.3');
   } finally {globalThis.fetch = originalFetch;}
 });
+// issue #74: the bottom-of-bubble footer must always show elapsed time
+// when the backend reports it, and only show a $ figure when at least
+// one `cost` event actually arrived — the bounded public runtime never
+// emits one, so a wrong "$0" would be worse than no number.
+const sseWithCostAndElapsed = (id) => [
+  'event: session', `data: {"session_id":"${id}"}`, '',
+  'event: cost', 'data: {"payload":{"model":"gemini-2.5-flash","input_tokens":100,"output_tokens":20,"usd":0.001}}', '',
+  'event: cost', 'data: {"payload":{"model":"gemini-2.5-pro","input_tokens":200,"output_tokens":80,"usd":0.01}}', '',
+  'event: final', `data: {"payload":{"text":"Answer ${id}","elapsed_ms":5500}}`, '', '',
+].join('\n');
+test('turn-cost footer sums cost events and carries elapsed_ms when cost is known', async () => {
+  globalThis.fetch = async url => String(url).endsWith('/api/auth/me') ? identity() : new Response(sseWithCostAndElapsed('known'));
+  try {
+    const response = await POST(request({messages}));
+    const output = await response.text();
+    const frames = output.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+    const turnCost = frames.find(frame => frame.type === 'data-turn-cost').data;
+    assert.equal(turnCost.cost_known, true);
+    assert.equal(turnCost.elapsed_ms, 5500);
+    assert.equal(turnCost.input_tokens, 300);
+    assert.equal(turnCost.output_tokens, 100);
+    assert.ok(Math.abs(turnCost.usd - 0.011) < 1e-9);
+  } finally { globalThis.fetch = originalFetch; }
+});
+const sseElapsedOnly = (id) => [
+  'event: session', `data: {"session_id":"${id}"}`, '',
+  'event: final', `data: {"payload":{"text":"Answer ${id}","elapsed_ms":900}}`, '', '',
+].join('\n');
+test('turn-cost footer shows elapsed time with cost_known=false when no cost event arrives', async () => {
+  // Shape the bounded public runtime produces: no `cost` SSE at all.
+  globalThis.fetch = async url => String(url).endsWith('/api/auth/me') ? identity() : new Response(sseElapsedOnly('unknown'));
+  try {
+    const response = await POST(request({messages}));
+    const output = await response.text();
+    const frames = output.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+    const turnCost = frames.find(frame => frame.type === 'data-turn-cost').data;
+    assert.equal(turnCost.cost_known, false);
+    assert.equal(turnCost.elapsed_ms, 900);
+  } finally { globalThis.fetch = originalFetch; }
+});
+test('no turn-cost footer when neither cost nor elapsed_ms is present', async () => {
+  globalThis.fetch = async url => String(url).endsWith('/api/auth/me') ? identity() : new Response(sse('bare'));
+  try {
+    const response = await POST(request({messages}));
+    const output = await response.text();
+    const frames = output.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+    assert.ok(!frames.some(frame => frame.type === 'data-turn-cost'));
+  } finally { globalThis.fetch = originalFetch; }
+});
 test('battle invokes two isolated deep runs and saves both answers once after initial save', async () => {
   const calls = [];
   globalThis.fetch = async (url, init) => {

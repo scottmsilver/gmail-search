@@ -86,6 +86,26 @@ def test_writer_and_final_carry_same_text():
     assert all(e["payload"] == {"text": "answer"} for e in conn.events)
 
 
+def test_writer_and_final_omits_elapsed_ms_when_not_given():
+    """No regression for callers that haven't been updated to pass
+    elapsed_ms — the final payload stays exactly {"text": ...}."""
+    conn = _FakeConn()
+    deep_events.emit_writer_and_final(conn, "s1", "answer", elapsed_ms=None)
+    final_event = conn.events[1]
+    assert final_event["payload"] == {"text": "answer"}
+
+
+def test_writer_and_final_puts_elapsed_ms_on_final_only():
+    """issue #74: the UI's cost/time footer reads elapsed_ms off the
+    `final` event. `draft` (the writer panel's copy of the same text)
+    doesn't need it — only `final` carries it."""
+    conn = _FakeConn()
+    deep_events.emit_writer_and_final(conn, "s1", "answer", elapsed_ms=1234)
+    draft_event, final_event = conn.events
+    assert draft_event["payload"] == {"text": "answer"}
+    assert final_event["payload"] == {"text": "answer", "elapsed_ms": 1234}
+
+
 def test_error_event_uses_agent_name():
     conn = _FakeConn()
     deep_events.emit_error(conn, "s1", RuntimeError("boom"), agent_name="pi")

@@ -44,9 +44,10 @@ def harness(monkeypatch):
     monkeypatch.setattr(rp, 'emit_plan_event', lambda *a, **k: events.append('plan'))
     monkeypatch.setattr(rp, 'append_event', lambda *a, **k: events.append(k['kind']))
     monkeypatch.setattr(rp, 'emit_retriever_events', lambda *a, **k: events.append('evidence'))
-    monkeypatch.setattr(rp, 'emit_writer_and_final', lambda *a: events.append('final'))
+    monkeypatch.setattr(rp, 'emit_writer_and_final', lambda *a, **k: events.append('final'))
     monkeypatch.setattr(rp, 'emit_error', lambda *a, **k: events.append(str(a[2])))
     monkeypatch.setattr(rp, 'finalize_session', lambda *a, **k: final.append(k))
+    monkeypatch.setattr(rp, 'session_elapsed_ms', lambda *a, **k: 0)
     script = []
     async def generate(**kwargs):
         requests.append(kwargs)
@@ -76,6 +77,42 @@ def test_manual_loop(harness, monkeypatch):
     assert final == [{'status': 'done', 'final_answer': 'Found [abc].'}]
     assert requests[0]['config'].automatic_function_calling.disable is True
     assert 'final' in events and 'client closed' in events and events[-1] == 'closed'
+
+
+def test_elapsed_ms_reaches_final_event_before_finalize_commits_done(harness, monkeypatch):
+    """`session_elapsed_ms`'s value must reach `emit_writer_and_final` —
+    and `finalize_session` (which commits status='done') must still run
+    LAST, exactly as before this feature. Reversing that order is a
+    replay race: `/api/agent/analyze/<id>/events` treats status='done'
+    as "stream complete, stop polling," so a reconnecting client could
+    see 'done' and return before the `final` event's own INSERT has
+    committed, missing the answer and its elapsed time entirely. The
+    public runtime has no cost tracking at all, so elapsed time is the
+    only thing issue #74 can show for this backend."""
+    script, events, final, requests = harness
+    script.extend([response(types.Part(text='Found [abc].'))])
+    order: list[str] = []
+    seen_elapsed: list = []
+
+    def fake_elapsed(*a, **k):
+        order.append('elapsed')
+        return 4242
+
+    def fake_emit(*a, **k):
+        order.append('final_event')
+        seen_elapsed.append(k.get('elapsed_ms'))
+        events.append('final')
+
+    def fake_finalize(*a, **k):
+        order.append('finalize')
+        final.append(k)
+
+    monkeypatch.setattr(rp, 'session_elapsed_ms', fake_elapsed)
+    monkeypatch.setattr(rp, 'emit_writer_and_final', fake_emit)
+    monkeypatch.setattr(rp, 'finalize_session', fake_finalize)
+    asyncio.run(rp.public_run('db', 'session', 'q', 'owner'))
+    assert order == ['elapsed', 'final_event', 'finalize']
+    assert seen_elapsed == [4242]
 
 
 @pytest.mark.parametrize('failure', ['forged', 'rounds', 'calls', 'input', 'output', 'error', 'timeout', 'cancel'])

@@ -59,6 +59,11 @@ type TurnCostData = {
   input_tokens: number;
   output_tokens: number;
   usd: number;
+  // Absent on older persisted turns (before this field existed) — treat
+  // as "assume cost is known" so old conversations still render their
+  // $ figure instead of flipping to "cost unknown" retroactively.
+  cost_known?: boolean;
+  elapsed_ms?: number | null;
 };
 
 const DebugIdPart = ({ data }: { data: DebugIdData }) => <DebugIdBadge data={data} />;
@@ -85,14 +90,54 @@ const fmtUsd = (usd: number): string => {
   return `$${usd.toFixed(3)}`;
 };
 
-const TurnCostPart = ({ data }: { data: TurnCostData }) => (
-  <div
-    className="mt-2 text-[11px] text-neutral-400 select-none"
-    title={`${data.model} · ${data.input_tokens.toLocaleString()} in / ${data.output_tokens.toLocaleString()} out`}
-  >
-    {fmtUsd(data.usd)} · {compactNum(data.input_tokens)} in · {compactNum(data.output_tokens)} out
-  </div>
-);
+// mm:ss above a minute so a long deep-analysis turn doesn't read as
+// "83s"; sub-minute turns (the common case) get one decimal so two
+// quick turns are still distinguishable.
+export const fmtElapsed = (ms: number): string => {
+  // elapsed_ms is server-computed (DB clock, always >= 0) in every real
+  // caller, but `data-turn-cost` payloads round-trip through JSON from
+  // several code paths — guard rather than render "NaNs" or "-3s" if one
+  // ever sends something malformed.
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  // Round to whole seconds FIRST, then branch on that rounded value —
+  // rounding the remainder after splitting off whole minutes can carry
+  // a value like 119.6s to "1m 60s" (59.6 rounds up to 60 inside the
+  // "seconds within the minute" slot, which should have carried into
+  // the minutes place instead).
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) {
+    const s = ms / 1000;
+    return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  }
+  const m = Math.floor(totalSeconds / 60);
+  const rem = totalSeconds - m * 60;
+  return `${m}m ${rem}s`;
+};
+
+const TurnCostPart = ({ data }: { data: TurnCostData }) => {
+  // Absent (older persisted turns) reads as "known" — see the field
+  // comment on TurnCostData. Only an explicit `false` (the bounded
+  // public runtime, which never tracks per-call spend) flips this.
+  const costKnown = data.cost_known !== false;
+  const timeStr = typeof data.elapsed_ms === "number" ? fmtElapsed(data.elapsed_ms) : "";
+  const costStr = costKnown
+    ? `${fmtUsd(data.usd)} · ${compactNum(data.input_tokens)} in · ${compactNum(data.output_tokens)} out`
+    : "cost unknown";
+  const segments = [timeStr, costStr].filter(Boolean);
+  if (segments.length === 0) return null;
+  return (
+    <div
+      className="mt-2 text-[11px] text-neutral-400 select-none"
+      title={
+        costKnown
+          ? `${data.model ?? ""} · ${data.input_tokens.toLocaleString()} in / ${data.output_tokens.toLocaleString()} out`
+          : "This runtime doesn't track per-call cost"
+      }
+    >
+      {segments.join(" · ")}
+    </div>
+  );
+};
 
 // Render nothing for tool/reasoning parts inline — AssistantWork collects
 // them into a single disclosure above the text.
