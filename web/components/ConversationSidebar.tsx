@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { conversationPath } from "@/lib/conversationUrl";
 
 type Conversation = {
   id: string;
@@ -89,7 +90,7 @@ export const ConversationSidebar = ({ activeId, onNew, onSelect }: Props) => {
               }
             >
               <Link
-                href={`/?c=${c.id}`}
+                href={conversationPath(c.id)}
                 onClick={onSelect}
                 className="flex-1 min-w-0 text-sm truncate text-neutral-800"
                 title={c.title}

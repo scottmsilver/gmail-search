@@ -12,7 +12,7 @@ const TABS: Array<{ href: string; label: string }> = [
 ];
 
 const isActive = (pathname: string, href: string): boolean => {
-  if (href === "/") return pathname === "/";
+  if (href === "/") return pathname === "/" || pathname.startsWith("/c/");
   return pathname === href || pathname.startsWith(`${href}/`);
 };
 

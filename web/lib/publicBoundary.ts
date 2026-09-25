@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { CONVERSATION_PATH_RE } from "./conversationUrl";
 import { authenticatedUserId, privateHeaders } from "./requestSecurity";
 
 export const publicResponseHeaders = { ...privateHeaders, "Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY" };
@@ -6,6 +7,8 @@ export const isPublicMode = () => process.env.GMS_PUBLIC_ORIGIN !== undefined;
 const fail = (status: number, error: string) => Response.json({ error }, { status, headers: publicResponseHeaders });
 const anonymous = new Set(["/api/auth/me", "/api/auth/login", "/api/auth/callback", "/api/auth/gmail-callback"]);
 const uiPages = new Set(["/", "/search", "/settings"]);
+// UI documents: the fixed pages plus one conversation per `/c/<id>`.
+const isUiPage = (path: string) => uiPages.has(path) || CONVERSATION_PATH_RE.test(path);
 const routes: Array<[RegExp, string[]]> = [
   [/^\/api\/auth\/(me|login|callback|gmail-status|connect-gmail)$/, ["GET"]],
   [/^\/api\/auth\/logout$/, ["POST"]],
@@ -38,7 +41,7 @@ export function publicRequestDenied(req: Request): Response | null {
   if (site !== null && !["none", "same-origin", "same-site", "cross-site"].includes(site)) return fail(403, "Invalid request site");
   // OAuth redirects retain cross-site metadata when they reach the landing page.
   // Only explicit UI document navigations may bypass the API fetch-site guard.
-  const uiNavigation = uiPages.has(path) && ["GET", "HEAD"].includes(req.method)
+  const uiNavigation = isUiPage(path) && ["GET", "HEAD"].includes(req.method)
     && req.headers.get("sec-fetch-mode") === "navigate"
     && req.headers.get("sec-fetch-dest") === "document";
   if (!anonymous.has(path) && !uiNavigation && ["cross-site", "same-site"].includes(site ?? "")) return fail(403, "Invalid request site");
@@ -48,7 +51,7 @@ export function publicRequestDenied(req: Request): Response | null {
         || (path === "/api/auth/connect-gmail" && req.method === "POST")
         || (path === "/api/auth/gmail-callback" && req.method === "GET"));
     if (!workerControl && !routes.some(([pattern, methods]) => pattern.test(path) && methods.includes(req.method))) return fail(404, "Not found");
-  } else if (!(uiPages.has(path) || path.startsWith("/_next/static/") || path === "/favicon.ico" || path === "/pdf.worker.min.mjs")) return fail(404, "Not found");
+  } else if (!(isUiPage(path) || path.startsWith("/_next/static/") || path === "/favicon.ico" || path === "/pdf.worker.min.mjs")) return fail(404, "Not found");
   if (req.url.length > 8192) return fail(414, "Request URL too long");
   return null;
 }

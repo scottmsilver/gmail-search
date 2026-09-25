@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
+
+import { conversationIdFromPath } from "@/lib/conversationUrl";
 
 import { usePreview } from "./PreviewContext";
 
@@ -44,7 +46,7 @@ export const ArtifactChip = ({ artifactId }: Props) => {
   const [meta, setMeta] = useState<ArtifactMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { openPreview } = usePreview();
-  const conversation = useSearchParams().get("c");
+  const conversation = conversationIdFromPath(usePathname());
   const opaque = /^[a-f0-9]{32}$/.test(String(artifactId));
   const href = `/api/artifact/${encodeURIComponent(String(artifactId))}`
     + (opaque && conversation ? `?conversation_id=${encodeURIComponent(conversation)}` : "");

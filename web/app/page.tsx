@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { AssistantChatTransport, useChatRuntime } from "@assistant-ui/react-ai-sdk";
 
 import { useAuth } from "@/components/AuthContext";
+import { conversationIdFromPath, conversationPath, legacyConversationUrl } from "@/lib/conversationUrl";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import { SyncProgressCard } from "@/components/SyncProgressCard";
 import { ThemeEffect } from "@/components/ThemeEffect";
@@ -57,7 +58,9 @@ export default function Page() {
   publicModeRef.current = publicMode && !fullRuntime && !deepModels;
   const router = useRouter();
   const params = useSearchParams();
-  const urlC = params.get("c");
+  const urlC = conversationIdFromPath(usePathname());
+  // Old links (`/?c=<id>&thread=…`) move to `/c/<id>?thread=…`.
+  const legacyUrl = urlC ? null : legacyConversationUrl(params);
 
   // Current conversation id: URL wins. Null until we mint one or pick
   // one up from the URL. Minting happens in an effect (not in useState
@@ -65,6 +68,10 @@ export default function Page() {
   const [conversationId, setConversationId] = useState<string | null>(urlC ?? null);
 
   useEffect(() => {
+    if (legacyUrl) {
+      router.replace(legacyUrl);
+      return;
+    }
     if (urlC) {
       if (urlC !== conversationId) setConversationId(urlC);
       return;
@@ -72,9 +79,9 @@ export default function Page() {
     if (!conversationId) {
       const id = newConversationId();
       setConversationId(id);
-      router.replace(`/?c=${id}`);
+      router.replace(conversationPath(id));
     }
-  }, [urlC, conversationId, router]);
+  }, [legacyUrl, urlC, conversationId, router]);
 
   // Transport is stable across the component's lifetime; it reads the
   // latest conversation id from a ref so a change doesn't rebuild the
@@ -197,7 +204,7 @@ export default function Page() {
     setConversationId(id);
     loadedId.current = null;
     runtimeRef.current.thread.reset();
-    router.replace(`/?c=${id}`);
+    router.replace(conversationPath(id));
   }, [router]);
 
   return (

@@ -113,3 +113,12 @@ test('battle endpoints still refuse the wrong method', () => {
     assert.equal(publicRequestDenied(request('/api/battle/stats', 'POST'))?.status, 404);
   } finally { delete process.env.GMS_PUBLIC_ORIGIN; }
 });
+test('conversation pages /c/<id> are UI pages; malformed ids and deeper paths are not', () => {
+ process.env.GMS_PUBLIC_ORIGIN=origin;
+ const navigation = (path, site) => new Request(origin+path, {headers:{host:'gms.oursilverfamily.com','sec-fetch-site':site,'sec-fetch-mode':'navigate','sec-fetch-dest':'document'}});
+ try {
+  // An OAuth return may land on a conversation, so cross-site navigations are allowed like '/'.
+  for (const site of ['same-origin','cross-site']) for (const path of ['/c/a1b2c3d4e5f6','/c/abc-DEF_123']) assert.equal(publicRequestDenied(navigation(path,site)),null);
+  for (const path of ['/c/','/c/abc','/c/a1b2c3d4e5f6/x','/c/a1b2c3d4e5f6.js','/c/'+'a'.repeat(65)]) assert.equal(publicRequestDenied(navigation(path,'same-origin')).status,404);
+ } finally { delete process.env.GMS_PUBLIC_ORIGIN; }
+});
