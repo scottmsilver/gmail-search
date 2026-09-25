@@ -27,3 +27,15 @@ def test_load_config_data_dir(tmp_path):
     """Config resolves data_dir relative to project root."""
     cfg = load_config(config_path=tmp_path / "nonexistent.yaml", data_dir=tmp_path / "data")
     assert cfg["data_dir"] == str(tmp_path / "data")
+
+
+def test_loaded_config_does_not_share_nested_dicts_with_defaults():
+    # A caller mutating its loaded config must not rewrite DEFAULTS for later
+    # loads in the same process (#26: order-dependent test failures).
+    from gmail_search.config import DEFAULTS, load_config
+
+    before = DEFAULTS["embedding"]["model"]
+    cfg = load_config()
+    cfg["embedding"]["model"] = "mutated-by-caller"
+    assert DEFAULTS["embedding"]["model"] == before
+    assert load_config()["embedding"]["model"] == before

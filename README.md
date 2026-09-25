@@ -305,6 +305,8 @@ src/gmail_search/
     session.py      — Broker sign-in, session cookie, GMAIL_MULTI_TENANT gate
     routes.py       — /api/auth/* (login, callback, me, logout, connect-gmail)
     write_user.py   — resolve_write_user_id: which tenant a daemon writes as
+  deploy/           — The invited-service deployer (scripts/deploy.sh; see Deploying):
+                       plan, package, qualify, preflight, activate, postcheck
   store/
     db.py           — psycopg connection (DB_DSN), schema apply, TABLE_DOCS
     schema_profile.py — Which mailbox shape this process talks to; bound to
@@ -554,6 +556,36 @@ Benchmarked on 20k messages / 32k embeddings:
 | Topic filter (client-side) | instant |
 | Inbox time-to-glass | instrumented in Settings |
 
+## Deploying (invited service)
+
+`scripts/deploy.sh` ships a commit (default `origin/main`) as one release of the invited service: the controller
+(`gmail-search-invited-api`), the public web app (`gmail-search-public-web`) and, when they changed, the worker's
+files and Firecracker image. It is repository code (`src/gmail_search/deploy/`, tests in `tests/test_deploy_*.py`),
+not an agent, and runs six phases, each recorded in `.runtime/deploy/<release>/state.json` so one can be re-run with
+`--phase <name>`:
+
+| Phase | What it does |
+| --- | --- |
+| `plan` | Reads the running release's commit (`QUALIFIED.json`, else a leading sha in `RELEASE`), diffs the target, and classifies the batch: `controller` (`src/`), `web` (`web/`), `image` (guest files, workflow agents, image inputs), `worker` (files installed in the worker's opt dir). Docs/tests/scripts only, or nothing new, is `skip`; a running release at or past the target is `superseded`; dependency files (`pyproject.toml`, `uv.lock`, web lockfiles) or an unknown `deploy/` path are refused as the owner's step. |
+| `package` | From a clean detached worktree at the target (`~/.wt/deploy-<release>`), builds `<install_root>/public-releases/<release>` from the running release with `api/src` replaced, `next build` when `web/` changed, and the worker payload. |
+| `qualify` | `scripts/test.sh` (under the issue loop's landing lock, `.runtime/issue-loop/land.lock`), ruff, and the web `tsc` and script tests. Needs `GMS_TEST_PG_DSN` (the disposable test database). |
+| `preflight` | Refuses a dirty build tree, a running release that changed since `plan`, or any active run; writes `QUALIFIED.json`. |
+| `activate` | Installs the worker payload (keeping `.prev` copies) and restarts its units, swaps `invited-current` and `public-current`, restarts the controller and web, and waits for the units and health ports. Any failure restores the previous release (and worker files) and says whether that worked. |
+| `postcheck` | The public web answers 200 for `/` and `/c/<id>`, 404 for a malformed id; the health ports are up. Appends to `.runtime/issue-loop/deploys.jsonl`. A failed postcheck leaves the release up and prints `scripts/deploy.sh --phase rollback --release <name>`. |
+
+`--dry-run` runs plan through preflight into `.runtime/deploy/dry-run/` and never swaps or restarts. `--name <word>`
+names the release `<word>-<date>`. Settings live in `~/.config/gmail-search/deploy.json` (copy
+`deploy/deploy.example.json`; a missing key is named in the error); the worker's host and port come from the invited
+runtime config.
+
+**Worker image.** The image is rebuilt reproducibly: the runtime trees fingerprinted in
+`deploy/public/worker/pi-mcp-runtime-inputs.json` (node `bin/`, `lib/`, locked Pi packages), cached once with
+`scripts/deploy.sh --seed-image-inputs <extracted image root>` and re-verified on every build, plus the committed guest
+files (the list in `prepare-full-agent-runtime.sh`) and workflow agents, with the jiti cache warmed and fixed squashfs
+timestamps. The built image must equal `AGENT_FULL_PIN` in `firecracker_backend.py`: a change to guest files runs
+`scripts/deploy.sh --update-pin` (writes the pin, uncommitted) and commits it with the change; a deploy never writes
+the pin.
+
 ## Logging & observability
 
 Proportionate for a single host — no agents, collectors, or SaaS. All on disk + stdlib logging.
@@ -570,6 +602,18 @@ Proportionate for a single host — no agents, collectors, or SaaS. All on disk 
 - **Credential health** — each sync cycle records whether the broker token worked; a dead or scope-stripped token shows up as an unhealthy Gmail status in Settings instead of looking like "no new mail".
 
 Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB-handler concurrency, default 24), `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` (serve query cap, default 10min), `GMAIL_AGENT_HTTP_TIMEOUT` (in-process API client timeout), `GMAIL_PI_MODEL` (default `google/gemini-3.7-flash`), `GMAIL_PI_THINKING`, `GMAIL_PI_CONTAINER` (default `pi-sandbox`), `GMAIL_PI_EXTENSION_PATH` (default `/opt/gmail-tools`), `GMAIL_PI_BUILTIN_TOOLS` (default on), `GMAIL_PI_HARD_TIMEOUT` (default 900), `GMAIL_PI_IDLE_TIMEOUT` (default 300).
+
+## Working through GitHub issues
+
+Changes go through issues with the issue loop (`.claude/commands/issue-loop.md`, ported from wezterm-web): run
+`/loop /issue-loop` in Claude Code from a checkout of `main`. Each tick triages the owner's open issues, dispatches up to
+four issue agents (each in its own `~/.wt/issue-<n>-<slug>` worktree) that post a plan, fix test-first, run the audit
+(pip-audit plus codex, or agy) and stop at "ready" with the change uncommitted. Nothing lands until the owner comments
+exactly `land` on the issue (or says so in the session); then `.claude/issue-loop/land.sh <n>` commits, merges
+`origin/main`, runs the build checks and `scripts/test.sh`, pushes, opens the PR and squash-merges, and the deployer
+ships it. Loop state (`ledger.json`, the landing lock, logs) lives in the untracked `.runtime/issue-loop/`; loop
+comments end with `<!-- issue-loop -->`, which is how the loop tells its own comments from the owner's. Tests need the
+disposable test database in `~/.config/gmail-search/test.env` (copy `deploy/examples/test.env.example`).
 
 ## Tech stack
 
