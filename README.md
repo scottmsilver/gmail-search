@@ -114,6 +114,8 @@ gmail-search supervise
 
 `supervise` is the recommended steady-state mode. For every enrolled user it keeps `watch`, `update`, `summarize`, `reindex`, and `propositionize` alive, plus one shared `reconcile` and `crawl` — all via DB heartbeats, no PID files, duplicate daemons blocked at the DB layer. The reference deployment runs it as a `systemctl --user` unit alongside `serve`, the MCP server, the web app, a log-rotation timer, and a serve watchdog timer.
 
+**Set `LimitNOFILE=65536` on the supervisor unit.** The unit is not a tracked file — its canonical definition is the snippet in [docs/SUPERVISOR.md](docs/SUPERVISOR.md), which now carries this setting — so it has to be applied wherever it is installed, and children inherit it. `crawl` drives a Chromium pool through Playwright, whose drivers cost pipe descriptors; on systemd's default of 1024 a driver leak exhausted the daemon in 19 minutes and wedged crawling for four days (2026-09-15). A daemon that heartbeats on its error path is invisible to the watchdog, so failures must be recorded as failures — see `_record_crawl_failure` in `cli.py`.
+
 ### 6. Use it
 
 ```bash
@@ -254,7 +256,7 @@ Every stage is idempotent. Crash anywhere, rerun, it picks up where it left off.
 
 | Table | What | Why |
 |-------|------|-----|
-| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk; `attachments.embed_status` / `embed_error` record image-embed failures that should never be retried |
+| `messages`, `attachments`, `embeddings` | Raw corpus | The source of truth. `messages.raw_json` keeps the full Gmail response; `attachments.fetch_status` says whether the bytes are on disk; `attachments.embed_status` / `embed_error` record image-embed failures: `failed_permanent` is never retried, while an `embed_error` with no status is a retry pending for the next pass |
 | `thread_summary` | Participants, labels, dates, message count per thread | Avoids N+1 queries during search; reconcile daemon detects drift |
 | `message_summaries` | LLM-generated per-thread summaries (markdown) | Inline in inbox + priority + chat |
 | `contact_frequency` | Log-scaled message count per sender | Boosts results from frequent correspondents |

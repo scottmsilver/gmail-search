@@ -158,15 +158,28 @@ def custom_cycles(admin,reader_dsn,table,leaf,key,field,profile):
     return states
 
 
+APPROVED_FIXTURE=('127.0.0.1','55440','postgres','postgres')
+FORBIDDEN_CONNINFO_KEYS={'hostaddr','service','options'}
+
+
+def dsn_is_approved_fixture(dsn):
+    """True only for the one disposable loopback fixture this probe may touch.
+
+    This probe CREATEs databases and roles, so it must never be aimed at a
+    real server. Exposed so callers can SKIP when off-fixture rather than
+    driving `run()` into a ValueError: checking merely that GMS_TEST_PG_DSN is
+    *set* turned CI into 171 setup errors (2026-09-22)."""
+    config=conninfo_to_dict(dsn)
+    return ((config.get('host'),config.get('port'),config.get('dbname'),config.get('user'))==APPROVED_FIXTURE
+            and not set(config)&FORBIDDEN_CONNINFO_KEYS)
+
+
 def run(*,atomic=False,staged=False,churn=None):
     if type(atomic) is not bool or type(staged) is not bool or (atomic and staged):raise ValueError("Invalid probe mode")
     if churn not in (None,'observed','unobserved','custom_cycles') or (churn and atomic) or (churn in ('observed','unobserved') and staged):raise ValueError('Invalid probe mode')
     if churn=='custom_cycles':staged=True
     base=os.environ['GMS_TEST_PG_DSN']
-    config=conninfo_to_dict(base)
-    if ((config.get('host'),config.get('port'),config.get('dbname'),config.get('user'))
-            !=('127.0.0.1','55440','postgres','postgres')
-            or set(config)&{'hostaddr','service','options'}):
+    if not dsn_is_approved_fixture(base):
         raise ValueError('Only the approved disposable loopback fixture is supported')
     suffix=secrets.token_hex(8)
     database='gms_deleted_bm25_'+suffix;role='gms_deleted_reader_'+suffix

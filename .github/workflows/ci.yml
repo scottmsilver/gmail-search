@@ -3,6 +3,9 @@ name: CI
   push:
     branches:
     - main
+    # Long-lived integration branches: without this, work sits uncovered
+    # until someone opens a PR (12 commits / 15 days, as of 2026-09-20).
+    - prod/**
   pull_request:
 jobs:
   lint:
@@ -20,13 +23,24 @@ jobs:
     runs-on: ubuntu-latest
     services:
       paradedb:
-        image: paradedb/paradedb:latest
+        # Pinned, and matched to production's pg_search 0.23.0. NOTE: this is
+        # the unpatched upstream build — prod runs a local patch for the
+        # pg_search ctid bug. If CI ever trips that, move to a newer upstream.
+        image: paradedb/paradedb:0.23.0-pg16
         env:
           POSTGRES_USER: gmail_search
           POSTGRES_PASSWORD: gmail_search
-          POSTGRES_DB: gmail_search
+          # NOT gmail_search: tests/conftest.py's reject_production_dsn()
+          # refuses any GMS_TEST_PG_DSN naming that database, matching by
+          # dbname alone (the production cluster is reachable under several
+          # hostnames, so the guard can't key off host/port). A disposable
+          # CI-only name keeps the guard's intent intact.
+          POSTGRES_DB: gms_ci_disposable
         ports:
-        - 5544:5432
+        # NOT 5544: tests/perf/test_search_perf_gate.py treats a server on
+        # 5544 as the developer's live corpus and stops skipping, then fails
+        # on an empty database. Keep CI's container off that port.
+        - 55432:5432
         options: --health-cmd "pg_isready -U gmail_search" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
     - uses: actions/checkout@v4
@@ -37,4 +51,12 @@ jobs:
     - name: Install package + dev deps from the lockfile
       run: uv sync --locked --extra dev
     - name: pytest (fast suite in parallel - integration/perf excluded)
+      # Without this the suite cannot see the service container above, and
+      # since f471efd an unconfigured suite fails rather than falling through
+      # to a live database. conftest creates a disposable test_<uuid8> schema
+      # per test against this DSN. dbname is gms_ci_disposable, not
+      # gmail_search: reject_production_dsn() in tests/conftest.py refuses
+      # the production database name at import time.
+      env:
+        GMS_TEST_PG_DSN: host=127.0.0.1 port=55432 user=gmail_search password=gmail_search dbname=gms_ci_disposable
       run: GMS_PYTHON=.venv/bin/python scripts/test.sh
