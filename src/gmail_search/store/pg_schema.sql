@@ -120,8 +120,10 @@ ALTER TABLE attachments ADD COLUMN IF NOT EXISTS fetch_status TEXT NOT NULL DEFA
 -- from 8 files). NULL = not failed (the common case);
 -- 'failed_permanent' = a 4xx or a local validation failure, or the
 -- retryable-attempt cap was hit; never selected again. embed_error is
--- the sanitized, length-capped message; embed_attempts counts passes
--- that ended in failure for any image of this attachment.
+-- the sanitized, length-capped message; with embed_status NULL it marks
+-- a pending retry (the attachment is reselected even if a sibling page
+-- embedded) and is cleared once a pass embeds every image. embed_attempts
+-- counts passes that ended in failure for any image of this attachment.
 ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_status TEXT;
 ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_error TEXT;
 ALTER TABLE attachments ADD COLUMN IF NOT EXISTS embed_attempts INT NOT NULL DEFAULT 0;
