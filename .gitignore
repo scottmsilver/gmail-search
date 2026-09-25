@@ -25,7 +25,10 @@ build/
 .env
 .env.*
 .gstack/
-.claude/
+# Local Claude Code state stays out; the issue loop (command + scripts) is tracked.
+.claude/*
+!.claude/commands/
+!.claude/issue-loop/
 
 # Bench run output — reproducible from scripts/bench_w4.py +
 # scripts/bench_sample*.json. 1.6 MB of JSON shouldn't bloat the repo.
@@ -36,3 +39,4 @@ worktrees/
 
 # Symlink to the main checkout's install; machine-specific.
 web/node_modules
+.runtime/

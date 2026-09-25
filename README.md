@@ -571,6 +571,18 @@ Proportionate for a single host — no agents, collectors, or SaaS. All on disk 
 
 Relevant env knobs: `GMS_LOG_JSON` (JSON logs), `GMS_SERVE_THREADPOOL` (serve DB-handler concurrency, default 24), `GMS_DEFAULT_STATEMENT_TIMEOUT_MS` (serve query cap, default 10min), `GMAIL_AGENT_HTTP_TIMEOUT` (in-process API client timeout), `GMAIL_PI_MODEL` (default `google/gemini-3.7-flash`), `GMAIL_PI_THINKING`, `GMAIL_PI_CONTAINER` (default `pi-sandbox`), `GMAIL_PI_EXTENSION_PATH` (default `/opt/gmail-tools`), `GMAIL_PI_BUILTIN_TOOLS` (default on), `GMAIL_PI_HARD_TIMEOUT` (default 900), `GMAIL_PI_IDLE_TIMEOUT` (default 300).
 
+## Working through GitHub issues
+
+Changes go through issues with the issue loop (`.claude/commands/issue-loop.md`, ported from wezterm-web): run
+`/loop /issue-loop` in Claude Code from a checkout of `main`. Each tick triages the owner's open issues, dispatches up to
+four issue agents (each in its own `~/.wt/issue-<n>-<slug>` worktree) that post a plan, fix test-first, run the audit
+(pip-audit plus codex, or agy) and stop at "ready" with the change uncommitted. Nothing lands until the owner comments
+exactly `land` on the issue (or says so in the session); then `.claude/issue-loop/land.sh <n>` commits, merges
+`origin/main`, runs the build checks and `scripts/test.sh`, pushes, opens the PR and squash-merges, and the deployer
+ships it. Loop state (`ledger.json`, the landing lock, logs) lives in the untracked `.runtime/issue-loop/`; loop
+comments end with `<!-- issue-loop -->`, which is how the loop tells its own comments from the owner's. Tests need the
+disposable test database in `~/.config/gmail-search/test.env` (copy `deploy/examples/test.env.example`).
+
 ## Tech stack
 
 - **Gmail API** — message download with OAuth2, batch requests, incremental sync
