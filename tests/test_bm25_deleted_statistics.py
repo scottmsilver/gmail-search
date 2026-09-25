@@ -29,6 +29,28 @@ def _require_approved_fixture():
         pytest.skip('GMS_TEST_PG_DSN is not the approved disposable ParadeDB fixture')
 
 
+def visible_counts(segments):
+    """(num_docs, num_deleted) over the visible segments, the ones a reader scores.
+
+    Pre-rebuild segments linger as non-visible until recycled; the migration's
+    `_qualify_bm25` counts the same way."""
+    visible=[row for row in segments if row['visible']]
+    return sum(int(row['num_docs']) for row in visible),sum(int(row['num_deleted']) for row in visible)
+
+
+def assert_holds_only_live_rows(rebuilt,horizon):
+    """The rebuilt index must hold the live rows and nothing else, named with its horizon.
+
+    Checked before any score list: a rebuild under a transaction older than
+    the delete indexes the deleted rows as live documents (#55), and the
+    horizon says whether that is what happened."""
+    docs,deleted=visible_counts(rebuilt['segments'])
+    assert (docs,deleted)==(rebuilt['live_rows'],0),(
+        f"rebuilt index holds {docs} docs and {deleted} deleted for {rebuilt['live_rows']} live rows; "
+        f"delete xid {horizon['delete_xid']}, snapshot xmin {horizon['snapshot_xmin']}, "
+        f"settled={horizon['settled']} after {horizon['waited_seconds']}s")
+
+
 @pytest.fixture(scope='module')
 def report():
     _require_approved_fixture()
@@ -46,9 +68,7 @@ def test_historical_foreign_statistics_survive_delete_vacuum_and_attach(report,p
         assert value['force_custom_plan']==value['force_generic_plan']==value['fresh_backend']==polluted
         assert value['foreign_only']==[] and value['live_rows']==4
     assert evidence['direct_child_denied']
-    segments=evidence['after_vacuum']['segments']
-    assert sum(int(row['num_docs']) for row in segments)==4
-    assert sum(int(row['num_deleted']) for row in segments)==200
+    assert visible_counts(evidence['after_vacuum']['segments'])==(4,200),evidence['rebuild_horizon']
     assert evidence['after_vacuum']['objects']==evidence['leaf_after_attach_objects']
 
 
@@ -57,10 +77,10 @@ def test_reindex_restores_clean_scores_preserves_heap_and_can_rollback(report,pr
     evidence=report['profiles'][profile]
     clean=evidence['clean']['force_custom_plan']
     rebuilt=evidence['reindex']
+    assert_holds_only_live_rows(rebuilt,evidence['rebuild_horizon'])
     assert rebuilt['force_custom_plan']==rebuilt['force_generic_plan']==rebuilt['fresh_backend']==clean
     old=evidence['after_attach']['objects'];new=rebuilt['objects']
     assert old[:6]==new[:6] and old[6]!=new[6]
-    assert sum(int(row['num_deleted']) for row in rebuilt['segments'])==0
     rollback=evidence['reindex_rollback']
     assert rollback['before']['objects']==rollback['after']['objects']
     assert rollback['during_objects'][:6]==old[:6] and rollback['during_objects'][6]!=old[6]
@@ -88,6 +108,11 @@ def atomic_report():
 
 @pytest.mark.parametrize('profile',['message_text','message_numeric','attachment'])
 def test_same_transaction_delete_attach_reindex_keeps_foreign_statistics(atomic_report,profile):
+    """Intentional retention: a REINDEX inside the deleting transaction keeps the rows.
+
+    Its own transaction is older than nothing, so the deleted rows are still
+    RECENTLY_DEAD to it and are indexed as live. Only a separate, later rebuild
+    is clean."""
     evidence=atomic_report['profiles'][profile]
     clean=evidence['clean']['fresh_backend']
     polluted=evidence['mixed_before_delete']['fresh_backend']
@@ -95,12 +120,22 @@ def test_same_transaction_delete_attach_reindex_keeps_foreign_statistics(atomic_
     assert committed['all_owner_counts']==[('alice',4)]
     assert committed['force_custom_plan']==committed['force_generic_plan']==committed['fresh_backend']==polluted
     assert committed['during_owner_rows']==polluted and polluted!=clean
-    assert sum(int(row['num_docs']) for row in committed['segments'])==204
+    assert visible_counts(committed['segments'])==(204,0)
     rollback=evidence['atomic_rollback']
     assert rollback['all_owner_counts']==[('alice',4),('bob',200)]
     assert rollback['objects']==evidence['mixed_before_delete']['objects']
     assert rollback['fresh_backend']==polluted
-    assert evidence['separate_post_commit_reindex']['fresh_backend']==clean
+    separate=evidence['separate_post_commit_reindex']
+    assert_holds_only_live_rows(separate,evidence['rebuild_horizon'])
+    assert separate['fresh_backend']==clean
+
+
+def retained_storage(objects):
+    """Heap, TOAST and BM25 relation identity, without heap_bytes or the BM25 relfilenode.
+
+    The rebuild boundary VACUUMs the leaf, which truncates the deleted tail of
+    the heap: its size changes, its identity must not."""
+    return objects[:4]+objects[5:6]
 
 
 @pytest.fixture(scope='module')
@@ -116,11 +151,14 @@ def test_committed_delete_attach_then_restart_reindex_is_clean_and_retryable(sta
     phase1=evidence['phase1_commit'];rollback=evidence['phase2_rollback'];retry=evidence['phase2_retry_commit']
     assert phase1['all_owner_counts']==rollback['all_owner_counts']==[('alice',4)]
     assert phase1['fresh_backend']==rollback['fresh_backend']==old['fresh_backend']
-    assert phase1['objects'][:7]==rollback['objects'][:7]==old['objects'][:7]
-    assert rollback['during_objects'][:6]==old['objects'][:6]
+    assert phase1['objects'][:7]==old['objects'][:7]
+    assert retained_storage(rollback['objects'])==retained_storage(old['objects'])
+    assert rollback['objects'][6]==old['objects'][6]
+    assert retained_storage(rollback['during_objects'])==retained_storage(old['objects'])
     assert rollback['during_objects'][6]!=old['objects'][6]
+    assert_holds_only_live_rows(retry,evidence['rebuild_horizon'])
     assert retry['fresh_backend']==retry['force_custom_plan']==retry['force_generic_plan']==clean
-    assert retry['objects'][:6]==old['objects'][:6] and retry['objects'][6]!=old['objects'][6]
+    assert retained_storage(retry['objects'])==retained_storage(old['objects']) and retry['objects'][6]!=old['objects'][6]
     assert retry['live_rows']==4 and retry['foreign_only']==[]
 
 
@@ -171,6 +209,7 @@ def custom_report():
 @pytest.mark.parametrize('profile',['message_text','message_numeric','attachment'])
 def test_candidate_custom_unprepared_profile_survives_staged_commit_and_cycles(custom_report,profile):
     evidence=custom_report['profiles'][profile]
+    assert_holds_only_live_rows(evidence['phase2_retry_commit'],evidence['rebuild_horizon'])
     assert evidence['phase2_retry_commit']['fresh_backend']==evidence['clean']['fresh_backend']
     cycles=evidence['custom_unprepared_cycles']
     assert len(cycles['cycles'])==3

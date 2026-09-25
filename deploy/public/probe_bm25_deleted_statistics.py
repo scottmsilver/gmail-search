@@ -80,6 +80,45 @@ def snapshot(admin,reader,table,index,key,field,reader_dsn,*,allow_errors=False)
     return result
 
 
+SETTLE_SECONDS=10
+
+
+def delete_foreign(conn,table):
+    """Delete the foreign owner's rows; returns the deleting transaction's xid.
+
+    Runs in the caller's transaction when there is one."""
+    with conn.transaction():
+        conn.execute(sql.SQL("DELETE FROM {} WHERE user_id='bob'").format(ident(table)))
+        return int(conn.execute('SELECT pg_current_xact_id()').fetchone()[0])
+
+
+def settle(conn,delete_xid,*,seconds=SETTLE_SECONDS):
+    """Wait, bounded, until no running transaction on the cluster predates the delete.
+
+    A REINDEX indexes HEAPTUPLE_RECENTLY_DEAD rows as live documents, and the
+    rebuilding session's own snapshot takes its xmin from running xids in
+    *every* database on the cluster. So any other test run's open write
+    transaction turns the deleted rows back into corpus statistics (#55).
+    Returns the horizon, which callers record so a failure names it."""
+    started=time.monotonic()
+    while True:
+        xmin=int(conn.execute('SELECT pg_snapshot_xmin(pg_current_snapshot())').fetchone()[0])
+        if xmin>delete_xid or time.monotonic()-started>=seconds:break
+        time.sleep(0.05)
+    return {'delete_xid':delete_xid,'snapshot_xmin':xmin,'settled':xmin>delete_xid,
+            'waited_seconds':round(time.monotonic()-started,3)}
+
+
+def settle_and_vacuum(conn,leaf,delete_xid):
+    """The clean-rebuild boundary: settle the horizon, then VACUUM the leaf.
+
+    VACUUM ignores its own snapshot, so it removes the deleted tuples even
+    past a cross-database writer that outlasts the bounded wait."""
+    horizon=settle(conn,delete_xid)
+    conn.execute(sql.SQL('VACUUM(INDEX_CLEANUP ON) {}').format(ident(leaf)))
+    return horizon
+
+
 def _grant(admin,role,table):
     admin.execute(sql.SQL('ALTER TABLE {} ENABLE ROW LEVEL SECURITY').format(ident(table)))
     admin.execute(sql.SQL('ALTER TABLE {} FORCE ROW LEVEL SECURITY').format(ident(table)))
@@ -239,7 +278,7 @@ def run(*,atomic=False,staged=False,churn=None):
                             started=time.monotonic()
                             try:
                                 with admin.transaction():
-                                    admin.execute(sql.SQL("DELETE FROM {} WHERE user_id='bob'").format(ident(mixed)))
+                                    delete_xid=delete_foreign(admin,mixed)
                                     leaf,leaf_index=attach(admin,role,mixed,index,key,fields)
                                     if atomic:admin.execute(sql.SQL('REINDEX INDEX {}').format(ident(leaf_index)))
                                     during=objects(admin,leaf,leaf_index)
@@ -255,6 +294,8 @@ def run(*,atomic=False,staged=False,churn=None):
                             result['seconds']=time.monotonic()-started
                             result['cluster_wal_bytes']=int(admin.execute('SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),%s::pg_lsn)',(start_lsn,)).fetchone()[0])
                             evidence[('phase1_' if staged else 'atomic_')+outcome]=result
+                        # Only the committed delete's xid matters: the loop ends on 'commit'.
+                        evidence['rebuild_horizon']=settle_and_vacuum(admin,leaf,delete_xid)
                         if staged:
                             # New database connections simulate loss of phase-one
                             # process/session state. No cached migration object is
@@ -285,7 +326,9 @@ def run(*,atomic=False,staged=False,churn=None):
                             evidence['custom_unprepared_cycles']=custom_cycles(admin,reader_dsn,mixed,leaf,key,field,profile)
                         report['profiles'][profile]=evidence
                         continue
-                    admin.execute(sql.SQL("DELETE FROM {} WHERE user_id='bob'").format(ident(mixed)))
+                    delete_xid=delete_foreign(admin,mixed)
+                    # Every VACUUM and the REINDEX below follow this boundary.
+                    evidence['rebuild_horizon']=settle(admin,delete_xid)
                     evidence['after_delete']=snapshot(admin,reader,mixed,index,key,field,reader_dsn)
                     admin.execute(sql.SQL('ANALYZE {}').format(ident(mixed)))
                     evidence['after_analyze']=snapshot(admin,reader,mixed,index,key,field,reader_dsn)

@@ -119,7 +119,9 @@ Expect `phase_one -> INDEX_PENDING` then `phase_two -> READY`.
 **If phase one fails**, nothing was published; the layout commit is idempotent
 and crash re-entry never publishes readiness. **If phase two fails**, the layout
 is committed but indexes are not rebuilt — search is wrong until it completes,
-so re-run rather than rolling back. **If anything is unrecoverable**, restore
+so re-run rather than rolling back. A re-run also rebuilds an index that was
+rebuilt but then failed qualification. The cause is on stderr as
+`Mixed-text migration <step> refused: <class>: <reason> (at <file:line>)`. **If anything is unrecoverable**, restore
 the step-3 copy: stop the container, replace the data directory, start it.
 
 ### 6. Deploy the matching code
