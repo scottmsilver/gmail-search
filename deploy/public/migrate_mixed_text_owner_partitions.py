@@ -26,10 +26,12 @@ from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
+import logging
 from pathlib import Path
 import sys
 import time
 
+import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
@@ -54,6 +56,10 @@ WITNESS_TABLE = 'text_phase_one'
 PROCEDURE_DIGEST = hashlib.sha256(Path(__file__).read_bytes() + b'\x00'
     + Path(__file__).with_name('migrate_text_owner_partitions.py').read_bytes()).hexdigest()
 _WITNESS = sql.Identifier(WITNESS_SCHEMA, WITNESS_TABLE)
+# How long phase two waits for older transactions before its VACUUM and rebuild.
+HORIZON_WAIT_SECONDS = 60
+
+logger = logging.getLogger(__name__)
 
 
 def _json(value):
@@ -62,6 +68,48 @@ def _json(value):
 
 def _digest(value):
     return hashlib.sha256(_json(value).encode('ascii')).hexdigest()
+
+
+class _Unqualified(ValueError):
+    """An owner's BM25 index does not hold exactly that owner's live rows."""
+
+
+def _refusal_detail(error):
+    """What of an error is safe to log: never row values or other sessions' names.
+
+    This module's refusals are ValueError/TimeoutError with fixed text. A
+    database error's text can quote row values, so it is named by SQLSTATE;
+    anything else (the production fence quotes other clients'
+    application_name) by its class alone."""
+    if isinstance(error, psycopg.Error):
+        return 'SQLSTATE '+str(error.sqlstate)
+    return str(error) if type(error) in (ValueError, TimeoutError, _Unqualified) else '(detail withheld)'
+
+
+def _raised_at(error):
+    """file:line where `error` was raised, which names a refusal even when its detail is withheld."""
+    frame = error.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    return 'unknown' if frame is None else Path(frame.tb_frame.f_code.co_filename).name+':'+str(frame.tb_lineno)
+
+
+def _log_refusal(action, error):
+    """Name why `action` refused before callers see only AccessDenied."""
+    try:
+        logger.warning('Mixed-text migration %s refused: %s: %s (at %s)', action, type(error).__name__,
+            _refusal_detail(error), _raised_at(error))
+    except Exception:
+        pass
+
+
+@contextmanager
+def _refusing(action):
+    try:
+        yield
+    except Exception as error:
+        _log_refusal(action, error)
+        raise AccessDenied() from None
 
 
 def _duration_seconds(value, maximum=86400):
@@ -449,9 +497,10 @@ class MixedTextPhaseOne:
         for lock in tuple('gmail-search partition owner '+owner for owner in self.plan.expected_owners)+('gmail-search partition catalog v1',):
             conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(lock,))
 
-    def _commit_rebuild(self, deadline):
+    def _commit_rebuild(self, deadline, phase):
         """Vacuum, rebuild and record the retained indexes in one committed step."""
         with self._fresh(deadline=deadline) as conn:
+            self._await_older_transactions(conn,deadline)
             self._vacuum_retained(conn)
         with self._fresh(deadline=deadline) as conn:
             with conn.transaction():
@@ -461,7 +510,7 @@ class MixedTextPhaseOne:
                     for owner in self.plan.expected_owners:
                         conn.execute(sql.SQL('LOCK TABLE {} IN ACCESS EXCLUSIVE MODE').format(
                             sql.Identifier(PARTITION_SCHEMA,partition_name(table,owner))))
-                stored = self._witness_row(conn,'LAYOUT_COMMITTED')
+                stored = self._witness_row(conn,phase)
                 self._rebuild_retained_bm25(conn)
                 inventory = dict(source=stored['source'],target=self._write_inventory(conn),
                     rebuilt=self._retained_bm25(conn))
@@ -469,6 +518,24 @@ class MixedTextPhaseOne:
                     (_json(inventory),))
                 self._checkpoint('indexes_rebuilt')
         self._checkpoint('phase2_committed')
+
+    def _await_older_transactions(self, conn, deadline):
+        """Wait, bounded, until every transaction running now has ended.
+
+        That includes any that predates phase one's row removal. A REINDEX indexes
+        rows deleted after its session's xmin as live documents, and that xmin
+        counts running xids from every database on the cluster (#55). Past the
+        bound it carries on: VACUUM ignores other databases' transactions, and
+        `_qualify_bm25` still decides READY.
+        """
+        until = min(deadline,time.monotonic()+HORIZON_WAIT_SECONDS)
+        # A fresh xid, committed at once, is newer than every running one; the
+        # snapshot xmax is not (it trails xids assigned but not yet completed).
+        mark, = conn.execute('SELECT pg_current_xact_id()').fetchone()
+        while time.monotonic() < until:
+            if conn.execute('SELECT pg_snapshot_xmin(pg_current_snapshot()) > %s::xid8',(mark,)).fetchone()[0]:
+                return
+            time.sleep(0.1)
 
     def _vacuum_retained(self, conn):
         """Let ambulkdelete see phase one's row removal before the rebuild.
@@ -515,7 +582,7 @@ class MixedTextPhaseOne:
                 if foreign:
                     raise ValueError('Foreign rows present in owner leaf: '+table)
                 if int(deleted) or int(docs) != int(live):
-                    raise ValueError('Owner index retains foreign or deleted documents: '+table)
+                    raise _Unqualified('Owner index retains foreign or deleted documents: '+table)
                 report[table+'/'+owner] = [int(live),int(docs),int(deleted)]
         return report
 
@@ -586,17 +653,26 @@ class MixedTextPhaseOne:
                     witness = self._read_witness(conn)
             if witness is None:
                 raise ValueError('Missing committed phase-one witness')
-            if witness[0] == 'LAYOUT_COMMITTED':
-                self._commit_rebuild(deadline)
-            with self._fresh(deadline=deadline) as conn:
-                with conn.transaction():
-                    self._settings(conn,deadline,readonly=True)
-                    committed = self._read_witness(conn)
-                    if committed is None or committed[0] != 'INDEXES_REBUILT':
-                        raise ValueError('Missing committed phase-two witness')
-                    report = self._qualify_bm25(conn)
-                    self._checkpoint('phase2_verified')
-                    return _digest((committed[1],_json(report)))
+            if witness[0] == 'INDEXES_REBUILT':
+                try:
+                    return self._qualified_digest(deadline)
+                except _Unqualified as error:
+                    # A committed rebuild that does not qualify is rebuilt, not
+                    # refused forever; the gate stays INDEX_PENDING meanwhile.
+                    _log_refusal('qualification',error)
+            self._commit_rebuild(deadline,witness[0])
+            return self._qualified_digest(deadline)
+
+    def _qualified_digest(self, deadline):
+        with self._fresh(deadline=deadline) as conn:
+            with conn.transaction():
+                self._settings(conn,deadline,readonly=True)
+                committed = self._read_witness(conn)
+                if committed is None or committed[0] != 'INDEXES_REBUILT':
+                    raise ValueError('Missing committed phase-two witness')
+                report = self._qualify_bm25(conn)
+                self._checkpoint('phase2_verified')
+                return _digest((committed[1],_json(report)))
 
     def _write_inventory(self, conn):
         return _inventory(conn,self.plan,readonly=False)
@@ -640,7 +716,7 @@ class MixedTextPhaseOne:
                     raise ValueError('Original serial identity/allocation was not preserved')
 
     def advance(self, expected):
-        try:
+        with _refusing('advance'):
             if self._cleanup_failed:
                 raise ValueError('Prior cleanup was not acknowledged')
             self.plan.binding()
@@ -667,8 +743,6 @@ class MixedTextPhaseOne:
             if expected.state != 'MAINTENANCE':
                 raise ValueError('Phase two is published by publish(), not advance()')
             return admin.record_index_pending(expected)
-        except Exception:
-            raise AccessDenied() from None
 
     def prepare(self, snapshot, *, seconds=3600):
         """Run a phase's slow work before entering the gate's 30s budget.
@@ -691,7 +765,7 @@ class MixedTextPhaseOne:
         Deliberately separate from `advance`, which stays idempotent so that
         crash re-entry never publishes readiness as a side effect.
         """
-        try:
+        with _refusing('publish'):
             if self._cleanup_failed:
                 raise ValueError('Prior cleanup was not acknowledged')
             self.plan.binding()
@@ -702,5 +776,3 @@ class MixedTextPhaseOne:
                     or expected.procedure_digest != self.plan.procedure_digest):
                 raise ValueError('Gate/plan binding mismatch')
             return MaintenanceAdmin(self.path,verifier=self._verify).publish_ready(expected)
-        except Exception:
-            raise AccessDenied() from None
