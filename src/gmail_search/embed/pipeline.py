@@ -16,6 +16,7 @@ from gmail_search.store.db import get_connection
 from gmail_search.store.models import EmbeddingRecord
 from gmail_search.store.queries import (
     EMBED_STATUS_FAILED_PERMANENT,
+    clear_image_embed_retry,
     embedding_exists,
     get_attachments_for_message,
     get_messages_without_embeddings,
@@ -234,13 +235,16 @@ def run_embedding_pipeline(
     # call and did a per-message attachment lookup (~80 min at ~86/s), which
     # dominated the embed cycle and starved the crawl/reindex after it. This
     # filters to real work and honors the same `limit` as Phase 1.
+    # An image attachment is work when it has no image embedding yet, or
+    # when a retry is pending (embed_error set, not permanent): one embedded
+    # page must not hide a sibling page that hit a 503.
     _att_lim = " LIMIT %s" if limit is not None else ""
     _att_where = (
         "((a.extracted_text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM embeddings e "
         "WHERE e.attachment_id = a.id AND e.user_id = a.user_id AND e.chunk_type = 'attachment_text' AND e.model = %s)) "
         "OR (a.image_path IS NOT NULL AND a.embed_status IS DISTINCT FROM %s "
-        "AND NOT EXISTS (SELECT 1 FROM embeddings e "
-        "WHERE e.attachment_id = a.id AND e.user_id = a.user_id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s)))"
+        "AND (a.embed_error IS NOT NULL OR NOT EXISTS (SELECT 1 FROM embeddings e "
+        "WHERE e.attachment_id = a.id AND e.user_id = a.user_id AND e.chunk_type LIKE 'attachment_image%%' AND e.model = %s))))"
     )
     _scope_sql, _scope_params = "m.user_id = %s AND ", (user_id,)
     _p = (
@@ -366,6 +370,8 @@ def run_embedding_pipeline(
 
                 if failures:
                     _record_image_failures(conn, att.id, failures, user_id=user_id)
+                elif att.embed_error:
+                    clear_image_embed_retry(conn, att.id, user_id=user_id)
 
     conn.close()
     logger.info(f"Embedded {total_embedded} chunks total")

@@ -17,9 +17,21 @@ def module():
     return value
 
 
+def _require_approved_fixture():
+    """Skip unless GMS_TEST_PG_DSN names the disposable fixture the probe accepts.
+
+    Being merely set is not enough: the probe refuses any other DSN, and these
+    tests need the *patched* pg_search build besides (see the churn test's
+    docstring). Off-fixture runs must skip, not error."""
+    dsn=os.getenv('GMS_TEST_PG_DSN')
+    if not dsn:pytest.skip('Explicit synthetic ParadeDB required')
+    if not module().dsn_is_approved_fixture(dsn):
+        pytest.skip('GMS_TEST_PG_DSN is not the approved disposable ParadeDB fixture')
+
+
 @pytest.fixture(scope='module')
 def report():
-    if not os.getenv('GMS_TEST_PG_DSN'):pytest.skip('Explicit synthetic ParadeDB required')
+    _require_approved_fixture()
     return module().run()
 
 
@@ -70,7 +82,7 @@ def test_probe_rejects_nonfixture_dsn_before_connect(monkeypatch,dsn):
 
 @pytest.fixture(scope='module')
 def atomic_report():
-    if not os.getenv('GMS_TEST_PG_DSN'):pytest.skip('Explicit synthetic ParadeDB required')
+    _require_approved_fixture()
     return module().run(atomic=True)
 
 
@@ -93,7 +105,7 @@ def test_same_transaction_delete_attach_reindex_keeps_foreign_statistics(atomic_
 
 @pytest.fixture(scope='module')
 def staged_report():
-    if not os.getenv('GMS_TEST_PG_DSN'):pytest.skip('Explicit synthetic ParadeDB required')
+    _require_approved_fixture()
     return module().run(staged=True)
 
 
@@ -114,7 +126,7 @@ def test_committed_delete_attach_then_restart_reindex_is_clean_and_retryable(sta
 
 @pytest.fixture(scope='module')
 def churn_reports():
-    if not os.getenv('GMS_TEST_PG_DSN'):pytest.skip('Explicit synthetic ParadeDB required')
+    _require_approved_fixture()
     return {mode:module().run(churn=mode) for mode in ('observed','unobserved')}
 
 
@@ -152,7 +164,7 @@ def test_generic_plan_after_owner_churn_no_longer_asserts(churn_reports,mode,pro
 
 @pytest.fixture(scope='module')
 def custom_report():
-    if not os.getenv('GMS_TEST_PG_DSN'):pytest.skip('Explicit synthetic ParadeDB required')
+    _require_approved_fixture()
     return module().run(churn='custom_cycles')
 
 

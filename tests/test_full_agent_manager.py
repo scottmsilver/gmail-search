@@ -201,6 +201,23 @@ def test_renew_during_launch_is_applied_after_backend_ready(tmp_path):
     finally:release.set();m.close()
 
 
+def test_renewal_of_an_exited_vm_fails_and_frees_the_slot(tmp_path):
+    """#37: a failed runner powers its VM off. The next renewal must fail, and
+    the job stop, so the controller's heartbeat ends the run."""
+    m,b,s=setup(tmp_path);h,p=request();call(m,h,p);assert s.entered.wait(1)
+    try:
+        s.release.set()
+        def renew(handle,lease):raise RuntimeError('Lease renewal refused')
+        b.renew=renew;b.live.discard(h['handle'])
+        renew_request,_=request('renew',h['handle'],h['context'])
+        assert call(m,renew_request,b'')['code']=='renewal_failed'
+        m.jobs[h['handle']]['thread'].join(2)
+        assert m._row(h['handle'])['state']=='stopped'
+        inventory,_=request('inventory',rpc.ZERO)
+        assert h['handle'] not in call(m,dict(inventory,context_sha256='0'*64),b'')['handles']
+    finally:m.close()
+
+
 def test_stop_drops_completed_job_entry(tmp_path):
     m,b,s=setup(tmp_path);h,p=request();call(m,h,p);assert s.entered.wait(1)
     entry=m.jobs[h['handle']];entry['cancel'].set();entry['thread'].join(2)

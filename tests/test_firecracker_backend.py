@@ -1,6 +1,9 @@
 """Validate fixed synthetic configuration without launching a VMM or using root."""
 import importlib.util
 from pathlib import Path
+import subprocess
+import time
+import types
 
 import pytest
 
@@ -119,6 +122,58 @@ def test_stop_still_marks_a_clean_run_stopped(tmp_path):
     backend.atomic_json(path / 'state.json', {'status': 'running', 'pid': 1})
     backend.finalize_stopped_state(path)
     assert backend.read_json(path / 'state.json') == {'status': 'stopped'}
+
+
+RUNNER = '/usr/bin/python3 -I /tmp/runtime/guest_agent.py'
+POWEROFF = '/sbin/reboot -f'
+
+
+def _runner_step(command, runner):
+    """What the guest shell prints for the command's last step, with the runner
+    swapped for `runner` and the poweroff for a marker."""
+    step = command.decode().rstrip('\n').rsplit('; ', 1)[1]
+    assert step.startswith(RUNNER), step
+    step = step.replace(RUNNER, runner).replace(POWEROFF, 'echo POWEROFF')
+    return subprocess.run(['/bin/sh', '-c', step], capture_output=True, text=True, timeout=5).stdout
+
+
+def test_a_failed_full_agent_runner_powers_off_its_vm():
+    """#37: the guest shell is PID 1 and survives the runner, so a failed runner
+    left the VM up until the 900 s deadline. `/sbin/reboot -f` makes Firecracker
+    exit (microvm-smoke.sh proves it on this pinned rootfs), and the next
+    heartbeat's renewal is then refused."""
+    command = backend.guest_command('agent_full')
+    assert command.endswith(f'{RUNNER} || {POWEROFF}\n'.encode())
+    assert _runner_step(command, 'false') == 'POWEROFF\n'
+
+
+def test_a_completed_full_agent_runner_leaves_its_vm_to_the_controller():
+    """A successful run keeps its VM until the controller stops it, so a
+    heartbeat can never race the answer it has not read yet."""
+    assert _runner_step(backend.guest_command('agent_full'), 'true') == ''
+
+
+@pytest.mark.parametrize('profile', ['shell', 'attachment', 'agent', 'agent_tools', 'agent_mcp', 'agent_pi_mcp'])
+def test_only_the_full_agent_command_powers_off(profile):
+    assert POWEROFF.encode() not in backend.guest_command(profile)
+
+
+def test_renewal_is_refused_once_the_vm_has_exited(tmp_path, monkeypatch):
+    """The supervisor marks an exited VMM stopped; renewing it must fail so the
+    controller's heartbeat ends the run."""
+    monkeypatch.setattr(backend, 'ROOT', tmp_path)
+    handle = 'a' * 32
+    path = tmp_path / 'runs' / handle
+    path.mkdir(parents=True)
+    lease = types.SimpleNamespace(run_id='run', deadline=time.time() + 100, lease_expires=time.time() + 20)
+    backend.atomic_json(path / 'lease.json', {'run_id': 'run', 'deadline': lease.deadline,
+                                              'lease_expires': time.time() + 10})
+    worker = object.__new__(backend.FirecrackerBackend)
+    backend.atomic_json(path / 'state.json', {'status': 'running', 'pid': 1})
+    worker.renew(handle, lease)
+    backend.atomic_json(path / 'state.json', {'status': 'stopped', 'error': ''})
+    with pytest.raises(RuntimeError, match='renewal refused'):
+        worker.renew(handle, lease)
 
 
 @pytest.mark.parametrize('cls_name', [n for n in dir(backend)

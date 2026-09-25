@@ -364,6 +364,66 @@ def test_permanent_page_plus_transient_page_keeps_attachment_retryable(
     assert _read_embed_row(db_path, att_id)["embed_status"] == "failed_permanent"
 
 
+def _count_attachment_fetches(monkeypatch) -> list[str]:
+    """Record each message whose attachments the Phase-2 loop loads, i.e.
+    each message the Phase-2 selection picked."""
+    import gmail_search.embed.pipeline as pipeline
+
+    fetched: list[str] = []
+    real = pipeline.get_attachments_for_message
+
+    def spy(conn, msg_id, **kw):
+        fetched.append(msg_id)
+        return real(conn, msg_id, **kw)
+
+    monkeypatch.setattr(pipeline, "get_attachments_for_message", spy)
+    return fetched
+
+
+def test_transient_page_is_retried_even_when_a_sibling_page_embedded(
+    tmp_path, monkeypatch
+):
+    # Page 2 embeds, page 1 hits a 503. The attachment now HAS an image
+    # embedding, which alone used to drop it from the Phase-2 selection,
+    # so page 1 was never retried despite being "will retry".
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    db_path, cfg, emb, att_id = _pipeline_setup(tmp_path, _page_dir_attachment)
+    emb.embed_image.side_effect = _fail_page_1_with(_UNAVAILABLE())
+    run_embedding_pipeline(db_path, cfg, embedder=emb)
+    assert _read_embed_row(db_path, att_id)["embed_status"] is None
+
+    emb.embed_image.reset_mock()
+    emb.embed_image.side_effect = None
+    emb.embed_image.return_value = _fake_vector()
+    run_embedding_pipeline(db_path, cfg, embedder=emb)
+
+    assert [c.args[0].name for c in emb.embed_image.call_args_list] == ["page_0001.png"]
+    conn = get_connection(db_path)
+    assert embedding_exists(conn, "msg1", att_id, "attachment_image_0", "test-model")
+    conn.close()
+
+
+def test_clean_pass_clears_retry_state_so_attachment_is_not_reselected(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    db_path, cfg, emb, att_id = _pipeline_setup(tmp_path, _page_dir_attachment)
+    emb.embed_image.side_effect = _fail_page_1_with(_UNAVAILABLE())
+    run_embedding_pipeline(db_path, cfg, embedder=emb)
+    emb.embed_image.side_effect = None
+    emb.embed_image.return_value = _fake_vector()
+    run_embedding_pipeline(db_path, cfg, embedder=emb)
+
+    row = _read_embed_row(db_path, att_id)
+    assert row["embed_error"] is None
+    assert row["embed_status"] is None
+    assert row["embed_attempts"] == 1  # history of failed passes is kept
+
+    fetched = _count_attachment_fetches(monkeypatch)
+    run_embedding_pipeline(db_path, cfg, embedder=emb)
+    assert fetched == []
+
+
 def test_permanent_error_classification_unwraps_retry_wrapper():
     from gmail_search.embed.pipeline import _is_permanent_image_error
 
