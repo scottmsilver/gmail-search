@@ -12,7 +12,7 @@ from gmail_search import summarize, propositions
 
 
 @pytest.fixture(autouse=True)
-def _isolated_pg_schema():
+def _pg_isolation():
     """This module owns its disposable schema; never initialize the dev database."""
     yield None
 

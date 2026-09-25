@@ -9,7 +9,6 @@ instruction enforces a "cite_ref EVERYWHERE" rule so the Writer
 
 from __future__ import annotations
 
-import os
 
 RETRIEVER_INSTRUCTION = """\
 You are the Retriever sub-agent. Given a question (and optionally a
@@ -66,21 +65,9 @@ Rules:
 
 
 def build_retriever_agent(*, model: str | None = None, user_id: str | None = None):
-    """Build the Retriever LlmAgent wired to our four retrieval
-    tools. Flash-tier is fine here — the model decides which tool
-    to call, not how to reason over the results.
+    """Retriever: picks and calls the mail tools. The tools themselves come
+    from the runtime's MCP session, which is already scoped to the turn's
+    authenticated user, so `user_id` is accepted for call-site symmetry."""
+    from gmail_search.agents.orchestration import stage_agent
 
-    `user_id` is the deep-mode session's authenticated user; it's bound
-    into every tool so the internal /api/* calls scope to that user
-    (without it the calls 401)."""
-    from google.adk import Agent
-
-    from gmail_search.agents.tools import build_retrieval_tools
-
-    model_name = model or os.environ.get("GMAIL_RETRIEVER_MODEL", "gemini-3.1-pro-preview")
-    return Agent(
-        name="retriever",
-        model=model_name,
-        instruction=RETRIEVER_INSTRUCTION,
-        tools=build_retrieval_tools(user_id=user_id),
-    )
+    return stage_agent("retriever", RETRIEVER_INSTRUCTION, model=model, model_env="GMAIL_RETRIEVER_MODEL")

@@ -2,9 +2,9 @@
 analysis tools to MCP clients (claudebox / Claude Desktop / etc.)
 without re-implementing them.
 
-Why this exists: the same five tools the ADK agents use
-(`search_emails`, `query_emails`, `get_thread`, `sql_query`,
-`run_code`) need to be reachable from non-ADK MCP clients running
+Why this exists: the deep pipeline's tools (`search_emails`,
+`query_emails`, `get_thread`, `sql_query`, …) need to be reachable
+from MCP clients (claudebox) running
 multiple turns concurrently against a single MCP endpoint. We wrap
 the existing async functions + sandbox primitives in a FastMCP app
 and add per-session state binding so concurrent calls don't bleed

@@ -1,6 +1,7 @@
-"""ADK FunctionTool wrappers for the existing HTTP retrieval surface.
+"""Retrieval tools over the existing HTTP surface, served to deep-mode
+runtimes by `mcp_tools_server.py`.
 
-The Retriever agent reuses our live `/api/search`, `/api/query`,
+They reuse our live `/api/search`, `/api/query`,
 `/api/thread/<id>`, `/api/sql` endpoints rather than calling Python
 helpers directly. Two wins:
   1. Same security gate as the chat agent sees — `/api/sql`'s
@@ -9,9 +10,8 @@ helpers directly. Two wins:
   2. One pattern both for Python deep-mode and TypeScript chat-mode
      paths; bugs discovered in one get fixed in the other.
 
-All tool functions return JSON-safe dicts (not pydantic models)
-because that's what ADK's LlmAgent feeds back to the model as tool
-results. Strings are clipped where it matters so a chatty endpoint
+All tool functions return JSON-safe dicts (not pydantic models),
+which is what the MCP server hands back to the model as tool results. Strings are clipped where it matters so a chatty endpoint
 (long SQL result sets, huge thread bodies) can't blow the model's
 context window on a single call.
 
@@ -58,7 +58,7 @@ DEFAULT_TIMEOUT_SECONDS = _agent_http_timeout()
 
 def _default_base_url() -> str:
     """Our Python HTTP surface. Defaults to the serve command's local
-    bind; env override is kept because the ADK tools can run in a
+    bind; env override is kept because the tools can run in a
     container-per-request future where the host/port differ."""
     return os.environ.get("GMAIL_SEARCH_API_URL", "http://127.0.0.1:8090").rstrip("/")
 
@@ -609,150 +609,3 @@ async def get_attachment_batch(items: list[dict], *, user_id: str | None = None)
         return {"error": f"items cap is {BATCH_MAX_ITEMS}; got {len(items)}. Split into multiple batches."}
     results = await _gather_batch(lambda it: get_attachment(**it, user_id=user_id), items)
     return {"results": [{"input": it, "result": r} for it, r in zip(items, results)]}
-
-
-# ── Gemini schema sanitisation ─────────────────────────────────────
-#
-# ADK builds a tool's parameter schema from its Python signature. A
-# `list[dict]` parameter (our *_batch tools) becomes an array whose
-# items are an open object — and ADK marks that object with
-# `additional_properties`. Gemini's non-Vertex function-calling API
-# rejects `additional_properties` ANYWHERE in a tool's parameters with
-# a 400 INVALID_ARGUMENT. genai's own guard only checks the top-level
-# schema and it serialises the ADK proto as-is, so a nested occurrence
-# (the array items, in our case) sails through to the server and kills
-# the whole deep-mode turn. We strip the field at every level before
-# the declaration ever reaches the API.
-
-
-def _strip_additional_properties_from_schema(schema) -> None:
-    """Recursively clear `additional_properties` on an ADK proto Schema
-    and every nested branch (`items`, `properties` values, `any_of`,
-    and `defs` — the `$defs`/ref pool a schema can reference)."""
-    if schema is None:
-        return
-    schema.additional_properties = None
-    _strip_additional_properties_from_schema(getattr(schema, "items", None))
-    for sub in (getattr(schema, "properties", None) or {}).values():
-        _strip_additional_properties_from_schema(sub)
-    for sub in (getattr(schema, "defs", None) or {}).values():
-        _strip_additional_properties_from_schema(sub)
-    for sub in getattr(schema, "any_of", None) or []:
-        _strip_additional_properties_from_schema(sub)
-
-
-def _strip_additional_properties_from_json_schema(node) -> None:
-    """Recursively delete additionalProperties / additional_properties
-    keys from a JSON-schema dict — the declaration shape ADK emits when
-    its JSON_SCHEMA_FOR_FUNC_DECL feature is enabled (currently off, but
-    this keeps us correct if it flips)."""
-    if isinstance(node, dict):
-        node.pop("additionalProperties", None)
-        node.pop("additional_properties", None)
-        for value in node.values():
-            _strip_additional_properties_from_json_schema(value)
-    elif isinstance(node, list):
-        for value in node:
-            _strip_additional_properties_from_json_schema(value)
-
-
-def _scrub_declaration_for_gemini(declaration) -> None:
-    """Remove Gemini-unsupported schema fields from a FunctionDeclaration
-    in place, covering both the proto (`parameters`) and JSON-schema
-    (`parameters_json_schema`) representations ADK may produce."""
-    if declaration is None:
-        return
-    _strip_additional_properties_from_schema(getattr(declaration, "parameters", None))
-    _strip_additional_properties_from_json_schema(getattr(declaration, "parameters_json_schema", None))
-
-
-# Cached lazily so non-ADK test contexts don't import ADK, and so the
-# subclass is defined once rather than per tool.
-_GEMINI_SAFE_TOOL_CLS = None
-
-
-def _gemini_safe_function_tool(func):
-    """Wrap `func` as an ADK FunctionTool whose generated declaration is
-    scrubbed of schema fields the Gemini API rejects (see
-    `_scrub_declaration_for_gemini`)."""
-    global _GEMINI_SAFE_TOOL_CLS
-    if _GEMINI_SAFE_TOOL_CLS is None:
-        from google.adk.tools import FunctionTool
-
-        class GeminiSafeFunctionTool(FunctionTool):
-            def _get_declaration(self):
-                declaration = super()._get_declaration()
-                _scrub_declaration_for_gemini(declaration)
-                return declaration
-
-        _GEMINI_SAFE_TOOL_CLS = GeminiSafeFunctionTool
-    return _GEMINI_SAFE_TOOL_CLS(func)
-
-
-# ── user_id binding ────────────────────────────────────────────────
-#
-# Every tool function takes a keyword-only `user_id` that scopes its
-# /api/* call to the deep-mode session's authenticated user (via the
-# service-token + X-User-Id pair `require_user_id` trusts). Two things
-# have to be true for that to be both correct AND safe:
-#   1. The id must be INJECTED server-side from the request's
-#      authenticated user — not left None, or the call hits the
-#      cookie-less path and 401s ("not signed in").
-#   2. The id must be HIDDEN from the model-visible schema. With a
-#      valid service token, require_user_id trusts X-User-Id verbatim,
-#      so a model-supplied user_id would be a cross-tenant escape
-#      vector. The model must never see or set it.
-# `_bind_user_id` does both: it closes over the authenticated id and
-# strips `user_id` from the wrapper's signature/annotations so ADK's
-# schema builder can't surface it.
-
-
-def _bind_user_id(func, user_id: str | None):
-    """Return an async wrapper that injects `user_id` into `func` and
-    removes `user_id` from the signature ADK introspects to build the
-    tool schema (see the section comment for why both matter)."""
-    import functools
-    import inspect
-
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        kwargs["user_id"] = user_id
-        return await func(*args, **kwargs)
-
-    sig = inspect.signature(func)
-    wrapper.__signature__ = sig.replace(parameters=[p for name, p in sig.parameters.items() if name != "user_id"])
-    # functools.wraps copied func.__annotations__ (which still names
-    # user_id); drop it so any annotation-based schema path agrees with
-    # the trimmed signature.
-    wrapper.__annotations__ = {k: v for k, v in wrapper.__annotations__.items() if k != "user_id"}
-    return wrapper
-
-
-# ── ADK tool factory ───────────────────────────────────────────────
-
-
-def build_retrieval_tools(user_id: str | None = None) -> list:
-    """Wrap each retrieval function as an ADK FunctionTool and return
-    the list the Retriever / root agent consumes via `tools=[...]`.
-
-    `user_id` is the request's authenticated user; it's bound into every
-    tool (see `_bind_user_id`) so the internal /api/* calls scope to that
-    user and don't 401. Defaults to None for single-pool / test contexts.
-
-    Uses `_gemini_safe_function_tool` so the *_batch tools' `list[dict]`
-    schemas don't carry `additional_properties` (which Gemini rejects).
-    Imported lazily so non-ADK test contexts don't pay the ADK import
-    cost just to call the functions directly."""
-    return [
-        _gemini_safe_function_tool(_bind_user_id(fn, user_id))
-        for fn in (
-            search_emails,
-            search_emails_batch,
-            query_emails,
-            query_emails_batch,
-            get_thread,
-            get_thread_batch,
-            get_attachment,
-            get_attachment_batch,
-        )
-    ]

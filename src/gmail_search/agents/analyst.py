@@ -1,37 +1,11 @@
-"""The Analyst sub-agent — ADK LlmAgent with one tool (`run_code`) that
-executes Python in the Docker sandbox and returns stdout / stderr /
-artifact ids.
-
-Flow for a deep-mode turn:
-  1. Orchestrator seeds `evidence_records` (list of message / thread
-     rows the retriever produced) + opens a DB connection the tool
-     will use to persist artifacts.
-  2. `build_analyst_agent(...)` returns a closure-bound LlmAgent so
-     tool invocations land on THIS session's sandbox input + artifact
-     sink — no module-level shared state, safe for concurrent turns.
-  3. The model emits `run_code({code: "..."})`. The tool dispatches
-     to `execute_in_sandbox()`, persists any artifacts it produced to
-     `agent_artifacts`, and returns a compact result dict.
-  4. The model reads stdout / stderr / artifact ids, decides to iterate
-     (write more code) or hand off. The caller sees all of this as
-     `tool_call` / `tool_result` events on the session transcript.
-
-Deliberately minimal: one tool, one model call per turn. Planner,
-Retriever, Writer, Critic come online in phase 4+ and REUSE this
-tool via ADK's multi-agent orchestration.
+"""The Analyst stage of the deep pipeline: its instruction (keyed to the
+schema shape this process talks to, plus any matching SKILL.md bodies) and
+its StageAgent. The runtime adapter (claudebox) supplies the tools.
 """
 
 from __future__ import annotations
 
-import logging
-import os
 from pathlib import Path
-from typing import Any
-
-from gmail_search.agents.sandbox import SandboxRequest, execute_in_sandbox
-from gmail_search.agents.session import save_artifact
-
-logger = logging.getLogger(__name__)
 
 
 # Instruction injected into the Analyst's LLM call. Kept separate
@@ -138,153 +112,12 @@ def analyst_instruction() -> str:
     return _ANALYST_INSTRUCTION_TEMPLATE.replace("{bm25_key}", selected_bm25_key())
 
 
-def _truncate(s: str, cap: int) -> str:
-    """Clip a string to a ceiling, with a marker so the model knows
-    content was cut. Important for tool results: stdout/stderr from
-    a runaway snippet can be megabytes, and shipping all of that back
-    to the LLM wastes tokens and can blow the context window."""
-    if len(s) <= cap:
-        return s
-    return s[: cap - 16] + f"\n... (truncated, original {len(s)} chars)"
+def build_analyst_agent(*, model: str | None = None, instruction: str | None = None):
+    """Analyst: computation over the retrieved evidence. `instruction`
+    defaults to analyst_instruction(); callers pass the skill-matched one."""
+    from gmail_search.agents.orchestration import stage_agent
 
-
-def build_run_code_tool(
-    *,
-    evidence_records: list[dict] | dict | None,
-    db_dsn: str | None,
-    session_id: str,
-    db_conn,
-    timeout_seconds: int = 60,
-    conversation_id: str | None = None,
-    user_id: str | None = None,
-):
-    """Return an ADK FunctionTool bound to THIS session's sandbox
-    inputs + artifact sink.
-
-    The returned callable's signature is `run_code(code: str) -> dict`.
-    ADK introspects the Python signature + docstring to produce the
-    schema the LLM sees, so those are the tool's real contract.
-
-    Artifacts produced by the snippet are persisted to
-    `agent_artifacts` before the tool returns, and their ids are
-    included in the result so the model can cite them later.
-    """
-    from google.adk.tools import FunctionTool
-
-    def run_code(code: str) -> dict:
-        """Execute a Python snippet in the analysis sandbox.
-
-        Args:
-            code: A self-contained Python snippet. Has access to
-                `evidence` (pandas DataFrame from retrieval), `db`
-                (read-only psycopg connection), `pd`, `np`, `plt`,
-                `sns`, `sklearn`, and `save_artifact(name, obj)`.
-
-        Returns:
-            A dict with `exit_code`, `stdout`, `stderr`, `wall_ms`,
-            `timed_out`, `oom_killed`, and `artifacts`: a list of
-            `{id, name, mime_type}` rows for every artifact the
-            snippet persisted via save_artifact. The `id` is the row
-            in `agent_artifacts` — cite in the final answer as
-            `[art:<id>]`.
-        """
-        req = SandboxRequest(
-            code=code,
-            evidence=evidence_records,
-            db_dsn=db_dsn,
-            timeout_seconds=timeout_seconds,
-            conversation_id=conversation_id,
-            user_id=user_id,
-        )
-        result = execute_in_sandbox(req)
-
-        persisted: list[dict[str, Any]] = []
-        for art in result.artifacts:
-            try:
-                art_id = save_artifact(
-                    db_conn,
-                    session_id=session_id,
-                    name=art.name,
-                    mime_type=art.mime_type,
-                    data=art.data,
-                )
-                persisted.append({"id": art_id, "name": art.name, "mime_type": art.mime_type})
-            except Exception as e:
-                logger.warning(f"save_artifact failed for {art.name}: {e}")
-
-        return {
-            "exit_code": result.exit_code,
-            "stdout": _truncate(result.stdout, 8000),
-            "stderr": _truncate(result.stderr, 4000),
-            "wall_ms": result.wall_ms,
-            "timed_out": result.timed_out,
-            "oom_killed": result.oom_killed,
-            "artifacts": persisted,
-        }
-
-    return FunctionTool(run_code)
-
-
-def build_analyst_agent(
-    *,
-    evidence_records: list[dict] | dict | None,
-    db_dsn: str | None,
-    session_id: str,
-    db_conn,
-    model: str | None = None,
-    instruction: str | None = None,
-    conversation_id: str | None = None,
-    user_id: str | None = None,
-):
-    """Assemble the Analyst LlmAgent ready to run.
-
-    Model defaults to $GMAIL_ANALYST_MODEL or gemini-2.5-flash — the
-    Analyst doesn't need pro-tier reasoning for most questions; the
-    Writer / Critic are where we spend the bigger model. The
-    `instruction` override lets the Planner inject question-specific
-    context without the Analyst having to know about the Planner.
-    """
-    from google.adk import Agent
-
-    run_code = build_run_code_tool(
-        evidence_records=evidence_records,
-        db_dsn=db_dsn,
-        session_id=session_id,
-        db_conn=db_conn,
-        conversation_id=conversation_id,
-        user_id=user_id,
-    )
-    # Default model bumped from gemini-2.5-flash to 3.1-pro after a
-    # live test: flash agents reliably failed to invoke `run_code`
-    # even on questions whose plan explicitly required computation
-    # (matplotlib plots, aggregations). Pro-3.1 chose the tool on
-    # the first try. Override via $GMAIL_ANALYST_MODEL.
-    model_name = model or os.environ.get("GMAIL_ANALYST_MODEL", "gemini-3.1-pro-preview")
-    return Agent(
-        name="analyst",
-        model=model_name,
-        instruction=_as_constant_instruction(instruction or analyst_instruction()),
-        tools=[run_code],
-    )
-
-
-def _as_constant_instruction(text: str):
-    """Wrap a ready-to-use instruction as an ADK InstructionProvider (a
-    callable) so ADK SKIPS its `{var}` session-state substitution.
-
-    The Analyst injects matched SKILL.md bodies into its instruction,
-    and real skills contain literal braces (a gstack skill prints
-    `v{to}`). With a plain-string instruction ADK treats `{to}` as a
-    missing state variable and crashes the stage with
-    `KeyError: Context variable not found: to`. A provider is resolved
-    with `bypass_state_injection=True` — no templating. We don't rely on
-    ADK session state anyway: each sub-agent gets a one-shot session and
-    context is curated through the prompt."""
-
-    def _provider(_ctx):  # ADK calls this with a ReadonlyContext
-        return text
-
-    return _provider
+    return stage_agent("analyst", instruction or analyst_instruction(), model=model, model_env="GMAIL_ANALYST_MODEL")
 
 
 # ── Local skills discovery ─────────────────────────────────────────

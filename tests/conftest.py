@@ -161,8 +161,53 @@ def pg_schema_tools():
     )
 
 
+class _LazySchema:
+    """A per-test schema built on first use: CREATE SCHEMA, init_db and the
+    bootstrap user cost 0.7-1.9 s, and most of the ~3,400 tests never touch
+    Postgres (the whole suite took over an hour, 2026-09-24)."""
+
+    def __init__(self, schema_name):
+        self.schema_name = schema_name
+        self.created = False
+
+    def ensure(self):
+        if self.created:
+            return
+        self.created = True  # before seeding: seeding connects through the hook
+        from gmail_search.auth import write_user as _write_user_mod
+
+        _make_pg_schema(self.schema_name)
+        _write_user_mod._BOOTSTRAP_CACHE.clear()
+        _seed_bootstrap_user(self.schema_name)
+
+    def targets(self, conninfo, kwargs):
+        return self.schema_name in str(conninfo) or self.schema_name in str(kwargs.get("options", ""))
+
+
+def _build_schema_on_first_connect(monkeypatch, lazy):
+    """Route every psycopg connection (sync, async, pools) through `lazy`."""
+    import psycopg
+
+    sync_connect = psycopg.Connection.connect.__func__
+    async_connect = psycopg.AsyncConnection.connect.__func__
+
+    def connect(cls, conninfo="", **kwargs):
+        if lazy.targets(conninfo, kwargs):
+            lazy.ensure()
+        return sync_connect(cls, conninfo, **kwargs)
+
+    async def connect_async(cls, conninfo="", **kwargs):
+        if lazy.targets(conninfo, kwargs):
+            lazy.ensure()
+        return await async_connect(cls, conninfo, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(connect))
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", classmethod(connect_async))
+    monkeypatch.setattr(psycopg, "connect", psycopg.Connection.connect)
+
+
 @pytest.fixture(autouse=True)
-def _isolated_pg_schema(request, tmp_path, monkeypatch):
+def _pg_isolation(request, tmp_path, monkeypatch):
     """Autouse PG-schema isolation for every test.
 
     Stage 2 dropped the SQLite backend, which means every `init_db` /
@@ -170,16 +215,13 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
     tests that use `tmp_path / "test.db"` end up writing straight into
     the production `public` schema on the dev machine.
 
-    This fixture creates a fresh `test_<uuid8>` schema per test and wires
-    `DB_DSN` with an `options=-csearch_path=...` query param so every
-    connection opened by `get_connection()` lands in that schema.
-    Teardown drops the schema with CASCADE. Skips when PG isn't
-    reachable (dev machines that haven't started the paradedb container)
-    — tests that don't touch the DB still run.
-
-    Tests that need the schema name (e.g. integration smoke tests) can
-    depend on the `db_backend` fixture, which is a thin wrapper around
-    this one.
+    Every test gets `DB_DSN` pointing at its own `test_<uuid8>` schema
+    (`options=-csearch_path=...`), so any connection lands there. The
+    schema itself is created only when something first connects to it
+    (see `_LazySchema`); teardown drops it with CASCADE if it was. Tests
+    that need it to exist up front depend on `_isolated_pg_schema` or
+    `db_backend`. Skips when PG isn't reachable — tests that don't touch
+    the DB still run.
     """
     if not _pg_server_reachable():
         # No disposable cluster configured. Crucially, do NOT leave `DB_DSN`
@@ -196,11 +238,9 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
         yield None
         return
 
-    schema_name = f"test_{uuid.uuid4().hex[:8]}"
-    _make_pg_schema(schema_name)
-
+    lazy = _LazySchema(f"test_{uuid.uuid4().hex[:8]}")
     monkeypatch.setenv("DB_BACKEND", "postgres")
-    monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(schema_name))
+    monkeypatch.setenv("DB_DSN", _pg_dsn_for_schema(lazy.schema_name))
     # The suite as a whole runs on the NUMERIC shape: the gateway search-reader
     # fixtures and `migrate_owner_partitions.py` are written against it. Since
     # the profile fences landed this is a *choice* rather than the only thing
@@ -210,20 +250,30 @@ def _isolated_pg_schema(request, tmp_path, monkeypatch):
 
     # Multi-tenant Phase 2/3: every per-user table requires a non-NULL
     # user_id and `resolve_write_user_id` looks up `users` by email.
-    # Tests don't sign anyone in, so seed a bootstrap row so write
-    # paths don't blow up with "bootstrap user not found." Clear the
-    # process-level cache too — a previous test in this process may
-    # have memo'd a user_id that doesn't exist in this fresh schema.
+    # Tests don't sign anyone in, so the schema is seeded with a bootstrap
+    # row when built. Clear the process-level cache too — a previous test
+    # in this process may have memo'd a user_id that doesn't exist here.
     from gmail_search.auth import write_user as _write_user_mod
 
     _write_user_mod._BOOTSTRAP_CACHE.clear()
-    _seed_bootstrap_user(schema_name)
-
+    _build_schema_on_first_connect(monkeypatch, lazy)
     try:
-        yield {"kind": "postgres", "schema": schema_name}
+        yield lazy
     finally:
         _write_user_mod._BOOTSTRAP_CACHE.clear()
-        _drop_pg_schema(schema_name)
+        if lazy.created:
+            _drop_pg_schema(lazy.schema_name)
+
+
+@pytest.fixture
+def _isolated_pg_schema(_pg_isolation):
+    """This test's isolated schema, built now: `{"kind": "postgres",
+    "schema": name}`, or None when no test database is configured."""
+    if _pg_isolation is None:
+        yield None
+        return
+    _pg_isolation.ensure()
+    yield {"kind": "postgres", "schema": _pg_isolation.schema_name}
 
 
 def _seed_bootstrap_user(schema_name: str) -> None:

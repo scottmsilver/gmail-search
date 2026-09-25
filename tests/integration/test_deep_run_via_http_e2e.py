@@ -115,11 +115,11 @@ def test_backend_field_overrides_env(
     monkeypatch,
 ):
     """`backend: "claude_code"` in the request body must beat the
-    env-default `adk`. We verify the run actually went through
+    env default (`pi`). We verify the run actually went through
     claudebox by checking the side-channel admin endpoint records
     tool calls for the session_id the service announced."""
     monkeypatch.setenv("GMAIL_DEEP_REAL", "1")
-    monkeypatch.setenv("GMAIL_DEEP_BACKEND", "adk")  # env default that should be overridden
+    monkeypatch.setenv("GMAIL_DEEP_BACKEND", "pi")  # env default that should be overridden
 
     body = {
         "conversation_id": fresh_conversation_id,

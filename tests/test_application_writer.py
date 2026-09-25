@@ -14,7 +14,7 @@ from gmail_search.gateway.partition_profiles import NUMERIC_OWNER_PARTITIONS_V1 
 
 
 @pytest.fixture(autouse=True)
-def _isolated_pg_schema():
+def _pg_isolation():
     yield None
 
 

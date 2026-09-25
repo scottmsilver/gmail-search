@@ -4,7 +4,7 @@
     conftest.py, not a test module);
   * points perf tests at the REAL database/schema.
 
-The repo's top-level conftest has an autouse `_isolated_pg_schema` fixture
+The repo's top-level conftest has an autouse `_pg_isolation` fixture
 that rewrites DB_DSN to a fresh EMPTY `test_<uuid>` schema per test, so
 ordinary tests never touch production data. The perf gate is the deliberate
 exception: it must measure the real corpus. The autouse `_perf_real_db`
@@ -38,12 +38,12 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(autouse=True)
-def _perf_real_db(_isolated_pg_schema, monkeypatch):
+def _perf_real_db(_pg_isolation, monkeypatch):
     """Override the top-level autouse schema isolation: perf tests measure
     the live corpus, so point DB_DSN at the serve process's real DSN. If no
     real DSN can be resolved we leave the env as-is (tests then skip on the
     empty-corpus guard)."""
-    # IMPORTANT: by the time this runs, the top-level `_isolated_pg_schema`
+    # IMPORTANT: by the time this runs, the top-level `_pg_isolation`
     # has already overwritten os.environ["DB_DSN"] with its empty test
     # schema. So we must NOT consult the live env for the DSN here — we read
     # the serve process's DSN straight from /proc (never the polluted env),

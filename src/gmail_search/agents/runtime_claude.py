@@ -1,5 +1,5 @@
-"""Claudebox runtime adapter: drop-in replacement for `adk_invoke` that
-calls a `psyb0t/docker-claudebox` HTTP endpoint instead of Google ADK.
+"""Claudebox runtime adapter: the orchestrator's per-stage `invoke`, which
+calls a `psyb0t/docker-claudebox` HTTP endpoint.
 
 `claudebox_invoke(agent, prompt, *, workspace, cost_sink=None)` returns
 the same `StageResult` the orchestrator already consumes — text plus a
@@ -33,7 +33,7 @@ from gmail_search.agents.jsonl_tail import (  # noqa: F401
     map_jsonl_event_to_tool_calls,
     tail_session_events,
 )
-from gmail_search.agents.orchestration import AgentLike, StageResult  # noqa: F401
+from gmail_search.agents.orchestration import StageAgent, StageResult  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -328,8 +328,7 @@ def _extract_tool_calls_from_messages(messages: list[dict]) -> list[dict[str, An
     tool_calls list. `tool_use` blocks (in assistant turns) become
     `{"name", "args"}`; `tool_result` blocks (in tool_result turns)
     become `{"name", "response"}`. Both shapes coexist in the same
-    list, matching what `_extract_text_and_tool_calls` produces in
-    the ADK runtime."""
+    list, the shape the orchestrator reads."""
     tool_calls: list[dict[str, Any]] = []
     tool_use_id_to_name: dict[str, str] = {}
     for turn in messages:
@@ -556,7 +555,7 @@ async def claudebox_invoke(
     event_sink: EventSink | None = None,
     resume: str | None = None,
 ) -> StageResult:
-    """Drop-in replacement for `adk_invoke` that talks to a
+    """The orchestrator's per-stage `invoke`: talks to a
     docker-claudebox HTTP server.
 
     Behaviour is gated by `GMAIL_CLAUDEBOX_USE_ASYNC` (default `1`):
@@ -567,9 +566,8 @@ async def claudebox_invoke(
       * sync (`GMAIL_CLAUDEBOX_USE_ASYNC=0`): the legacy single-POST
         path, kept verbatim as a deploy-time fallback.
 
-    Returns `StageResult(text=..., tool_calls=[...])` matching the
-    ADK adapter, so the orchestrator's stage helpers don't need to
-    know which backend is wired in.
+    Returns `StageResult(text=..., tool_calls=[...])`, the shape the
+    orchestrator's stage helpers read.
 
     `workspace` selects a subdirectory under the claudebox server's
     `/workspaces` root — each deep-mode turn typically maps to its

@@ -8,7 +8,6 @@ rounds total to avoid thrash).
 
 from __future__ import annotations
 
-import os
 
 CRITIC_INSTRUCTION = """\
 You are the Critic sub-agent. You receive:
@@ -57,15 +56,7 @@ Output ONLY the JSON object. No prose.
 
 
 def build_critic_agent(*, model: str | None = None):
-    """Build the Critic LlmAgent. Flash model is sufficient because
-    the review is mechanical (token cross-check + groundedness), not
-    open-ended reasoning."""
-    from google.adk import Agent
+    """Critic: token cross-check and groundedness review."""
+    from gmail_search.agents.orchestration import stage_agent
 
-    model_name = model or os.environ.get("GMAIL_CRITIC_MODEL", "gemini-3.1-pro-preview")
-    return Agent(
-        name="critic",
-        model=model_name,
-        instruction=CRITIC_INSTRUCTION,
-        tools=[],
-    )
+    return stage_agent("critic", CRITIC_INSTRUCTION, model=model, model_env="GMAIL_CRITIC_MODEL")

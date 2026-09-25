@@ -2,7 +2,7 @@
 
 These tools wrap our existing HTTP endpoints (/api/search, /api/query,
 /api/thread/<id>, /api/sql). We test the WRAPPER behavior — clip
-logic, cite_ref backfill, build_retrieval_tools assembly — by
+logic, cite_ref backfill, batching — by
 stubbing httpx.AsyncClient. No live server needed.
 
 Tools are async because the retriever runs inside the same FastAPI
@@ -14,13 +14,6 @@ new request because the loop is blocked).
 from __future__ import annotations
 
 import pytest
-
-try:
-    import google.adk  # noqa: F401
-
-    ADK_AVAILABLE = True
-except ImportError:
-    ADK_AVAILABLE = False
 
 
 def _stub_httpx_async(monkeypatch, response_json: dict):
@@ -281,145 +274,6 @@ async def test_find_facts_exhaustive_false_lowercased(monkeypatch):
     await find_facts("vins", exhaustive=False)
     assert captured["params"]["exhaustive"] == "false"
     assert captured["params"]["k"] == 200  # default cap
-
-
-def _schema_carries_additional_properties(schema) -> bool:
-    """True if an ADK proto Schema (or any nested items/properties/anyOf
-    branch) still sets `additional_properties`. Gemini's non-Vertex
-    function-calling API rejects that field anywhere in a tool's
-    parameter schema."""
-    if schema is None:
-        return False
-    if getattr(schema, "additional_properties", None) is not None:
-        return True
-    if getattr(schema, "items", None) is not None and _schema_carries_additional_properties(schema.items):
-        return True
-    if getattr(schema, "properties", None):
-        if any(_schema_carries_additional_properties(s) for s in schema.properties.values()):
-            return True
-    if getattr(schema, "defs", None):
-        if any(_schema_carries_additional_properties(s) for s in schema.defs.values()):
-            return True
-    if getattr(schema, "any_of", None):
-        if any(_schema_carries_additional_properties(s) for s in schema.any_of):
-            return True
-    return False
-
-
-@pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
-def test_retrieval_tool_declarations_have_no_additional_properties():
-    """The *_batch tools take `list[dict]`, which ADK renders as an
-    array whose items carry `additional_properties`. Gemini's
-    (non-Vertex) function-calling API rejects that field — nested, so
-    genai's own top-level guard misses it — and deep mode dies with a
-    400 INVALID_ARGUMENT. Every generated declaration must be clean."""
-    from gmail_search.agents.tools import build_retrieval_tools
-
-    offenders = [
-        tool.name
-        for tool in build_retrieval_tools()
-        if _schema_carries_additional_properties(tool._get_declaration().parameters)
-    ]
-    assert offenders == [], f"declarations still carry additional_properties: {offenders}"
-
-
-def _capture_request_headers(monkeypatch):
-    """Patch httpx.AsyncClient so each GET/POST records the headers it
-    was called with. Returns a dict that fills in `headers` after a
-    call — lets a test assert the auth headers a tool attaches."""
-    import httpx
-
-    from gmail_search.agents import tools
-
-    captured: dict = {}
-
-    class _R:
-        status_code = 200
-        text = ""
-
-        def json(self):
-            return {"results": []}
-
-    class _C:
-        def __init__(self, *a, **kw):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return None
-
-        async def get(self, url, params=None, headers=None):  # noqa: ARG002
-            captured["headers"] = headers or {}
-            return _R()
-
-        async def post(self, url, json=None, headers=None):  # noqa: ARG002
-            captured["headers"] = headers or {}
-            return _R()
-
-    monkeypatch.setattr(tools.httpx, "AsyncClient", _C)
-    monkeypatch.setattr(httpx, "AsyncClient", _C)
-    return captured
-
-
-def _tool_named(tools_list, name):
-    return next(t for t in tools_list if t.name == name)
-
-
-@pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
-@pytest.mark.asyncio
-async def test_build_retrieval_tools_injects_authenticated_user_id(monkeypatch):
-    """Deep mode binds the request's authenticated user_id into every
-    tool so the internal /api/* calls carry the service-token +
-    X-User-Id pair `require_user_id` needs. Without this the calls hit
-    the cookie-less path and 401 ('not signed in'), which is exactly
-    what killed deep-mode retrieval."""
-    from gmail_search.agents.tools import build_retrieval_tools
-
-    monkeypatch.setenv("GMAIL_MCP_ADMIN_TOKEN", "svc-secret")
-    captured = _capture_request_headers(monkeypatch)
-
-    tools = build_retrieval_tools(user_id="u_test123")
-    await _tool_named(tools, "search_emails").func(query="staircase")
-
-    assert captured["headers"].get("X-User-Id") == "u_test123"
-    assert captured["headers"].get("Authorization") == "Bearer svc-secret"
-
-
-@pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
-def test_build_retrieval_tools_hides_user_id_from_schema():
-    """user_id must NOT be a model-visible parameter. With a valid
-    service token, require_user_id trusts X-User-Id verbatim, so a
-    model-supplied user_id would be a cross-tenant escape vector. The
-    authenticated id is injected server-side; the model never sees it."""
-    from gmail_search.agents.tools import build_retrieval_tools
-
-    for tool in build_retrieval_tools(user_id="u_test123"):
-        params = tool._get_declaration().parameters
-        props = getattr(params, "properties", None) or {}
-        assert "user_id" not in props, f"{tool.name} exposes user_id to the model"
-
-
-@pytest.mark.skipif(not ADK_AVAILABLE, reason="google-adk not installed")
-def test_build_retrieval_tools_assembles_expected_set():
-    """All retrieval tools must always be present — the Retriever
-    agent relies on this exact set. A missing tool silently degrades
-    retrieval quality."""
-    from gmail_search.agents.tools import build_retrieval_tools
-
-    tools = build_retrieval_tools()
-    names = sorted(t.name for t in tools)
-    assert names == [
-        "get_attachment",
-        "get_attachment_batch",
-        "get_thread",
-        "get_thread_batch",
-        "query_emails",
-        "query_emails_batch",
-        "search_emails",
-        "search_emails_batch",
-    ]
 
 
 @pytest.mark.asyncio

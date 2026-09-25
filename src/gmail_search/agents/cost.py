@@ -1,6 +1,6 @@
 """Cost accounting for the deep-analysis pipeline.
 
-Each sub-agent invocation through `adk_invoke` runs one LLM call. ADK
+Each sub-agent invocation runs one LLM call. The runtime
 events carry `usage_metadata` with prompt / candidates token counts;
 this module turns those into dollar estimates and appends a row to
 the existing `costs` table (same table the embed + chat paths write

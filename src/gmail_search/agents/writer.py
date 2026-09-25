@@ -13,7 +13,6 @@ Citation rules mirror the chat-mode prompt (web/lib/systemPrompt.ts):
 
 from __future__ import annotations
 
-import os
 
 WRITER_INSTRUCTION = """\
 You are the Writer sub-agent. You receive a structured context:
@@ -53,16 +52,7 @@ Output markdown only. No front matter, no code fences.
 
 
 def build_writer_agent(*, model: str | None = None):
-    """Build the Writer LlmAgent. Default model is pro-tier because
-    the Writer's job (synthesise with grounded citations) benefits
-    from the extra reasoning budget; a flash model misses citations
-    more often."""
-    from google.adk import Agent
+    """Writer: synthesises the answer with grounded citations."""
+    from gmail_search.agents.orchestration import stage_agent
 
-    model_name = model or os.environ.get("GMAIL_WRITER_MODEL", "gemini-3.1-pro-preview")
-    return Agent(
-        name="writer",
-        model=model_name,
-        instruction=WRITER_INSTRUCTION,
-        tools=[],
-    )
+    return stage_agent("writer", WRITER_INSTRUCTION, model=model, model_env="GMAIL_WRITER_MODEL")

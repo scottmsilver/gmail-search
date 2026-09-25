@@ -10,7 +10,6 @@ and displayed in the UI's "deep-mode" panel for transparency.
 
 from __future__ import annotations
 
-import os
 
 PLANNER_INSTRUCTION = """\
 You are the Planner sub-agent for a deep-analysis pipeline over a
@@ -88,15 +87,7 @@ BUDGET AWARENESS (important for large questions):
 
 
 def build_planner_agent(*, model: str | None = None):
-    """Build the Planner LlmAgent. No tools; one call, JSON out.
-    Model default is flash — planning is cheap and doesn't need
-    pro-tier reasoning."""
-    from google.adk import Agent
+    """Planner: no tools; one call, JSON out."""
+    from gmail_search.agents.orchestration import stage_agent
 
-    model_name = model or os.environ.get("GMAIL_PLANNER_MODEL", "gemini-3.1-pro-preview")
-    return Agent(
-        name="planner",
-        model=model_name,
-        instruction=PLANNER_INSTRUCTION,
-        tools=[],
-    )
+    return stage_agent("planner", PLANNER_INSTRUCTION, model=model, model_env="GMAIL_PLANNER_MODEL")

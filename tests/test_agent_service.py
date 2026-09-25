@@ -1,96 +1,16 @@
 """Tests for the deep-analysis HTTP surface (`gmail_search.agents.service`).
 
-Covers registration-time concerns (the ADK import probe). The streaming
+Covers backend selection and the claude_code wiring. The streaming
 endpoints themselves are exercised against the orchestrator directly in
 `test_agent_orchestration.py`, without spinning up FastAPI.
 """
 
 from __future__ import annotations
 
-import builtins
-import logging
-import sys
-from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
 
 from gmail_search.agents import service
-
-
-def test_register_agent_routes_calls_adk_probe(monkeypatch):
-    """`register_agent_routes` must invoke the ADK probe at boot so a
-    broken install surfaces in the server logs immediately, not at the
-    first /api/agent/analyze request hours later. We don't care here
-    HOW the probe checks; we care that it RAN."""
-    called: list[bool] = []
-
-    def _spy() -> None:
-        called.append(True)
-
-    monkeypatch.setattr(service, "_probe_adk_imports", _spy, raising=True)
-    app = FastAPI()
-    service.register_agent_routes(app, Path("/tmp/unused.db"))
-    assert called == [True], "register_agent_routes did not invoke the ADK probe"
-
-
-def test_probe_adk_imports_warns_on_broken_submodule(monkeypatch, caplog):
-    """The probe's contract: when one of the ADK-touching submodules
-    fails to import, log a WARNING and return cleanly. Chat mode must
-    stay healthy even though deep mode is wedged.
-
-    We simulate "ADK importable-but-broken" by intercepting the
-    builtin `__import__` for the duration of the probe call so that
-    any attempt to re-import a key submodule raises ImportError. This
-    matches the shape of a real-world failure (e.g. `google.adk` is
-    installed but a transitive dep is the wrong version)."""
-    # The probe does `from gmail_search.agents import (analyst, ...)`.
-    # Drop the cached submodules so the import statement actually
-    # executes the loader path (and our patched __import__ sees it).
-    cached: dict[str, object] = {}
-    target = "gmail_search.agents.retriever"
-    if target in sys.modules:
-        cached[target] = sys.modules.pop(target)
-
-    real_import = builtins.__import__
-
-    def _patched_import(name, globals=None, locals=None, fromlist=(), level=0):
-        # Trip the import we want to fake-break. Any other import goes
-        # through normally so the rest of the test machinery works.
-        if name == "gmail_search.agents" and "retriever" in (fromlist or ()):
-            raise ImportError("simulated ADK breakage: retriever submodule")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", _patched_import)
-
-    try:
-        with caplog.at_level(logging.WARNING, logger=service.logger.name):
-            # Must NOT raise — the contract is wrap-and-warn.
-            service._probe_adk_imports()
-
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any(
-            "ADK imports failed" in r.getMessage() for r in warnings
-        ), f"expected ADK-failure warning, got: {[r.getMessage() for r in warnings]}"
-    finally:
-        # Restore any submodule we evicted so other tests aren't poisoned.
-        for k, v in cached.items():
-            sys.modules[k] = v
-
-
-def test_probe_adk_imports_silent_on_healthy_install(caplog):
-    """Sanity check: when imports succeed (the dev/CI machine has a
-    working ADK install), the probe is silent. No warning, no error,
-    no crash."""
-    with caplog.at_level(logging.WARNING, logger=service.logger.name):
-        service._probe_adk_imports()
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert not any(
-        "ADK imports failed" in r.getMessage() for r in warnings
-    ), f"healthy install should not warn; got: {[r.getMessage() for r in warnings]}"
-
-
-# ── claude_code backend wiring ─────────────────────────────────────
 
 
 def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypatch, tmp_path):
@@ -175,7 +95,7 @@ def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypat
             await self.invoke(_A(), "x")  # fire one invoke to capture wiring
             return None
 
-    # Stub DB + builders so no real ADK / DB activity happens.
+    # Stub DB + builders so no real model / DB activity happens.
     class _FakeConn:
         def close(self):
             pass
@@ -417,60 +337,11 @@ def test_deep_backend_accepts_pi():
     assert service._deep_backend("pi") == "pi"
 
 
-def test_real_run_adk_backend_does_not_register_mcp_session(monkeypatch, tmp_path):
-    """Default backend must NOT touch the MCP session registry —
-    that path is entirely claude_code-only."""
-    import asyncio
-
+def test_deep_backend_defaults_to_pi_and_no_longer_knows_adk(monkeypatch):
+    # ADK was removed; a stale "adk" from an old client gets the default.
     monkeypatch.delenv("GMAIL_DEEP_BACKEND", raising=False)
-
-    register_calls: list[str] = []
-    unregister_calls: list[str] = []
-
-    import gmail_search.agents.runtime_claude as rc
-
-    async def fake_register(sid, **kw):
-        register_calls.append(sid)
-
-    async def fake_unregister(sid):
-        unregister_calls.append(sid)
-
-    monkeypatch.setattr(rc, "register_session_via_admin", fake_register)
-    monkeypatch.setattr(rc, "unregister_session_via_admin", fake_unregister)
-
-    class _FakeOrch:
-        def __init__(self, **kw):
-            pass
-
-        async def run(self, question):
-            return None
-
-    class _FakeConn:
-        def close(self):
-            pass
-
-    monkeypatch.setattr(service, "get_connection", lambda _path: _FakeConn())
-    monkeypatch.setattr(service, "fetch_events_after", lambda *a, **kw: [])
-    import gmail_search.agents.orchestration as orch_mod
-
-    monkeypatch.setattr(orch_mod, "Orchestrator", _FakeOrch)
-    for mod_name, attr in [
-        ("planner", "build_planner_agent"),
-        ("retriever", "build_retriever_agent"),
-        ("writer", "build_writer_agent"),
-        ("critic", "build_critic_agent"),
-    ]:
-        mod = __import__(f"gmail_search.agents.{mod_name}", fromlist=[attr])
-        monkeypatch.setattr(mod, attr, lambda *a, **kw: object(), raising=True)
-
-    async def consume():
-        async for _ in service._real_run(tmp_path / "x.db", "adk-sess", "q"):
-            pass
-
-    asyncio.run(consume())
-
-    assert register_calls == []
-    assert unregister_calls == []
+    assert service._deep_backend(None) == service.DEFAULT_BACKEND == "pi"
+    assert service._deep_backend("adk") == "pi"
 
 
 # ── conversation history preamble ──────────────────────────────────
@@ -657,3 +528,40 @@ def test_removed_backends_rejected_at_api_boundary(backend):
 
     with pytest.raises(ValidationError):
         service.AnalyzeRequest(question="q", backend=backend)
+
+
+def test_use_real_pipeline_flag_parsing(monkeypatch):
+    """`GMAIL_DEEP_REAL=1` (or true/yes) flips the pipeline from the
+    stub to the live orchestrator. Anything else keeps the stub."""
+    from gmail_search.agents.service import _use_real_pipeline
+
+    monkeypatch.delenv("GMAIL_DEEP_REAL", raising=False)
+    assert _use_real_pipeline() is False
+
+    for truthy in ("1", "true", "True", "YES", "yes"):
+        monkeypatch.setenv("GMAIL_DEEP_REAL", truthy)
+        assert _use_real_pipeline() is True, f"{truthy!r} should be truthy"
+
+    for falsy in ("0", "false", "no", "", "anything_else"):
+        monkeypatch.setenv("GMAIL_DEEP_REAL", falsy)
+        assert _use_real_pipeline() is False, f"{falsy!r} should be falsy"
+
+
+def test_every_stage_builds_without_a_model_sdk(monkeypatch):
+    # claude_code's orchestrator needs only name/model/instruction per stage;
+    # the builders once imported google-adk, which was never installed.
+    from gmail_search.agents.analyst import build_analyst_agent
+    from gmail_search.agents.critic import build_critic_agent
+    from gmail_search.agents.orchestration import DEFAULT_STAGE_MODEL, StageAgent
+    from gmail_search.agents.planner import build_planner_agent
+    from gmail_search.agents.retriever import build_retriever_agent
+    from gmail_search.agents.writer import build_writer_agent
+
+    monkeypatch.setenv("GMAIL_WRITER_MODEL", "writer-model")
+    monkeypatch.delenv("GMAIL_CRITIC_MODEL", raising=False)
+    stages = [build_planner_agent(model="m"), build_retriever_agent(model="m", user_id="u1"),
+              build_writer_agent(), build_critic_agent(), build_analyst_agent(model="m", instruction="do it")]
+    assert [type(s) for s in stages] == [StageAgent] * 5
+    assert [s.name for s in stages] == ["planner", "retriever", "writer", "critic", "analyst"]
+    assert stages[2].model == "writer-model" and stages[3].model == DEFAULT_STAGE_MODEL
+    assert stages[4].instruction == "do it" and all(s.instruction for s in stages)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the claude_code backend stack, run scripts/run_deep_compare.py,
-# tear it down. ADK path needs nothing extra (just GEMINI_API_KEY).
+# tear it down.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

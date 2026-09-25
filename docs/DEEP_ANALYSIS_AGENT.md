@@ -1,5 +1,7 @@
 # Deep Analysis Agent
 
+> **Status (2026-09-24):** the Google ADK runtime and its Docker `run_code` sandbox described here were removed. The five-stage orchestrator now runs only on the `claude_code` backend (claudebox), with each stage a plain `StageAgent`; `pi` is the default backend. This document is kept as the design history.
+
 **Status:** In-progress (Phase 1). User sign-off on shape: (c) local Docker
 sandbox, yes critic agent, explicit `mode: "deep"` toggle.
 

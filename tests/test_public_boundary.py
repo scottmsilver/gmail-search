@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 @pytest.fixture(autouse=True)
-def _isolated_pg_schema():
+def _pg_isolation():
     yield None
 
 @pytest.fixture

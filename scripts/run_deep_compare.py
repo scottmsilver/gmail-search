@@ -1,12 +1,11 @@
 """A/B compare deep-agent backends by replaying canonical queries.
 
-Runs each query against `GMAIL_DEEP_BACKEND=adk` and
+Runs each query against `GMAIL_DEEP_BACKEND=pi` and
 `GMAIL_DEEP_BACKEND=claude_code`, captures the SSE event stream, and
 emits a JSON report with per-stage metrics.
 
 Assumes:
 - Postgres is reachable (project default config).
-- `GEMINI_API_KEY` is set (ADK path).
 - The claudebox container is running on :8765 (claude_code path).
 - The MCP tools server is running on :7878 (claude_code path).
 - Workspace dir `deploy/claudebox/workspaces/` exists.
@@ -14,7 +13,7 @@ Assumes:
 Usage:
     python scripts/run_deep_compare.py                           # 3 default queries
     python scripts/run_deep_compare.py "my query"                # custom queries
-    python scripts/run_deep_compare.py --backends adk            # subset
+    python scripts/run_deep_compare.py --backends pi             # subset
     python scripts/run_deep_compare.py --user-email you@example.com
 """
 
@@ -124,14 +123,9 @@ def _resolve_user_id(email: str | None) -> str | None:
 
 
 def _scope_model_envs(backend: str) -> None:
-    """ADK and claude_code accept different model name spaces. Per-stage
-    overrides like `sonnet` work for claudebox but blow up ADK. Strip
-    them before invoking ADK and ensure they're set when invoking
-    claudebox."""
-    if backend == "adk":
-        for k in _PER_STAGE_MODEL_VARS:
-            os.environ.pop(k, None)
-    elif backend == "claude_code":
+    """claudebox needs Claude model names for each stage; set them when
+    invoking claude_code."""
+    if backend == "claude_code":
         for k in _PER_STAGE_MODEL_VARS:
             os.environ.setdefault(k, _CLAUDE_MODEL_DEFAULT)
     elif backend == "pi":
@@ -254,8 +248,8 @@ def main() -> None:
     parser.add_argument("queries", nargs="*", help="Override the default canonical queries.")
     parser.add_argument(
         "--backends",
-        default="adk,claude_code",
-        help="Comma-separated backend list (adk, claude_code, claude_native, pi).",
+        default="pi,claude_code",
+        help="Comma-separated backend list (claude_code, claude_native, pi).",
     )
     parser.add_argument("--timeout", type=float, default=300.0, help="Per-turn timeout in seconds.")
     parser.add_argument("--out", default="scripts/deep_compare_report.json", help="JSON output path.")

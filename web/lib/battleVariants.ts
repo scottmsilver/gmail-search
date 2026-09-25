@@ -2,7 +2,7 @@ import { PI_AVAILABLE_MODELS, type DeepBackend, type ThinkingLevel } from "./con
 
 export type BattleVariant = {
   // Optional for saved battles from before deep-only mode.
-  backend?: DeepBackend | "adk" | "claude_native";
+  backend?: DeepBackend | "claude_native";
   model: string;
   thinkingLevel?: ThinkingLevel;
 };

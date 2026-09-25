@@ -1,15 +1,14 @@
 """HTTP surface for the deep-analysis agent.
 
 Lives inside the main gmail-search FastAPI app (wired in by
-`create_app` when ADK / agent deps are available). Two endpoints:
+`create_app`). Two endpoints:
 
   POST /api/agent/analyze  — kicks off a deep-mode turn. Returns an
                              SSE stream of `agent_events` as the
-                             sub-agents run. Phase 1 implementation
-                             is a STUB: it fires a handful of fake
-                             events to exercise the persistence +
-                             streaming pipe. Real ADK orchestration
-                             lands in Phase 4.
+                             runtime (pi, claude_code or claude_native)
+                             works; without GMAIL_DEEP_REAL it fires a
+                             stub sequence that exercises persistence
+                             and streaming.
   GET  /api/artifact/<id>  — returns the artifact bytes (plot PNG,
                              CSV, etc.) cited by [art:<id>] in the
                              final answer.
@@ -60,8 +59,8 @@ from gmail_search.store.db import get_connection
 
 
 def _use_real_pipeline() -> bool:
-    """`GMAIL_DEEP_REAL=1` flips from the Phase-1 stub to the live
-    ADK pipeline. Off by default so a fresh install doesn't make a
+    """`GMAIL_DEEP_REAL=1` flips from the stub to the live
+    deep pipeline. Off by default so a fresh install doesn't make a
     live Gemini call the moment you POST to /api/agent/analyze."""
     import os
 
@@ -161,13 +160,9 @@ def _emit_auto_published_event(
 
 
 async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncIterator[str]:
-    """Phase-1 placeholder: emit a few fake events so the UI + SSE +
-    persistence pipe can be developed and tested end-to-end BEFORE the
-    real ADK agents land. Each event is both persisted (so a reload
-    replays it) and streamed (so the live UI updates).
-
-    Replace this function with the real root-agent `.run()` in Phase 4.
-    """
+    """Without GMAIL_DEEP_REAL: emit a few fake events so the UI + SSE +
+    persistence pipe can be exercised without a model call. Each event
+    is both persisted (so a reload replays it) and streamed."""
     conn = get_connection(db_path)
     try:
         # Planner fake: restates the question as a trivial plan so the
@@ -240,7 +235,9 @@ async def _stub_run(db_path: Path, session_id: str, question: str) -> AsyncItera
         conn.close()
 
 
-_VALID_BACKENDS = ("adk", "claude_code", "claude_native", "pi")
+_VALID_BACKENDS = ("claude_code", "claude_native", "pi")
+# Also the web app's default runtime.
+DEFAULT_BACKEND = "pi"
 
 
 def _owner_has_full_runtime(user_id: str | None) -> bool:
@@ -275,9 +272,9 @@ def _deep_backend(override: str | None = None) -> str:
     Order of precedence:
       1. `override` (typically `AnalyzeRequest.backend` from the UI),
       2. `GMAIL_DEEP_BACKEND` env (operator-level default),
-      3. `adk` (project default — preserves pre-claude_code behaviour).
+      3. DEFAULT_BACKEND.
 
-    Unrecognised values fall back to `adk` rather than raising — the
+    Unrecognised values fall back to DEFAULT_BACKEND rather than raising — the
     UI is free to send fresh values; we don't want one malformed
     request to crash the deep route. The frontend's request schema
     keeps the field as a free string for the same reason."""
@@ -290,7 +287,7 @@ def _deep_backend(override: str | None = None) -> str:
     for c in candidates:
         if c in _VALID_BACKENDS:
             return c
-    return "adk"
+    return DEFAULT_BACKEND
 
 
 def _claudebox_workspace_for(conversation_id: str | None, session_id: str) -> str:
@@ -743,11 +740,10 @@ async def _real_run(
     Writer on Pro and the rest on Flash. When `default_model` is None,
     each stage falls back to its env var or its hardcoded default.
 
-    `GMAIL_DEEP_BACKEND` selects the runtime adapter: `adk` (default,
-    full multi-agent orchestrator), `claude_code` (claudebox adapter,
-    registers a side-channel MCP session for the turn), `claude_native`
-    (single-agent claudebox loop with all MCP tools, no orchestrator),
-    or `pi` (single-agent pi runtime, no orchestrator).
+    `GMAIL_DEEP_BACKEND` selects the runtime adapter: `pi` (default,
+    single-agent pi runtime), `claude_code` (the five-stage orchestrator
+    on claudebox, with a side-channel MCP session for the turn), or
+    `claude_native` (single-agent claudebox loop with all MCP tools).
     """
     import asyncio
     import time as _time
@@ -758,7 +754,6 @@ async def _real_run(
     from gmail_search.agents.orchestration import Orchestrator
     from gmail_search.agents.planner import build_planner_agent
     from gmail_search.agents.retriever import build_retriever_agent
-    from gmail_search.agents.runtime import adk_invoke
     from gmail_search.agents.session import append_event
     from gmail_search.agents.writer import build_writer_agent
 
@@ -788,7 +783,7 @@ async def _real_run(
     if history_preamble:
         question = history_preamble + question
 
-    # Cost sink: every ADK call lands one row in `costs` with
+    # Cost sink: every stage's model call lands one row in `costs` with
     # operation='deep_<agent_name>' so the existing spend breakdown
     # automatically segments deep-mode per stage. We ALSO emit a
     # `cost` event on the session transcript so the UI can surface
@@ -836,11 +831,9 @@ async def _real_run(
             },
         )
 
-    # Backend selection: ADK (default), claude_code (claudebox + MCP +
-    # full orchestrator), or claude_native (single-agent claudebox loop
-    # with all MCP tools, no orchestrator). The first two preserve the
-    # orchestrator's InvokeFn contract; claude_native is a separate
-    # path that owns its own event emission + finalization.
+    # Backend selection: pi and claude_native are single-agent loops that
+    # own their event emission and finalization; claude_code runs the
+    # five-stage orchestrator through claudebox.
     from gmail_search.auth.public import public_enabled
 
     # Allowlisted owners keep the private app's runtimes on the public origin;
@@ -1213,26 +1206,11 @@ async def _real_run(
                 _persist_first_uuid_code(result.claude_session_uuid)
             return result
 
-    else:
-
-        async def _invoke(agent, prompt):
-            return await adk_invoke(agent, prompt, cost_sink=_record_cost)
-
-    # Analyst factory: closure-bound so run_code persists to THIS
-    # session's artifacts. Instruction gets skill-matched text
-    # appended if a SKILL.md matches the question.
+    # Analyst factory: the instruction gets skill-matched text appended
+    # when a SKILL.md matches the question.
     def _analyst_factory(evidence_records):
         instr = instruction_with_skills(analyst_instruction(), question=question)
-        return build_analyst_agent(
-            evidence_records=evidence_records,
-            db_dsn=None,
-            session_id=session_id,
-            db_conn=conn,
-            instruction=instr,
-            model=default_model,
-            conversation_id=conversation_id,
-            user_id=user_id,
-        )
+        return build_analyst_agent(instruction=instr, model=default_model)
 
     orch = Orchestrator(
         session_id=session_id,
@@ -1243,11 +1221,10 @@ async def _real_run(
         critic=build_critic_agent(model=default_model),
         analyst_factory=_analyst_factory,
         invoke=_invoke,
-        # claude_code already streams tool_call events mid-flight via
-        # the runtime adapter's event_sink — turn off the orchestrator's
-        # per-tool emission to avoid duplicates. ADK has no streaming
-        # path so it keeps the post-hoc emission.
-        skip_per_tool_emission=(backend == "claude_code"),
+        # claude_code streams tool_call events mid-flight via the runtime
+        # adapter's event_sink, so the orchestrator's per-tool emission
+        # would duplicate them.
+        skip_per_tool_emission=True,
     )
 
     # Kick off the orchestration; a parallel poller drains events as
@@ -1412,42 +1389,10 @@ async def _probe_claudebox_streaming() -> None:
         )
 
 
-def _probe_adk_imports() -> None:
-    """Boot-time check: try to import every ADK module the deep
-    pipeline reaches for inside `_real_run`. Surfaces broken installs
-    at server startup instead of at the first /api/agent/analyze
-    request — operators see the problem when they boot, not when a
-    user clicks "Deep mode" hours later. Chat mode is unaffected, so
-    we log a warning and return rather than crashing the server."""
-    try:
-        # Touch every import the live pipeline performs. If any of
-        # these is broken the deep path is broken.
-        from gmail_search.agents import (  # noqa: F401
-            analyst,
-            critic,
-            orchestration,
-            planner,
-            retriever,
-            runtime,
-            writer,
-        )
-    except Exception as e:
-        logger.warning(
-            "ADK imports failed at startup — deep mode (/api/agent/analyze) "
-            "will fail at request time. Chat mode is unaffected. Underlying "
-            f"error: {type(e).__name__}: {e}"
-        )
-
-
 def register_agent_routes(app: FastAPI, db_path: Path) -> None:
     """Attach the deep-agent endpoints to an existing FastAPI app.
     Called from `create_app` so the agent surface is an opt-in add-on
     that doesn't affect chat-mode code paths."""
-    # Probe ADK imports at registration time so a broken install is
-    # visible in the server logs at boot rather than at the first
-    # deep-mode request hours later.
-    _probe_adk_imports()
-
     # Optional: smoke-test the JSONL streaming pipeline so a broken
     # mount / image upgrade is loud at boot. Off by default — opt in
     # via `GMAIL_DEEP_PROBE_STREAMING=1`.

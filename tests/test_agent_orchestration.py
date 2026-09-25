@@ -29,7 +29,7 @@ from gmail_search.store.db import get_connection, init_db
 
 @dataclass
 class _FakeAgent:
-    """Satisfies the orchestration's AgentLike protocol. The
+    """Duck-types the orchestration's StageAgent. The
     orchestrator only reads `.name` for logging / routing; the
     canned output is decided by the `invoke` shim."""
 

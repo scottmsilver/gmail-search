@@ -13,7 +13,7 @@ from gmail_search.auth import routes, session
 
 
 @pytest.fixture(autouse=True)
-def _isolated_pg_schema():
+def _pg_isolation():
     """These tests stub user storage and must never open a database."""
     yield None
 

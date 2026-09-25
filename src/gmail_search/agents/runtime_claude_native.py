@@ -1,6 +1,6 @@
 """Single-agent Claude Code loop for the deep-analysis pipeline.
 
-Unlike the orchestrator backend (`adk` / `claude_code`) which fans the
+Unlike the orchestrator backend (`claude_code`) which fans the
 turn into a Planner → Retriever → Analyst → Writer → Critic chain, this
 backend runs ONE Claude Code invocation with all five MCP tools
 available and synthesizes the same `agent_events` shape the UI already

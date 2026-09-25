@@ -4,7 +4,7 @@ Mirrors the Claude Code / Claude Agent SDK `SKILL.md` convention so
 users can drop project-local (or personal) guidance into a standard
 path and have it automatically injected into the relevant sub-agent's
 prompt. The Claude Agent SDK doesn't ship a built-in loader; we
-implement the subset we need for ADK.
+implement the subset the deep pipeline needs.
 
 Path conventions (walked in this order, later paths override earlier):
   1. ~/.claude/skills/<name>/SKILL.md                 (personal)
@@ -23,7 +23,7 @@ SKILL.md frontmatter (YAML):
 
 Anything else in the frontmatter is kept but ignored by this loader —
 forward-compatible with Claude Code's richer shape (allowed-tools,
-model, effort, etc.) which doesn't apply to an ADK-hosted agent.
+model, effort, etc.) which doesn't apply to a pipeline stage.
 
 Matching: given a task description and the target sub-agent, we score
 every loaded skill by counting keyword overlap between the task and

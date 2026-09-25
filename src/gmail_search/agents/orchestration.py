@@ -5,11 +5,10 @@ in the canonical order — planner → retriever → analyst → writer →
 critic → (maybe writer revision) — and emits a structured event
 stream (`agent_events` rows) as each stage completes.
 
-The flow is deliberately NOT expressed as an ADK `SequentialAgent`
-because the critic's feedback loop is non-linear: a rejected draft
-goes BACK to the writer with the critic's notes. That's a cycle, so
-we orchestrate in Python and use ADK's `Runner` as the per-sub-agent
-execution primitive.
+The flow is orchestrated in Python because the critic's feedback loop
+is non-linear: a rejected draft goes BACK to the writer with the
+critic's notes. Each stage runs through the injected `invoke`
+(claudebox in production).
 
 Testability is the other reason: the orchestration state machine
 (order of stages, when to skip the Analyst, critic revision cap) is
@@ -24,9 +23,10 @@ mock-friendly indirection happens at one place.
 from __future__ import annotations
 
 import json
+import os
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable
 
 from gmail_search.agents.session import append_event, finalize_session
 
@@ -76,12 +76,24 @@ def _clip_for_prompt(text: str | None, *, cap: int = STAGE_FIELD_CHAR_CAP) -> st
     return text[:cap] + f"\n\n[truncated: {dropped:,} chars dropped]"
 
 
-class AgentLike(Protocol):
-    """Minimal shape we rely on from both real ADK agents and test
-    fakes. Real `google.adk.Agent` instances satisfy this; test code
-    supplies `_FakeAgent` with the same attribute names."""
+# The pipeline stages' default model; each stage has its own env override.
+DEFAULT_STAGE_MODEL = "gemini-3.1-pro-preview"
+
+
+@dataclass(frozen=True)
+class StageAgent:
+    """One pipeline stage as the runtime adapter sees it: a name, a model
+    and the stage's instruction. Tools come from the runtime (claudebox's
+    MCP side channel), not from the agent."""
 
     name: str
+    model: str
+    instruction: str
+
+
+def stage_agent(name: str, instruction: str, *, model: str | None, model_env: str) -> StageAgent:
+    """`model`, else `$model_env`, else DEFAULT_STAGE_MODEL."""
+    return StageAgent(name=name, model=model or os.environ.get(model_env, DEFAULT_STAGE_MODEL), instruction=instruction)
 
 
 @dataclass
@@ -103,9 +115,9 @@ class StageResult:
     claude_session_uuid: str | None = None
 
 
-InvokeFn = Callable[[AgentLike, str], Awaitable[StageResult]]
-"""Signature of the per-stage invocation shim. Real implementation
-wraps ADK Runner.run_async; tests supply a mock."""
+InvokeFn = Callable[[StageAgent, str], Awaitable[StageResult]]
+"""Signature of the per-stage invocation shim: `claudebox_invoke` in
+production; tests supply a mock."""
 
 
 @dataclass
@@ -123,15 +135,15 @@ class Orchestrator:
 
     session_id: str
     conn: Any  # psycopg connection
-    planner: AgentLike
-    retriever: AgentLike
-    writer: AgentLike
-    critic: AgentLike
+    planner: StageAgent
+    retriever: StageAgent
+    writer: StageAgent
+    critic: StageAgent
     # Analyst is built PER SESSION (its run_code tool closure is
     # bound to this session's evidence + artifact sink), so we hand
     # in a factory instead of a pre-built agent. Called with the
     # retrieval evidence when analysis is needed.
-    analyst_factory: Callable[[list[dict] | dict | None], AgentLike]
+    analyst_factory: Callable[[list[dict] | dict | None], StageAgent]
     invoke: InvokeFn
     # When True, per-tool-call `tool_call` events are NOT emitted
     # from `_run_retriever` / `_run_analyst_if_needed`. This is the
@@ -412,8 +424,8 @@ def _has_run_code_invocation(tool_calls: list[dict]) -> bool:
 
 
 def _artifact_ids_from_tool_calls(tool_calls: list[dict]) -> list[int]:
-    """Walk Analyst tool_results (both function_call and
-    function_response shapes ADK produces) and collect the artifact
+    """Walk Analyst tool_results (both call and response
+    shapes) and collect the artifact
     ids that `run_code` persisted. These are the ONLY ids the Writer
     may cite as `[art:N]`."""
     ids: list[int] = []

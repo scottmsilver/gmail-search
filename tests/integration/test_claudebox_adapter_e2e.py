@@ -21,7 +21,7 @@ pytestmark = pytest.mark.integration
 
 @dataclass
 class _PingAgent:
-    """Minimal AgentLike stub. The real ADK agent shape is much
+    """Minimal StageAgent stub. The real agent shape is
     bigger — `claudebox_invoke` only needs `name`, `model`,
     `instruction`, so this is all we wire."""
 

@@ -34,7 +34,7 @@ test('deep side forwards auth and model, isolates session, parses fragmented SSE
 });
 test('errors and premature EOF finish a side without rejecting its sibling', async () => {
   for (const response of [new Response('Denied',{status:403}),new Response(event('plan',{})),new Response(event('error',{message:'failed'}))]) {
-    const result = await runDeepBattleSide({url:'http://local',cookie:'',question:'q',variant:{backend:'adk',model:'test'},onUpdate:()=>{},fetchImpl:async()=>response});
+    const result = await runDeepBattleSide({url:'http://local',cookie:'',question:'q',variant:{backend:'pi',model:'test'},onUpdate:()=>{},fetchImpl:async()=>response});
     assert.equal(result.running,false);
     assert.ok(result.error);
   }
