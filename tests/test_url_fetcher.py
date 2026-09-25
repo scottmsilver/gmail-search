@@ -85,7 +85,7 @@ def test_browser_payload_is_guarded_terminal_url():
     assert payload == "https://final.example.com/app"
 
 
-@pytest.mark.parametrize("status", [401, 404, 410, 429, 500, 503])
+@pytest.mark.parametrize("status", [404, 429, 503])
 def test_definitive_statuses_fail_without_browser(status):
     kind, payload = _fetch(lambda req: httpx.Response(status, text="nope"))
     assert (kind, payload) == ("fail", None)

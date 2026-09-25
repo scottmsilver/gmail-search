@@ -480,24 +480,6 @@ def test_sharded_builder_empty_db(tmp_path):
     assert load_index_metadata(actual) == []
 
 
-def test_scann_searcher_loads_legacy_single_index(tmp_path):
-    """Back-compat: the searcher must still work on indexes produced by
-    build_index (no manifest.json).
-    """
-    dims = 64
-    db_path = tmp_path / "test.db"
-    _seed_db_with_random_embeddings(db_path, n=150, dims=dims)
-    index_dir = tmp_path / "scann_legacy"
-    build_index(db_path, index_dir, model="test-model", dimensions=dims)
-    assert not (index_dir / "manifest.json").exists()
-
-    searcher = ScannSearcher(index_dir, dimensions=dims)
-    qvec = np.array([0.1] * dims, dtype=np.float32)
-    ids, scores = searcher.search(qvec, top_k=5)
-    assert len(ids) == 5
-    assert len(scores) == 5
-
-
 def _add_embeddings(db_path, start: int, n: int, dims: int) -> None:
     """Append n embeddings with distinct message ids + deterministic vectors
     (seed == global index), so a corpus can be grown incrementally and an

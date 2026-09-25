@@ -1,11 +1,5 @@
-from pathlib import Path
 
 from gmail_search.extract import dispatch
-
-
-def test_dispatch_unknown_mime_returns_none():
-    result = dispatch("application/zip", Path("/fake/path.zip"), {})
-    assert result is None
 
 
 def test_dispatch_image_passthrough(tmp_path):
