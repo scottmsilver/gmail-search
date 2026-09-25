@@ -143,7 +143,7 @@ def create_run_router(identities, runs, *, origin, claim_conversation, runtimes=
                             yield _frame('persist_ok',{'payload':{'session_id':run}})
                             return
                         if batch['state'] in ('failed','cancelled','stopping'):
-                            reason = {'failed':'The run failed. Please try again.',
+                            reason = batch.get('reason') or {'failed':'The run failed. Please try again.',
                                 'cancelled':'Run stopped.',
                                 'stopping':'Worker cleanup is pending. Please retry Stop.'}[batch['state']]
                             yield _frame('error',{'payload':{'message':reason,'state':batch['state']}})

@@ -448,7 +448,10 @@ async def open_runtime(config):
             raw_attachments=RunRawAttachmentService(caps,source,
                 admission=DataAdmission(global_concurrency=2,owner_concurrency=1)),
             anthropic=provider,gemini=gemini,openrouter=openrouter,events=events,
-            judge=judge_service_for(caps,jev,escalation))
+            judge=judge_service_for(caps,jev,escalation),
+            # A refused model call ends its run. `runs` is bound below, before
+            # the gateway serves its first request.
+            on_refused=lambda token,reason:runs.refuse_capability(token,reason))
         transport=SSHTransport(host=config.worker.host,port=config.worker.port,
             private_key=config.worker.private_key,known_hosts=config.worker.known_hosts)
         envelope_for=envelope_factory(caps,provider,config.provider,gemini=gemini,openrouter=openrouter,
