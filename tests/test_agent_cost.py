@@ -86,6 +86,66 @@ def test_record_agent_cost_writes_deep_operation_row(db_backend):
     conn.close()
 
 
+def test_record_agent_cost_attributes_the_row_to_the_given_user(db_backend):
+    """#79: every deep-mode backend shares this one function to write
+    `costs` rows. Before the fix it had no `user_id` parameter at all,
+    so every row landed on the bootstrap (owner) user regardless of who
+    was actually chatting. An invited user's `user_id` must land on
+    their own row, not the bootstrap user's."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO users (id, email) VALUES ('u_invited', 'invited@example.test')")
+    conn.commit()
+    sid = new_session_id()
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+
+    record_agent_cost(
+        conn,
+        session_id=sid,
+        agent_name="planner",
+        model="gemini-2.5-flash",
+        input_tokens=500,
+        output_tokens=200,
+        user_id="u_invited",
+    )
+
+    row = conn.execute(
+        "SELECT user_id FROM costs WHERE message_id = %s",
+        (f"deep:{sid}",),
+    ).fetchone()
+    assert row["user_id"] == "u_invited"
+    conn.close()
+
+
+def test_record_agent_cost_without_user_id_falls_back_to_bootstrap(db_backend):
+    """Back-compat: callers that don't have an authenticated user (e.g.
+    the eval harness) keep landing on the bootstrap user, same as
+    before this change — omitting `user_id` must not raise or change
+    that fallback."""
+    db_path = db_backend["db_path"]
+    init_db(db_path)
+    conn = get_connection(db_path)
+    sid = new_session_id()
+    create_session(conn, session_id=sid, conversation_id=None, mode="deep", question="q")
+
+    record_agent_cost(
+        conn,
+        session_id=sid,
+        agent_name="planner",
+        model="gemini-2.5-flash",
+        input_tokens=500,
+        output_tokens=200,
+    )
+
+    row = conn.execute(
+        "SELECT user_id FROM costs WHERE message_id = %s",
+        (f"deep:{sid}",),
+    ).fetchone()
+    assert row["user_id"] == "u_test_bootstrap"
+    conn.close()
+
+
 def test_record_cost_writes_output_tokens_column(db_backend):
     """The shared `record_cost` writer accepts an `output_tokens`
     kwarg (default 0 for back-compat) and stores it in the dedicated

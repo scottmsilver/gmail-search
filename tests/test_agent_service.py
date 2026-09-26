@@ -511,6 +511,10 @@ def test_pi_cost_sink_forwards_cache_counts_to_the_ledger(monkeypatch, tmp_path)
     assert captured.get("cache_read_tokens") == 3_483_568
     assert captured.get("cache_write_tokens") == 17
     assert captured.get("input_tokens") == 759_360
+    # #79: the closure must forward the authenticated user_id it has in
+    # scope, not leave every deep-mode row attributed to the bootstrap
+    # (owner) user.
+    assert captured.get("user_id") == "u1"
 
 
 def test_public_run_gets_the_same_cost_sink_as_every_other_backend(monkeypatch, tmp_path):
