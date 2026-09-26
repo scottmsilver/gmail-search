@@ -923,6 +923,12 @@ async def _real_run(
             usd_override=usd_override,
             cache_read_tokens=int(extra.get("cache_read_tokens") or 0),
             cache_write_tokens=int(extra.get("cache_write_tokens") or 0),
+            # `user_id` is `_real_run`'s own parameter, already the
+            # authenticated caller — every deep-mode backend (pi,
+            # claude_native, claudebox, bounded public) shares this one
+            # closure, so this line fixes per-user cost attribution for
+            # all four at once. See #79.
+            user_id=user_id,
         )
         turn_cost_usd += usd
         append_event(

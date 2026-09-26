@@ -126,11 +126,19 @@ def record_agent_cost(
     usd_override: float | None = None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    user_id: str | None = None,
 ) -> float:
     """Append one `deep_<agent_name>` row to the `costs` table and
     return the estimated USD amount. Reuses the shared `record_cost`
     writer so spend reporting (total, breakdown, budget check)
     picks this up automatically.
+
+    `user_id` is the authenticated user whose turn this is; it is
+    forwarded to `record_cost`, which resolves it (falling back to the
+    bootstrap/owner user via `resolve_write_user_id` when `None`). Every
+    deep-mode backend shares this one function, so passing the real
+    `user_id` here fixes per-user cost attribution for all of them at
+    once — see #79.
 
     Output tokens land in the dedicated `output_tokens` column (added
     to the `costs` table specifically so we don't have to overload
@@ -169,5 +177,6 @@ def record_agent_cost(
         cache_write_tokens=cache_write_tokens,
         estimated_cost_usd=usd,
         message_id=f"deep:{session_id}",
+        user_id=user_id,
     )
     return usd
