@@ -253,6 +253,10 @@ async def test_direct_migration_composes_with_actual_text_reader(source,migratio
             for method in (q.lexical_messages,q.lexical_attachments,q.lexical_facts):
                 assert [row.message_id for row in (await method(('needle',))).rows] == ['same']
             assert (await q.lexical_messages(('needle',),candidate_ids=('same',))).rows[0].id == 'same'
+            # Apostrophes and Tantivy keywords parse as literal text, not syntax.
+            for tokens in (("needle's",),('IN',)):
+                assert (await q.lexical_messages(tokens)).rows == ()
+            assert [row.message_id for row in (await q.lexical_messages(('needle','IN'))).rows] == ['same']
         assert not admission.active
         assert migration.migrate_text_owner_partitions(source,owner_id=owner) is False
     finally:

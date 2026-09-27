@@ -203,9 +203,13 @@ def lexical_query(branch, tokens, *, phrase=False):
         _text(token,128)
     if sum(len(token.encode()) for token in tokens)>8192:
         raise ValueError('Lexical input exceeds limit')
+    # Every token is double-quoted so Tantivy reads it as literal text: bare
+    # `PEET'S` opens an unterminated phrase and bare `IN`/`TO` are keywords.
+    # The token pattern above admits neither `"` nor `\`, so nothing can
+    # close the quotes early.
     if phrase:
         return ' '.join(field+':"'+' '.join(tokens)+'"' for field in fields[branch]) if tokens else ''
-    return ' '.join(field+':'+token for field in fields[branch] for token in tokens)
+    return ' '.join(field+':"'+token+'"' for field in fields[branch] for token in tokens)
 
 
 class BoundSearchQueries:

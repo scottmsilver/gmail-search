@@ -153,3 +153,46 @@ def test_transient_failure_still_degrades_quietly(seeded, monkeypatch):
 
     monkeypatch.setattr(seeded, "execute", boom)
     assert queries._pg_bm25_messages(seeded, "subject:invoice", 10, LOGGER) == {}
+
+
+def test_search_fts_survives_apostrophes_and_tantivy_keywords(seeded, caplog):
+    """User text is data, never Tantivy syntax.
+
+    `PEET'S` and `ALASKA AIR IN FLIGHT` are real merchant names from a receipt
+    sweep. A bare `subject:PEET'S` opens a Tantivy phrase that never closes and
+    a bare `subject:IN` is the start of Tantivy's set syntax; both made the
+    parser throw, and the failed statement then aborted the connection's
+    transaction so the rest of the request failed with a 500.
+    """
+    seeded.execute(
+        "INSERT INTO messages (id,user_id,thread_id,from_addr,to_addr,subject,body_text,date) VALUES "
+        "('apos','alice','t','s@x','r@x','PEET''S COFFEE receipt','thanks for your order','2026-01-02'),"
+        "('kw','alice','t','s@x','r@x','ALASKA AIR IN FLIGHT purchase','wifi pass','2026-01-03')"
+    )
+    with caplog.at_level(logging.ERROR, logger="gmail_search.store.queries"):
+        assert "apos" in queries.search_fts(seeded, "PEET'S", user_id="alice")
+        assert "apos" in queries.search_fts(seeded, "PEET'S COFFEE", user_id="alice")  # phrase pass too
+        assert "kw" in queries.search_fts(seeded, "ALASKA AIR IN FLIGHT", user_id="alice")
+        for keyword in ("IN", "TO"):  # Tantivy keywords the sanitizer does not strip
+            queries.search_fts(seeded, keyword, user_id="alice")  # must parse; "TO" matches nothing seeded
+    assert not [r for r in caplog.records if "BM25 error" in r.getMessage()]
+    # The connection is still usable: no aborted transaction was left behind.
+    assert seeded.execute("SELECT 1").fetchone()[0] == 1
+
+
+def test_a_failed_bm25_pass_keeps_the_callers_pending_writes(seeded, caplog):
+    """The failure is scoped to the one statement, not the connection.
+
+    A rollback of the whole connection would also have cleared the aborted
+    state, but at the cost of any rows the caller wrote before searching.
+    """
+    seeded.execute(
+        "INSERT INTO messages (id,user_id,thread_id,from_addr,to_addr,subject,body_text,date) VALUES "
+        "('pending','alice','t','s@x','r@x','written before the search','body','2026-01-04')"
+    )
+    unparseable = "subject:PEET'S"  # bypasses the builder: a raw, unquoted Tantivy string
+    with caplog.at_level(logging.ERROR, logger="gmail_search.store.queries"):
+        assert queries._pg_bm25_messages(seeded, unparseable, 10, LOGGER, user_id="alice") == {}
+    assert [r for r in caplog.records if "BM25 error" in r.getMessage()]
+    assert seeded.execute("SELECT count(*) FROM messages WHERE id='pending'").fetchone()[0] == 1
+    assert "m1" in queries._pg_bm25_messages(seeded, 'subject:"invoice"', 10, LOGGER, user_id="alice")

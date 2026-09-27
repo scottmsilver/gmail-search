@@ -1241,15 +1241,23 @@ def _pg_bm25_scores(
         params.append(list(candidate_ids))
     params += user_param + [limit]
     try:
-        for row in conn.execute(sql, params).fetchall():
-            message_id = row["message_id"]
-            rank = float(row["rank"] or 0.0)
-            if message_id not in scores or rank > scores[message_id]:
-                scores[message_id] = rank
+        # A savepoint scopes the failure to this one statement. Without it a
+        # failed BM25 pass aborts the connection's whole transaction, and the
+        # swallowed error still surfaces as a 500 from the next query in the
+        # request (`InFailedSqlTransaction`). Rolling back the connection
+        # instead would discard any writes a caller made before searching.
+        with conn.transaction():
+            rows = conn.execute(sql, params).fetchall()
     except Exception as e:
         if _is_schema_mismatch(e):
             raise
         logger.exception(f"PG BM25 error on {table}: {e!s} | query={bm25_query!r}")
+        return scores
+    for row in rows:
+        message_id = row["message_id"]
+        rank = float(row["rank"] or 0.0)
+        if message_id not in scores or rank > scores[message_id]:
+            scores[message_id] = rank
     return scores
 
 
@@ -1336,15 +1344,19 @@ def _build_bm25_query(tokens: list[str], fields: tuple[str, ...]) -> tuple[str, 
     """Build Tantivy query strings targeting every FTS field.
 
     Returns `(disjunction_query, phrase_query_or_none)`:
-      * Disjunction pass: `(f1:t1 f1:t2 ... f2:t1 f2:t2 ...)` — any
+      * Disjunction pass: `(f1:"t1" f1:"t2" ... f2:"t1" f2:"t2" ...)` — any
         token in any field matches. Tantivy's default combinator is OR.
       * Phrase pass: `(f1:"t1 t2 ..." f2:"t1 t2 ..." ...)` when there
         are ≥2 tokens — ordered-adjacent match.
 
-    Tokens come from `_sanitize_fts_tokens()` so they are safe to
-    interpolate (no quotes, backslashes, or Tantivy operators).
+    Every token is double-quoted so the parser reads it as literal text. A
+    bare token is Tantivy syntax: `PEET'S` opens a phrase that never closes,
+    and `IN`/`TO` are keywords (set and range syntax), so `subject:PEET'S` or
+    `subject:IN` made the whole query unparseable. Tokens come from
+    `_sanitize_fts_tokens()`, which never emits a double quote or backslash,
+    so nothing can close the quotes early.
     """
-    disjunction_terms = [f"{f}:{t}" for f in fields for t in tokens]
+    disjunction_terms = [f'{f}:"{t}"' for f in fields for t in tokens]
     disjunction = " ".join(disjunction_terms)
 
     phrase: str | None = None

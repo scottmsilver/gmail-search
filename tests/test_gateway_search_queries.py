@@ -13,7 +13,11 @@ def test_structured_filters_validate_before_database_work():
 
 
 def test_lexical_builder_has_fixed_fields_and_rejects_injected_syntax():
-    assert lexical_query('facts',('needle',),phrase=False)=='text:needle'
+    assert lexical_query('facts',('needle',),phrase=False)=='text:"needle"'
+    # Apostrophes and Tantivy keywords are literal text, never syntax.
+    assert lexical_query('facts',("PEET'S",'IN'),phrase=False)=='text:"PEET\'S" text:"IN"'
+    assert lexical_query('facts',("PEET'S",'IN'),phrase=True)=='text:"PEET\'S IN"'
+    assert lexical_query('facts',('AND','OR','NOT','TO'),phrase=False)=='text:"AND" text:"OR" text:"NOT" text:"TO"'
     for tokens in (('subject:foreign',),('needle OR *',),('a"b',),('x'*129,)):
         with pytest.raises(ValueError):
             lexical_query('messages',tokens,phrase=False)
