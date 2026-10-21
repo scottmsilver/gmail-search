@@ -187,10 +187,12 @@ registers a throwaway session via the admin API, drives one turn through
 Set `OPENROUTER_API_KEY` in the gitignored `deploy/pi/.env`, then run
 `docker compose -f deploy/pi/docker-compose.yml up -d pi-sandbox` to apply it.
 In the chat picker, enable **Deep analysis**, select **Pi**, and choose
-**Muse Spark 1.3 (OpenRouter)**, **Gemini 3.8 Flash (Google)**, or
-**Claude Opus 5 (Anthropic)**. The key stays in the Pi container environment.
+**Muse Spark 1.3 (OpenRouter)**, **Gemini 3.8 Flash (Google)**,
+**Gemini 4 Argon (Google)**, **Claude Opus 5 (Anthropic)**,
+**Claude Sonnet 5.5 (Anthropic)**, or **Claude Sonnet 4.6 (Anthropic)**. The key
+stays in the Pi container environment.
 
-`models.json` registers all three provider models explicitly for the
+`models.json` registers all six provider models explicitly for the
 pinned Pi version and is mounted read-only. Its context size and token prices
 come from https://openrouter.ai/meta/muse-spark-1.3; output is capped at 65,536
 tokens per response. To use it as the configured default, set

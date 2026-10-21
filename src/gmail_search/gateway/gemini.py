@@ -13,6 +13,7 @@ from .provider import AnthropicRunService, ProviderProfile
 from .registry import AccessDenied
 
 MODEL = 'gemini-3.8-flash'
+ARGON_MODEL = 'gemini-4-argon'
 LEVELS = ('MINIMAL', 'LOW', 'MEDIUM', 'HIGH')
 
 

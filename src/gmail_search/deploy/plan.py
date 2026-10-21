@@ -40,8 +40,9 @@ NOT_SHIPPED = re.compile(r'^(docs/|tests/|scripts/|\.claude/|\.github/|\.githook
 # `uv sync` there, which is the owner's step, not the deployer's.
 DEPENDENCIES = {'pyproject.toml', 'uv.lock', 'web/package.json', 'web/package-lock.json', 'web/bun.lock'}
 # What an owner release (#52) carries besides src/ and web/: serve's page
-# templates (server.py finds them beside src/) and the watchdog the timer runs.
-OWNER_PATHS = ('templates/', 'scripts/serve_watchdog.sh')
+# templates (server.py finds them beside src/), the watchdog the timer runs,
+# and the owner Pi container's model registry.
+OWNER_PATHS = ('templates/', 'scripts/serve_watchdog.sh', 'deploy/pi/models.json')
 REVIEWED_SCHEMA = re.compile(r"^REVIEWED_SCHEMA_BLOB = '([0-9a-f]{40})'$", re.M)
 
 

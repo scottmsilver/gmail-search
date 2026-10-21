@@ -25,12 +25,23 @@ from .result_routes import _ResultRoute
 # reports this table so the picker offers exactly it. A model with no qualified
 # gateway route is refused, never substituted.
 SERVED_MODELS = {
-    'pi': (('google/gemini-3.8-flash', 'pi_gemini'), ('anthropic/claude-opus-5', 'pi_opus')),
+    'pi': (
+        ('google/gemini-3.8-flash', 'pi_gemini'),
+        ('google/gemini-4-argon', 'pi_gemini_argon'),
+        ('anthropic/claude-opus-5', 'pi_opus'),
+        ('anthropic/claude-sonnet-5-5', 'pi_sonnet_5_5'),
+        ('anthropic/claude-sonnet-4-6', 'pi_sonnet_4_6'),
+    ),
     'claude_code': (('sonnet', 'claude'),),
 }
 # Names older saved settings may still send for a served model.
 MODEL_ALIASES = {'openrouter/google/gemini-3.8-flash': 'google/gemini-3.8-flash',
-                 'openrouter/anthropic/claude-opus-5': 'anthropic/claude-opus-5'}
+                 'openrouter/google/gemini-4-argon': 'google/gemini-4-argon',
+                 'openrouter/anthropic/claude-opus-5': 'anthropic/claude-opus-5',
+                 'openrouter/anthropic/claude-sonnet-5.5': 'anthropic/claude-sonnet-5-5',
+                 'anthropic/claude-sonnet-5.5': 'anthropic/claude-sonnet-5-5',
+                 'openrouter/anthropic/claude-sonnet-4.6': 'anthropic/claude-sonnet-4-6',
+                 'anthropic/claude-sonnet-4.6': 'anthropic/claude-sonnet-4-6'}
 
 
 def _served(runtimes):

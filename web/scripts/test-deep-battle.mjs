@@ -44,8 +44,9 @@ test('both sides get textual history including previous battle answers', () => {
   for (const text of ['Earlier','One','Two','Compare again']) assert.ok(q.includes(text));
 });
 
-test('Pi battle pool has exactly the three requested models', () => {
+test('Pi battle pool has all configured Pi models', () => {
   assert.deepEqual(BATTLE_VARIANTS.filter(v => v.backend === 'pi').map(v => v.model).sort(), [
-    'openrouter/meta/muse-spark-1.3', 'google/gemini-3.8-flash', 'anthropic/claude-opus-5'
+    'openrouter/meta/muse-spark-1.3', 'google/gemini-3.8-flash', 'google/gemini-4-argon',
+    'anthropic/claude-opus-5', 'anthropic/claude-sonnet-5-5', 'anthropic/claude-sonnet-4-6'
   ].sort());
 });

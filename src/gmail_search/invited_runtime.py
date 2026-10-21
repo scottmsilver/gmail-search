@@ -41,7 +41,7 @@ from .gateway.effort_router import EffortRouter
 from .gateway.escalation import LADDER_MODELS, RunEscalation
 from .gateway.jev import jev_config_from_env
 from .gateway.judge_http import RunJudgeService
-from .gateway.gemini import MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
+from .gateway.gemini import ARGON_MODEL as GEMINI_ARGON_MODEL, MODEL as GEMINI_MODEL, GeminiProfile, GeminiRunService
 from .gateway.gemini_http import GeminiHTTPTransport
 from .gateway.openrouter import OpenRouterProfile, OpenRouterRunService
 from .gateway.openrouter_http import OpenRouterHTTPTransport
@@ -181,7 +181,11 @@ OUTPUT_TOKEN_LIMIT=4096
 GEMINI_OUTPUT_TOKEN_LIMIT=16384
 GEMINI_THINKING='MEDIUM'
 # Pi on OpenRouter-served models: runtime -> model. Medium effort, as legacy Pi.
-OPENROUTER_RUNTIMES={'pi_opus':'anthropic/claude-opus-5'}
+OPENROUTER_RUNTIMES={
+    'pi_opus':'anthropic/claude-opus-5',
+    'pi_sonnet_5_5':'anthropic/claude-sonnet-5.5',
+    'pi_sonnet_4_6':'anthropic/claude-sonnet-4.6',
+}
 OPENROUTER_OUTPUT_TOKEN_LIMIT=16384
 
 
@@ -264,6 +268,9 @@ def _profile_binders(provider,gemini,rates,openrouter=None,router=None):
         profile=GeminiProfile(GEMINI_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
             rates.output_units_per_token,thinking_level=GEMINI_THINKING)
         binders['pi_gemini']=_bind_routed_gemini(gemini,profile,router)
+        argon_profile=GeminiProfile(GEMINI_ARGON_MODEL,200000,GEMINI_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,
+            rates.output_units_per_token,thinking_level=GEMINI_THINKING)
+        binders['pi_gemini_argon']=_bind_with(gemini,argon_profile)
     if openrouter is not None:
         for runtime,model in OPENROUTER_RUNTIMES.items():
             profile=OpenRouterProfile(model,200000,OPENROUTER_OUTPUT_TOKEN_LIMIT,rates.input_units_per_token,

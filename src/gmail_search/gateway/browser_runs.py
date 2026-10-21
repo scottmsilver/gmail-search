@@ -32,7 +32,7 @@ class RunRefused(Exception):
 
 
 # Guest agents a run may boot; see full_agent_remote.GUEST_PROFILES.
-RUNTIMES=frozenset(('pi','pi_gemini','pi_opus','claude'))
+RUNTIMES=frozenset(('pi','pi_gemini','pi_gemini_argon','pi_opus','pi_sonnet_5_5','pi_sonnet_4_6','claude'))
 
 
 def _conversation(value):

@@ -274,6 +274,8 @@ def test_gemini_3_7_flash_pricing_is_not_the_default():
     from gmail_search.agents.cost import estimate_agent_cost_usd
 
     assert estimate_agent_cost_usd("gemini-3.7-flash", 1_000_000, 0) == 0.75
+    assert estimate_agent_cost_usd("google/gemini-3.8-flash", 1_000_000, 0) == 0.75
+    assert estimate_agent_cost_usd("google/gemini-4-argon", 1_000_000, 1_000_000, 1_000_000) == 12.10
 
 
 # ─── context-cache accounting (added 2026-09-04) ───────────────────────

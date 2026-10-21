@@ -55,6 +55,7 @@ def test_the_runner_drops_what_picks_a_repository_and_keeps_transport():
     (['web/app/page.tsx'], True),
     (['templates/index.html'], True),
     (['scripts/serve_watchdog.sh'], True),
+    (['deploy/pi/models.json'], True),
     (['docs/x.md', 'tests/test_x.py', 'scripts/other.sh', 'web/scripts/test-x.mjs'], False),
     (['deploy/public/worker/full_agent_manager.py'], False),
 ])

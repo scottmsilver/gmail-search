@@ -324,6 +324,13 @@ def test_pi_on_gemini_binds_a_gemini_profile_at_medium_thinking(tmp_path):
     (run,profile),=bound
     assert run==s.lease.run_id and profile.model=='gemini-3.8-flash'
     assert profile.thinking_level=='MEDIUM' and profile.output_token_limit==GEMINI_OUTPUT_TOKEN_LIMIT
+    bound.clear()
+    argon_packet=envelope(s.lease,'Find my receipts','pi_gemini_argon')
+    validate_bootstrap(argon_packet,'Find my receipts','pi_gemini_argon')
+    assert json.loads(argon_packet[4:])['profile']=='mail-agent-pi-gemini-v1'
+    (run,argon_profile),=bound
+    assert run==s.lease.run_id and argon_profile.model=='gemini-4-argon'
+    assert argon_profile.thinking_level=='MEDIUM' and argon_profile.output_token_limit==GEMINI_OUTPUT_TOKEN_LIMIT
 
 
 def test_pi_on_gemini_is_refused_without_the_gemini_service(tmp_path):
@@ -474,8 +481,11 @@ def test_each_runtime_binds_its_own_profile_when_all_are_configured(tmp_path):
     rates=SimpleNamespace(input_units_per_token=2,output_units_per_token=3)
     envelope=envelope_factory(Capabilities(s.registry),provider,rates,
                               gemini=service('gemini'),openrouter=service('openrouter'))
-    assert sorted(envelope.runtimes)==['claude','pi','pi_gemini','pi_opus']
-    for runtime,expected in (('pi_gemini',GeminiProfile),('pi_opus',OpenRouterProfile),
+    assert sorted(envelope.runtimes)==[
+        'claude','pi','pi_gemini','pi_gemini_argon','pi_opus','pi_sonnet_4_6','pi_sonnet_5_5']
+    for runtime,expected in (('pi_gemini',GeminiProfile),('pi_gemini_argon',GeminiProfile),
+                             ('pi_opus',OpenRouterProfile),('pi_sonnet_5_5',OpenRouterProfile),
+                             ('pi_sonnet_4_6',OpenRouterProfile),
                              ('claude',ProviderProfile),('pi',ProviderProfile)):
         bound.clear()
         envelope(s.lease,'Find my receipts',runtime)

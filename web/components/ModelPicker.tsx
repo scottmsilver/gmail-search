@@ -24,7 +24,10 @@ const useChatSettings = (): ChatSettings =>
 const SHORT_NAME: Record<string, string> = {
   "openrouter/meta/muse-spark-1.3": "Muse Spark 1.3 (OpenRouter)",
   "google/gemini-3.8-flash": "Gemini 3.8 Flash (Google)",
+  "google/gemini-4-argon": "Gemini 4 Argon (Google)",
   "anthropic/claude-opus-5": "Claude Opus 5",
+  "anthropic/claude-sonnet-5-5": "Claude Sonnet 5.5",
+  "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
   sonnet: "Sonnet",
   opus: "Opus",
   haiku: "Haiku",

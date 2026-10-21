@@ -111,7 +111,15 @@ def test_invalid_start_never_launches(app_state,body):
 @pytest.mark.parametrize('backend,model,runtime',[
     (None,None,'pi_gemini'),('pi','google/gemini-3.8-flash','pi_gemini'),
     ('pi','openrouter/google/gemini-3.8-flash','pi_gemini'),
+    ('pi','google/gemini-4-argon','pi_gemini_argon'),
+    ('pi','openrouter/google/gemini-4-argon','pi_gemini_argon'),
     ('pi','anthropic/claude-opus-5','pi_opus'),('pi','openrouter/anthropic/claude-opus-5','pi_opus'),
+    ('pi','anthropic/claude-sonnet-5-5','pi_sonnet_5_5'),
+    ('pi','anthropic/claude-sonnet-5.5','pi_sonnet_5_5'),
+    ('pi','openrouter/anthropic/claude-sonnet-5.5','pi_sonnet_5_5'),
+    ('pi','anthropic/claude-sonnet-4-6','pi_sonnet_4_6'),
+    ('pi','anthropic/claude-sonnet-4.6','pi_sonnet_4_6'),
+    ('pi','openrouter/anthropic/claude-sonnet-4.6','pi_sonnet_4_6'),
     ('claude_code',None,'claude'),('claude_code','sonnet','claude')])
 def test_the_chosen_backend_selects_the_guest_runtime(app_state,backend,model,runtime):
     body = {'question':'hello','conversation_id':'conversation'}

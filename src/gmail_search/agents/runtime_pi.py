@@ -75,9 +75,15 @@ _SESSION_TOKEN_TTL_MARGIN_SECONDS = 120
 # to compute the reading budget injected into the system prompt.
 _CONTEXT_WINDOW_BY_PREFIX = (
     ("anthropic/claude-opus-5", 1_000_000),
+    ("anthropic/claude-sonnet-5-5", 1_000_000),
+    ("anthropic/claude-sonnet-4-6", 1_000_000),
+    ("openrouter/google/gemini-4-argon", 1_048_576),
     ("openrouter/google/gemini-3.8-flash", 1_048_576),
     ("openrouter/anthropic/claude-opus-5", 1_000_000),
+    ("openrouter/anthropic/claude-sonnet-5.5", 1_000_000),
+    ("openrouter/anthropic/claude-sonnet-4.6", 1_000_000),
     ("openrouter/meta/muse-spark-1.3", 1_048_576),
+    ("google/gemini-4", 1_048_576),
     ("google/gemini-3", 1_048_576),
     ("google/gemini-2.5", 1_048_576),
     ("anthropic/", 200_000),

@@ -9,7 +9,7 @@ def _steps(escalation, run, base, calls):
 
 def test_ladder_starts_on_flash_lite_and_ends_on_pro():
     assert LADDER[0] == ('gemini-3.5-flash-lite', 'LOW')
-    assert LADDER[-1][0] == 'gemini-3.1-pro-preview'
+    assert LADDER[-1] == ('gemini-4-argon', 'HIGH')
     assert step_of('gemini-3.8-flash', 'MEDIUM') == 2 and step_of('other', 'LOW') is None
 
 

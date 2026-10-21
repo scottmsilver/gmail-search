@@ -629,6 +629,10 @@ def test_context_window_for_unknown_model_falls_back_to_default():
 
 def test_context_window_for_known_prefixes():
     assert runtime_pi.context_window_for("openrouter/meta/muse-spark-1.3") == 1_048_576
+    assert runtime_pi.context_window_for("google/gemini-4-argon") == 1_048_576
+    assert runtime_pi.context_window_for("openrouter/google/gemini-4-argon") == 1_048_576
+    assert runtime_pi.context_window_for("anthropic/claude-sonnet-5-5") == 1_000_000
+    assert runtime_pi.context_window_for("anthropic/claude-sonnet-4-6") == 1_000_000
     assert runtime_pi.context_window_for("google/gemini-2.5-pro") == 1_048_576
     assert runtime_pi.context_window_for("anthropic/claude-test") == 200_000
 

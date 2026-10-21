@@ -16,7 +16,12 @@ from .registry import AccessDenied
 ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions'
 # Models this boundary may call. The account's zero-data-retention guardrail
 # still applies upstream; a model with no compliant endpoint is refused there.
-MODELS = frozenset(('anthropic/claude-opus-5', 'meta/muse-spark-1.3'))
+MODELS = frozenset((
+    'anthropic/claude-opus-5',
+    'anthropic/claude-sonnet-5.5',
+    'anthropic/claude-sonnet-4.6',
+    'meta/muse-spark-1.3',
+))
 EFFORTS = ('low', 'medium', 'high')
 _REASONING_FIELDS = ('reasoning', 'reasoning_content', 'reasoning_text')
 _DETAIL_TYPES = ('reasoning.text', 'reasoning.summary', 'reasoning.encrypted')

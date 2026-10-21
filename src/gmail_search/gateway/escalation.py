@@ -19,7 +19,7 @@ LADDER = (
     ('gemini-3.8-flash', 'LOW'),
     ('gemini-3.8-flash', 'MEDIUM'),
     ('gemini-3.8-flash', 'HIGH'),
-    ('gemini-3.1-pro-preview', 'HIGH'),
+    ('gemini-4-argon', 'HIGH'),
 )
 LADDER_MODELS = tuple(dict.fromkeys(model for model, _ in LADDER))
 # Call-count backstop, off: measured 2026-09-24 it raised thinking mid-run and

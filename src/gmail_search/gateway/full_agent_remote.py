@@ -17,7 +17,9 @@ RUN_WALL_SECONDS=900
 # (each a Node process). Memory is a ceiling: Firecracker backs only touched pages.
 FULL_LIMITS=WorkerLimits(vcpus=2,memory_mib=640,pids=256,disk_bytes=1024**3,output_bytes=8*1024**2,wall_seconds=RUN_WALL_SECONDS)
 # The runtime a browser may choose, and the guest profile each one boots.
-GUEST_PROFILES={'pi':'mail-agent-pi-v1','pi_gemini':'mail-agent-pi-gemini-v1','pi_opus':'mail-agent-pi-opus-v1',
+GUEST_PROFILES={'pi':'mail-agent-pi-v1','pi_gemini':'mail-agent-pi-gemini-v1',
+    'pi_gemini_argon':'mail-agent-pi-gemini-v1','pi_opus':'mail-agent-pi-opus-v1',
+    'pi_sonnet_5_5':'mail-agent-pi-opus-v1','pi_sonnet_4_6':'mail-agent-pi-opus-v1',
     'claude':'mail-agent-claude-v1'}
 
 

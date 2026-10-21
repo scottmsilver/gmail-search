@@ -17,14 +17,22 @@ export const CLAUDE_AVAILABLE_MODELS = [
 
 export const PI_AVAILABLE_MODELS = [
   "google/gemini-3.8-flash",
+  "google/gemini-4-argon",
   "openrouter/meta/muse-spark-1.3",
   "anthropic/claude-opus-5",
+  "anthropic/claude-sonnet-5-5",
+  "anthropic/claude-sonnet-4-6",
 ] as const;
 
 export const piModelForRequest = (model: unknown): string => {
   const aliases: Record<string, string> = {
     "openrouter/google/gemini-3.8-flash": "google/gemini-3.8-flash",
+    "openrouter/google/gemini-4-argon": "google/gemini-4-argon",
     "openrouter/anthropic/claude-opus-5": "anthropic/claude-opus-5",
+    "openrouter/anthropic/claude-sonnet-5.5": "anthropic/claude-sonnet-5-5",
+    "anthropic/claude-sonnet-5.5": "anthropic/claude-sonnet-5-5",
+    "openrouter/anthropic/claude-sonnet-4.6": "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-sonnet-4.6": "anthropic/claude-sonnet-4-6",
   };
   const selected = typeof model === "string" ? aliases[model] ?? model : "";
   return (PI_AVAILABLE_MODELS as readonly string[]).includes(selected) ? selected : PI_AVAILABLE_MODELS[0];

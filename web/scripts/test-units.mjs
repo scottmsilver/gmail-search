@@ -54,7 +54,13 @@ test("Pi request selection preserves Muse and falls back to configured default",
 });
 test("old OpenRouter selections migrate to direct providers", () => {
   eq(piModelForRequest("openrouter/google/gemini-3.8-flash"), "google/gemini-3.8-flash");
+  eq(piModelForRequest("openrouter/google/gemini-4-argon"), "google/gemini-4-argon");
+  eq(piModelForRequest("google/gemini-4-argon"), "google/gemini-4-argon");
   eq(piModelForRequest("openrouter/anthropic/claude-opus-5"), "anthropic/claude-opus-5");
+  eq(piModelForRequest("openrouter/anthropic/claude-sonnet-5.5"), "anthropic/claude-sonnet-5-5");
+  eq(piModelForRequest("anthropic/claude-sonnet-5.5"), "anthropic/claude-sonnet-5-5");
+  eq(piModelForRequest("openrouter/anthropic/claude-sonnet-4.6"), "anthropic/claude-sonnet-4-6");
+  eq(piModelForRequest("anthropic/claude-sonnet-4.6"), "anthropic/claude-sonnet-4-6");
 });
 
 // ─── safeUrl (CitableMarkdown's XSS guard) ─────────────────────────

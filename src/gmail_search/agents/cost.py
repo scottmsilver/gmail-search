@@ -61,6 +61,8 @@ GEMINI_PRICING: dict[str, Pricing] = {
     "gemini-2.5-flash-lite": Pricing(input=0.10, output=0.40),
     "gemini-3.1-pro-preview": Pricing(input=1.25, output=10.00),
     "gemini-3.7-flash": Pricing(input=0.75, output=3.75, cached_input=0.075),
+    "gemini-3.8-flash": Pricing(input=0.75, output=3.75, cached_input=0.075),
+    "gemini-4-argon": Pricing(input=2.00, output=10.00, cached_input=0.10),
     # Fallback; matches Flash pricing so we never undercount by
     # accident when a brand-new model id shows up.
     "default": Pricing(input=0.075, output=0.30),
@@ -73,6 +75,7 @@ def _match_pricing(model: str) -> Pricing:
     still lands on gemini-2.5-flash), then fall back to default."""
     if not model:
         return GEMINI_PRICING["default"]
+    model = model.removeprefix("google/")
     if model in GEMINI_PRICING:
         return GEMINI_PRICING[model]
     # Longest prefix wins so `gemini-2.5-flash-lite` beats
