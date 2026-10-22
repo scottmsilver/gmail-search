@@ -245,7 +245,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       };
 
       const emitTurnCost = () => {
-        if (!costKnown && elapsedMs === null && !deepSessionId) return;
+        if (!costKnown && elapsedMs === null) return;
         writer.write({
           type: "data-turn-cost",
           id: `tc-deep-${args.loggerId}`,
