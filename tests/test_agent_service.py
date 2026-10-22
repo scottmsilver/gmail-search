@@ -13,6 +13,15 @@ import pytest
 from gmail_search.agents import service
 
 
+@pytest.fixture(autouse=True)
+def _stub_claudebox_credentials_health(monkeypatch):
+    """Unit tests in this module exercise service routing, not the host's
+    live `~/.claude/.credentials.json` clock."""
+    import gmail_search.claudebox_creds as creds
+
+    monkeypatch.setattr(creds, "credentials_health", lambda *a, **k: ("ok", None))
+
+
 def test_real_run_claude_code_backend_calls_register_invoke_unregister(monkeypatch, tmp_path):
     """`GMAIL_DEEP_BACKEND=claude_code` must:
        1. ensure the workspace dir exists,
