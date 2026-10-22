@@ -854,3 +854,63 @@ def test_pi_default_is_gemini_and_explicit_model_wins(monkeypatch):
     assert runtime_pi.pi_model() == "google/gemini-3.8-flash"
     monkeypatch.setenv("GMAIL_PI_MODEL", "openrouter/meta/muse-spark-1.3")
     assert runtime_pi.pi_model() == "openrouter/meta/muse-spark-1.3"
+
+
+def test_render_instruction_injects_current_date_and_jev_guidance():
+    text = runtime_pi.render_instruction(
+        "google/gemini-3.8-flash",
+        current_date="2026-10-22",
+        jev_guidance="# Jev Effort Routing (Direct Lookup)\nFast lookup.",
+    )
+    assert "Current date: 2026-10-22." in text
+    assert "{current_date}" not in text
+    assert "50 KB" in text
+    assert "# Jev Effort Routing (Direct Lookup)" in text
+
+
+def test_jev_guidance_for_maps_effort_buckets_and_workflow_parallel_hint():
+    t_low, g_low = runtime_pi.jev_guidance_for({"lookup": 0.95, "investigate": 0.05})
+    assert t_low == "low"
+    assert "Direct Lookup" in g_low
+    assert "gmail_get_attachment_batch" in g_low
+
+    t_med, g_med = runtime_pi.jev_guidance_for({"lookup": 0.1, "investigate": 0.8})
+    assert t_med == "medium"
+    assert "Focused Investigation" in g_med
+
+    t_high, g_high = runtime_pi.jev_guidance_for(
+        {"exhaustive": 0.7}, parallel=0.8, workflow=True
+    )
+    assert t_high == "high"
+    assert "Exhaustive" in g_high
+    assert "mail-researcher" in g_high
+
+
+def test_pi_thinking_uses_jev_route_unless_env_overrides(monkeypatch):
+    monkeypatch.delenv("GMAIL_PI_THINKING", raising=False)
+    assert runtime_pi.pi_thinking() == "medium"
+    assert runtime_pi.pi_thinking("low") == "low"
+    assert runtime_pi.pi_thinking("high") == "high"
+
+    monkeypatch.setenv("GMAIL_PI_THINKING", "medium")
+    assert runtime_pi.pi_thinking("low") == "medium"
+
+    monkeypatch.setenv("GMAIL_PI_THINKING", "off")
+    assert runtime_pi.pi_thinking("low") is None
+
+
+def test_pi_run_passes_jev_routed_thinking_and_guidance_to_argv(monkeypatch):
+    client = _FakeClient(_happy_records())
+    _install(monkeypatch, client)
+    monkeypatch.delenv("GMAIL_PI_THINKING", raising=False)
+
+    async def fake_route_effort(question: str, *, workflow: bool = False):
+        return "low", "# Jev Effort Routing (Direct Lookup)\nUse one batch."
+
+    monkeypatch.setattr(runtime_pi, "_route_effort", fake_route_effort)
+    _run()
+    argv = runtime_pi._spawn_client.argv
+    assert argv[argv.index("--thinking") + 1] == "low"
+    sys_prompt = argv[argv.index("--system-prompt") + 1]
+    assert "# Jev Effort Routing (Direct Lookup)" in sys_prompt
+

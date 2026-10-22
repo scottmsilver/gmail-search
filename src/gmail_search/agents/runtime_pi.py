@@ -16,8 +16,11 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Awaitable, Callable
+
+import httpx
 
 from gmail_search.agents import pi_protocol as pp
 from gmail_search.agents import pi_workflow as wf
@@ -32,6 +35,14 @@ from gmail_search.agents.deep_events import (
 )
 from gmail_search.agents.pi_rpc import PiRpcClient, PiRpcError
 from gmail_search.agents.session import append_event, finalize_session, session_elapsed_ms
+from gmail_search.gateway.effort_router import (
+    EffortRouter,
+    LADDER,
+    PARALLEL_AT_LEAST,
+    PARALLEL_HINT,
+    step_for,
+)
+from gmail_search.gateway.jev import JevConfig, jev_config_from_env
 from gmail_search.store.db import get_connection
 
 logger = logging.getLogger(__name__)
@@ -94,13 +105,18 @@ _READING_BUDGET_FRACTION = 0.30
 
 PI_INSTRUCTION = """You answer questions about the user's Gmail archive with grounded, cited
 reasoning. Match the amount of investigation to the question.
+Current date: {current_date}. Resolve relative dates ("last year", "recently", "latest", "next year") against this date.
 
 # Scope and stopping
 
-For a narrow fact, use a direct lookup and verify the relevant source. Answer
-once the evidence settles it; no separate mapping phase or written read plan
-is required. For a broad history, comparison, or "all/every" request, discover
-candidates in reasonable batches, read the relevant sources, then check coverage
+For a narrow fact, use a direct lookup: issue one combined discovery batch
+(e.g. `gmail_search_emails_batch` plus `gmail_query_emails_batch` or `gmail_find_facts`
+in the same assistant turn) and verify the relevant source in one `gmail_get_thread_batch`
+call (and `gmail_get_attachment_batch` if the answer or invoice is in an attachment).
+Answer once the evidence settles it; no separate mapping phase or written read plan
+is required, and do not run speculative follow-up confirmation searches after primary
+sources already verify the answer. For a broad history, comparison, or "all/every" request,
+discover candidates in reasonable batches, read the relevant sources, then check coverage
 across dates, senders and variants. A few examples do not establish completeness.
 Describe material gaps without claiming an exhaustive result.
 
@@ -117,8 +133,12 @@ within {reading_budget} tokens, leaving room for reasoning and the answer.
 Be deliberate about how much tool output you bring into context. Request the
 information needed for the next decision, with enough surrounding context to
 interpret it correctly. Choose filters, detail levels, and batch sizes accordingly.
-Balance smaller outputs against extra round trips; don't repeatedly fetch tiny
-fragments when one fuller read would answer the question. Expand when evidence
+Keep each tool call's output within the 50 KB inline cap so results do not spill to
+temp files: when batching `gmail_search_emails_batch` queries with `detail="snippet"`,
+use `top_k=5` to `10` per query (never `>15`), or `detail="refs"` for broader fan-out;
+in `gmail_query_emails_batch`, keep `limit <= 20` per filter and use `order_by="date_desc"`
+or `"date_asc"`. Balance smaller outputs against extra round trips; don't repeatedly
+fetch tiny fragments when one fuller read would answer the question. Expand when evidence
 is incomplete.
 
 # Tools and readable mail
@@ -203,6 +223,29 @@ needed for the question. Keep narrow answers short. Do not add a housekeeping
 footer about plans, tools or files when no artifact was requested or produced.
 """
 
+_JEV_LOOKUP_GUIDANCE = """# Jev Effort Routing (Direct Lookup)
+Jev classified this question as a direct lookup. Issue ONE discovery turn
+(combining `gmail_search_emails_batch` with `top_k=6` and `gmail_find_facts` or
+`gmail_query_emails_batch` if helpful), read the best 1–2 threads in one
+`gmail_get_thread_batch` call (and call `gmail_get_attachment_batch` if the
+answer or invoice is inside an attachment on those threads), then write your
+cited answer immediately without speculative extra searches."""
+
+_JEV_INVESTIGATE_GUIDANCE = """# Jev Effort Routing (Focused Investigation)
+Jev classified this question as a focused multi-thread investigation. In your first
+turn, issue a broad multi-angle `gmail_search_emails_batch` (3-5 phrasings with
+`top_k=6..8`, `detail='snippet'`) together with `gmail_find_facts` and/or
+`gmail_query_emails_batch` in the SAME assistant turn so you don't need sequential
+discovery rounds. Read the candidate threads together in one `gmail_get_thread_batch`
+call (and any needed attachment in one `gmail_get_attachment_batch` call), then
+write your cited answer immediately without redundant confirmation searches."""
+
+_JEV_EXHAUSTIVE_GUIDANCE = """# Jev Effort Routing (Exhaustive / Aggregation)
+Jev classified this question as requiring broad coverage. Start by combining
+`gmail_find_facts(exhaustive=True)` with targeted `gmail_query_emails_batch` /
+`gmail_search_emails_batch(detail='refs')` in your first turn, batch thread reads,
+and synthesize once the target period/entities are covered."""
+
 
 # ── Settings (env, matching the GMAIL_CLAUDEBOX_* pattern) ────────────
 
@@ -240,21 +283,109 @@ def _reading_budget_for(model: str) -> int:
     return int(context_window_for(model) * _READING_BUDGET_FRACTION)
 
 
-def render_instruction(model: str, *, workflow_profile: str = "baseline") -> str:
-    """`PI_INSTRUCTION` with `{context_window}`/`{reading_budget}` filled
-    in. Uses `str.replace` rather than `str.format` — the prompt has
+def jev_guidance_for(
+    probabilities: dict[str, float], parallel: float = 0.0, *, workflow: bool = False
+) -> tuple[str, str]:
+    """Map Jev effort probabilities to `(thinking_level, guidance_block)`."""
+    _, level = LADDER[step_for(probabilities)]
+    thinking = level.lower()
+    if thinking == "low":
+        guidance = _JEV_LOOKUP_GUIDANCE
+    elif thinking == "high":
+        guidance = _JEV_EXHAUSTIVE_GUIDANCE
+    else:
+        guidance = _JEV_INVESTIGATE_GUIDANCE
+    if workflow and isinstance(parallel, (int, float)) and parallel >= PARALLEL_AT_LEAST:
+        guidance = f"{guidance}\n\n{PARALLEL_HINT}"
+    return thinking, guidance
+
+
+def _jev_config() -> JevConfig | None:
+    """Resolve JevConfig from `os.environ`, falling back to
+    `~/.config/gmail-search/invited-auth.env` in live deep-mode runs
+    (`GMAIL_DEEP_REAL=1`) when `multi-tenant.env` omits TypeSafe keys."""
+    cfg = jev_config_from_env()
+    if cfg is not None:
+        return cfg
+    if os.environ.get("GMAIL_DEEP_REAL", "").strip().lower() not in ("1", "true", "yes"):
+        return None
+    env_path = Path("~/.config/gmail-search/invited-auth.env").expanduser()
+    if not env_path.is_file():
+        return None
+    try:
+        from gmail_search.deploy.config import read_env_file
+
+        vals = read_env_file(env_path)
+        url, key = vals.get("TYPESAFE_URL"), vals.get("TYPESAFE_API_KEY")
+        return JevConfig(url, key) if url and key else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _route_effort(question: str, *, workflow: bool = False) -> tuple[str | None, str | None]:
+    """Ask Jev for `(thinking_level, guidance_block)` when `TYPESAFE_URL` /
+    `TYPESAFE_API_KEY` are configured. Advisory: returns `(None, None)` on
+    any error or when Jev is unconfigured."""
+    jev = _jev_config()
+    if jev is None or not question or not question.strip():
+        return None, None
+
+    def _ask_sync() -> tuple[dict[str, float], float]:
+        with httpx.Client(trust_env=False, follow_redirects=False) as client:
+            router = EffortRouter(jev, client)
+            probs, _conf, par = router._ask(question)
+            return probs, par if isinstance(par, (int, float)) else 0.0
+
+    started = time.perf_counter()
+    try:
+        probs, par = await asyncio.to_thread(_ask_sync)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pi effort router unavailable (%s); using default thinking", type(exc).__name__)
+        return None, None
+    thinking, guidance = jev_guidance_for(probs, par, workflow=workflow)
+    logger.info(
+        "pi effort router thinking=%s parallel=%.2f probabilities=%s %.0fms",
+        thinking,
+        par,
+        {k: round(v, 2) for k, v in probs.items()},
+        (time.perf_counter() - started) * 1000,
+    )
+    return thinking, guidance
+
+
+def render_instruction(
+    model: str,
+    *,
+    workflow_profile: str = "baseline",
+    current_date: str | None = None,
+    jev_guidance: str | None = None,
+) -> str:
+    """`PI_INSTRUCTION` with `{current_date}`/`{context_window}`/`{reading_budget}`
+    filled in. Uses `str.replace` rather than `str.format` — the prompt has
     literal `{`/`}` in its code examples that `.format` would choke on."""
-    text = PI_INSTRUCTION.replace("{context_window}", f"{context_window_for(model):,}")
+    resolved_date = current_date or date.today().isoformat()
+    text = (
+        PI_INSTRUCTION.replace("{current_date}", resolved_date)
+        .replace("{context_window}", f"{context_window_for(model):,}")
+    )
     if wf.resolve_profile(workflow_profile) == "workflow":
         start = text.index("# Batching\n")
         end = text.index("# Citations\n", start)
         text = text[:start] + wf.INSTRUCTION + "\n" + text[end:]
-    return text.replace("{reading_budget}", f"{_reading_budget_for(model):,}")
+    text = text.replace("{reading_budget}", f"{_reading_budget_for(model):,}")
+    if jev_guidance:
+        text = text.rstrip() + "\n\n" + jev_guidance.strip() + "\n"
+    return text
 
 
-def pi_thinking() -> str | None:
-    raw = os.environ.get("GMAIL_PI_THINKING", _DEFAULT_THINKING).strip().lower()
-    return None if raw in ("", "off", "none") else raw
+def pi_thinking(routed_thinking: str | None = None) -> str | None:
+    """Resolve the turn's `--thinking` flag. Explicit `GMAIL_PI_THINKING`
+    in the environment always wins (including `off`/`none`); otherwise use
+    Jev's `routed_thinking` when available, falling back to `_DEFAULT_THINKING`."""
+    if "GMAIL_PI_THINKING" in os.environ:
+        raw = os.environ["GMAIL_PI_THINKING"].strip().lower()
+        return None if raw in ("", "off", "none") else raw
+    return routed_thinking or _DEFAULT_THINKING
 
 
 def pi_container() -> str:
@@ -608,8 +739,16 @@ async def _side_channel_tool_calls(session_id: str) -> list[dict]:
     return rc._tool_calls_from_side_channel(records)
 
 
-def _build_argv(session_id: str, workspace: str, conversation_id: str | None, model: str,
-                *, workflow_files: wf.WorkflowFiles | None = None) -> list[str]:
+def _build_argv(
+    session_id: str,
+    workspace: str,
+    conversation_id: str | None,
+    model: str,
+    *,
+    workflow_files: wf.WorkflowFiles | None = None,
+    routed_thinking: str | None = None,
+    jev_guidance: str | None = None,
+) -> list[str]:
     return pp.build_pi_argv(
         container=pi_container(),
         session_id=session_id,
@@ -617,8 +756,12 @@ def _build_argv(session_id: str, workspace: str, conversation_id: str | None, mo
         session_path=session_path_for(conversation_id),
         extension_path=wf.EXTENSION if workflow_files else pi_extension_path(),
         model=model,
-        thinking=pi_thinking(),
-        system_prompt=render_instruction(model, workflow_profile="workflow" if workflow_files else "baseline"),
+        thinking=pi_thinking(routed_thinking),
+        system_prompt=render_instruction(
+            model,
+            workflow_profile="workflow" if workflow_files else "baseline",
+            jev_guidance=jev_guidance,
+        ),
         builtin_tools=pi_builtin_tools(),
         mcp_config_path=None if workflow_files else pi_mcp_config_path(),
         tmpdir=_in_container_tmpdir(workspace),
@@ -693,10 +836,28 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
 
 
 async def _run_turn(
-    conn, *, session_id: str, workspace: str, conversation_id: str | None, question: str, model: str,
+    conn,
+    *,
+    session_id: str,
+    workspace: str,
+    conversation_id: str | None,
+    question: str,
+    model: str,
     workflow_files: wf.WorkflowFiles | None = None,
+    routed_thinking: str | None = None,
+    jev_guidance: str | None = None,
 ) -> TurnOutcome:
-    client = await _spawn_client(_build_argv(session_id, workspace, conversation_id, model, workflow_files=workflow_files))
+    client = await _spawn_client(
+        _build_argv(
+            session_id,
+            workspace,
+            conversation_id,
+            model,
+            workflow_files=workflow_files,
+            routed_thinking=routed_thinking,
+            jev_guidance=jev_guidance,
+        )
+    )
     try:
         outcome = await drive_turn(
             client,
@@ -799,11 +960,17 @@ async def pi_run(
         workflow_files: wf.WorkflowFiles | None = None
         try:
             profile = wf.resolve_profile(workflow_profile)
-            await rc.register_session_via_admin(
-                session_id, evidence_records=None, conversation_id=conversation_id, workspace=workspace, user_id=user_id
-            )
-            registered = True
-            token_path = await _install_session_token(rc, session_id, workspace)
+            effort_task = asyncio.create_task(_route_effort(question, workflow=(profile == "workflow")))
+            try:
+                await rc.register_session_via_admin(
+                    session_id, evidence_records=None, conversation_id=conversation_id, workspace=workspace, user_id=user_id
+                )
+                registered = True
+                token_path = await _install_session_token(rc, session_id, workspace)
+                routed_thinking, jev_guidance = await effort_task
+            finally:
+                if not effort_task.done():
+                    effort_task.cancel()
             _ensure_workspace_tmp_dir(workspace)
             if profile == "workflow":
                 workflow_files = wf.prepare_workflow(_workspaces_root(), workspace, session_id, timeout=hard_timeout_seconds())
@@ -816,6 +983,8 @@ async def pi_run(
                 question=question,
                 model=resolved_model,
                 workflow_files=workflow_files,
+                routed_thinking=routed_thinking,
+                jev_guidance=jev_guidance,
             )
             if not workflow_files:
                 _report_cost(cost_sink, resolved_model, outcome.usage)
