@@ -64,3 +64,36 @@ def test_an_abandoned_session_still_expires(public_env, monkeypatch):
     token = public_auth.issue_session({"email": "owner@example.com"})
     clock[0] += 31 * 86400
     assert public_auth.read_session(token) is None
+
+
+def test_invited_identity_store_sessions_default_to_thirty_days_and_renew_across_restarts(public_env, tmp_path):
+    """Invited service sessions in IdentityStore must also outlive 1 hour, slide on read, and survive restarts."""
+    from gmail_search.auth.identity_store import IdentityStore, VerifiedGoogleIdentity
+
+    tmp_path.chmod(0o700)
+    clock = [1_000_000.0]
+    store_path = tmp_path / "identities.sqlite"
+    store = IdentityStore(store_path, clock=lambda: clock[0], session_ttl=public_auth.session_ttl_seconds)
+    owner = store.invite("owner@example.com")
+    store.mark_provisioned(owner.owner_id)
+    verified = VerifiedGoogleIdentity("owner@example.com", "google-owner", True)
+    token = store.admit(verified)
+
+    # 2 hours later (past the old 3600s cap): still valid after a restart.
+    clock[0] += 7200
+    reopened = IdentityStore(store_path, clock=lambda: clock[0], session_ttl=public_auth.session_ttl_seconds)
+    account = reopened.read_session(token)
+    assert account is not None and account.owner_id == owner.owner_id
+
+    # 20 days later: still valid and reading slides the 30-day window forward.
+    clock[0] += 20 * 86400
+    reopened_again = IdentityStore(store_path, clock=lambda: clock[0], session_ttl=public_auth.session_ttl_seconds)
+    assert reopened_again.read_session(token) is not None
+
+    # Another 20 days later (40 days after original sign-in, 20 days after last read): still valid!
+    clock[0] += 20 * 86400
+    assert reopened_again.read_session(token) is not None
+
+    # 31 days of complete inactivity: expires.
+    clock[0] += 31 * 86400
+    assert reopened_again.read_session(token) is None

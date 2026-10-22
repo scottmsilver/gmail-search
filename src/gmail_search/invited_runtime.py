@@ -18,7 +18,7 @@ import httpx
 from .auth.gmail_consent import GmailConsent
 from .auth.identity_store import IdentityStore
 from .auth.invited_broker import BoundGmailBroker
-from .auth.public import validate_public_auth_config
+from .auth.public import session_ttl_seconds, validate_public_auth_config
 from .gateway.artifacts import ArtifactStore
 from .gateway.attachment_raw_service import RunRawAttachmentService
 from .gateway.attachment_read_service import RunAttachmentReadService
@@ -374,7 +374,7 @@ async def open_runtime(config):
         info=identity_path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o600:
             raise AccessDenied()
-        identities=IdentityStore(identity_path)
+        identities=IdentityStore(identity_path,session_ttl=session_ttl_seconds)
         pending=verify_identities(identities,config.owners)
         owners={owner.id:owner for owner in config.owners}
         can_run=run_gate(owners,pending,identities)

@@ -56,6 +56,8 @@ def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent,
     config = public.validate_public_auth_config()
     if config is None or config.secret == broker.signing_secret or consent.identities is not identities:
         raise RuntimeError('An explicit isolated public identity registration is required')
+    if getattr(identities, 'session_ttl', None) == 3600:
+        identities.session_ttl = public.session_ttl_seconds
     router = APIRouter(route_class=_PrivateRoute)
 
     def session(request):
@@ -117,9 +119,10 @@ def create_invited_auth_router(identities: IdentityStore, consent: GmailConsent,
         except Exception:
             raise HTTPException(503, 'Account provisioning unavailable') from None
         identities.mark_provisioned(account.owner_id, generation=account.generation)
-        token = identities.admit(verified)
+        ttl = public.session_ttl_seconds()
+        token = identities.admit(verified, ttl=ttl)
         response = RedirectResponse(destination, status_code=303)
-        cookie(response, public.SESSION_COOKIE, token, public.SESSION_TTL)
+        cookie(response, public.SESSION_COOKIE, token, ttl)
         clear(response, public.NONCE_COOKIE)
         return response
 

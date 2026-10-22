@@ -28,55 +28,79 @@ type AuthState =
   | { kind: "signed-out" }
   | { kind: "error"; detail: string };
 
+const RETRYABLE_AUTH_STATUSES = new Set([500, 502, 503, 504]);
+const MAX_AUTH_PROBE_ATTEMPTS = 60;
+const AUTH_PROBE_RETRY_MS = 1500;
+
 export function AuthGate({ children, publicMode = false, fullWorkerMode = false }: { children: React.ReactNode; publicMode?: boolean; fullWorkerMode?: boolean }) {
   const [state, setState] = useState<AuthState>({ kind: "checking" });
 
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const waitRetry = () =>
+      new Promise<void>((resolve) => {
+        retryTimer = setTimeout(resolve, AUTH_PROBE_RETRY_MS);
+      });
     (async () => {
-      try {
-        const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
-        if (cancelled) return;
-        if (res.status === 401) {
-          setState({ kind: "signed-out" });
+      for (let attempt = 1; attempt <= MAX_AUTH_PROBE_ATTEMPTS; attempt++) {
+        try {
+          const res = await fetch("/api/auth/me", { cache: "no-store", credentials: "include" });
+          if (cancelled) return;
+          if (res.status === 401) {
+            setState({ kind: "signed-out" });
+            return;
+          }
+          if (!res.ok) {
+            if (RETRYABLE_AUTH_STATUSES.has(res.status) && attempt < MAX_AUTH_PROBE_ATTEMPTS) {
+              await waitRetry();
+              if (cancelled) return;
+              continue;
+            }
+            setState({ kind: "error", detail: `auth probe returned ${res.status}` });
+            return;
+          }
+          const body = await res.json();
+          if (publicMode && (body.multi_tenant !== true || !body.user?.id)) {
+            setState({ kind: "signed-out" });
+          } else if (!body.multi_tenant) {
+            setState({ kind: "open" });
+          } else if (body.user) {
+            const u = body.user;
+            setState({
+              kind: "signed-in",
+              // Reported per user by the server. `publicMode` only says which
+              // deployment this build is serving; it cannot say what this
+              // particular signed-in user is allowed to run.
+              fullRuntime: body.capabilities?.full_runtime === true,
+              deepModels: parseDeepModels(body.capabilities?.deep_models),
+              user: {
+                id: u.id,
+                email: u.email,
+                name: u.name ?? null,
+                picture: u.picture ?? null,
+                is_admin: !!u.is_admin,
+              },
+            });
+          } else {
+            setState({ kind: "signed-out" });
+          }
+          return;
+        } catch (err) {
+          if (cancelled) return;
+          if (attempt < MAX_AUTH_PROBE_ATTEMPTS) {
+            await waitRetry();
+            if (cancelled) return;
+            continue;
+          }
+          setState({ kind: "error", detail: String(err) });
           return;
         }
-        if (!res.ok) {
-          setState({ kind: "error", detail: `auth probe returned ${res.status}` });
-          return;
-        }
-        const body = await res.json();
-        if (publicMode && (body.multi_tenant !== true || !body.user?.id)) {
-          setState({ kind: "signed-out" });
-        } else if (!body.multi_tenant) {
-          setState({ kind: "open" });
-        } else if (body.user) {
-          const u = body.user;
-          setState({
-            kind: "signed-in",
-            // Reported per user by the server. `publicMode` only says which
-            // deployment this build is serving; it cannot say what this
-            // particular signed-in user is allowed to run.
-            fullRuntime: body.capabilities?.full_runtime === true,
-            deepModels: parseDeepModels(body.capabilities?.deep_models),
-            user: {
-              id: u.id,
-              email: u.email,
-              name: u.name ?? null,
-              picture: u.picture ?? null,
-              is_admin: !!u.is_admin,
-            },
-          });
-        } else {
-          setState({ kind: "signed-out" });
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setState({ kind: "error", detail: String(err) });
       }
     })();
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [publicMode]);
 

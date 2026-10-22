@@ -93,9 +93,13 @@ def _token_hash(token):
     return hashlib.sha256(token.encode('ascii')).hexdigest()
 
 
+MAX_SESSION_TTL = 365 * 86400
+
+
 class IdentityStore:
-    def __init__(self, path, *, clock=time.time):
-        self.path, self.clock = Path(path), clock
+    def __init__(self, path, *, clock=time.time, session_ttl=3600):
+        self.path, self.clock, self.session_ttl = Path(path), clock, session_ttl
+        self._resolve_ttl()
         parent = self.path.parent.lstat()
         if not stat.S_ISDIR(parent.st_mode) or stat.S_IMODE(parent.st_mode) != 0o700 or parent.st_uid != os.getuid():
             raise IdentityDenied()
@@ -207,13 +211,18 @@ class IdentityStore:
                 raise IdentityDenied()
             db.execute('UPDATE identities SET provisioned=1 WHERE owner_id=?', (owner_id,))
 
-    def admit(self, claims: VerifiedGoogleIdentity, *, ttl=3600):
+    def _resolve_ttl(self, ttl=None):
+        value = (self.session_ttl() if callable(self.session_ttl) else self.session_ttl) if ttl is None else ttl
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= MAX_SESSION_TTL:
+            raise IdentityDenied()
+        return value
+
+    def admit(self, claims: VerifiedGoogleIdentity, *, ttl=None):
         if not isinstance(claims, VerifiedGoogleIdentity) or claims.email_verified is not True:
             raise IdentityDenied()
         if not isinstance(claims.subject, str) or not 1 <= len(claims.subject) <= 255 or any(c.isspace() or ord(c) < 33 for c in claims.subject):
             raise IdentityDenied()
-        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or not 0 < ttl <= 3600:
-            raise IdentityDenied()
+        ttl = self._resolve_ttl(ttl)
         email = _email(claims.email)
         with self._transaction() as db:
             row = db.execute('SELECT * FROM identities WHERE email=?', (email,)).fetchone()
@@ -235,10 +244,17 @@ class IdentityStore:
         hashed = _token_hash(token)
         if hashed is None:
             return None
+        ttl = self._resolve_ttl()
         with self._transaction() as db:
-            row = db.execute('''SELECT i.* FROM identities i JOIN browser_sessions s ON s.owner_id=i.owner_id
-                WHERE s.token_hash=? AND s.generation=i.generation AND s.expires_at>?''', (hashed, self.clock())).fetchone()
-            return self._account(row) if self._ready(db, row) and row['google_subject'] else None
+            now = self.clock()
+            row = db.execute('''SELECT i.*, s.expires_at AS session_expires_at FROM identities i JOIN browser_sessions s ON s.owner_id=i.owner_id
+                WHERE s.token_hash=? AND s.generation=i.generation AND s.expires_at>?''', (hashed, now)).fetchone()
+            if not (self._ready(db, row) and row['google_subject']):
+                return None
+            new_expires = now + ttl
+            if new_expires > row['session_expires_at']:
+                db.execute('UPDATE browser_sessions SET expires_at=? WHERE token_hash=?', (new_expires, hashed))
+            return self._account(row)
 
     def revoke_session(self, token):
         with self._transaction() as db:

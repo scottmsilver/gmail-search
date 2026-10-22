@@ -11,16 +11,23 @@ export const revalidate = 0;
 
 async function handleGET(req: NextRequest) {
   const cookie = req.headers.get("cookie") ?? "";
-  const upstream = await fetch(`${pythonApiUrl()}/api/auth/me`, {
-    method: "GET",
-    cache: "no-store",
-    headers: cookie ? { cookie } : undefined,
-  });
-  const body = await upstream.text();
-  return new NextResponse(body, {
-    status: upstream.status,
-    headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
-  });
+  try {
+    const upstream = await fetch(`${pythonApiUrl()}/api/auth/me`, {
+      method: "GET",
+      cache: "no-store",
+      headers: cookie ? { cookie } : undefined,
+    });
+    const body = await upstream.text();
+    return new NextResponse(body, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+    });
+  } catch {
+    return NextResponse.json(
+      { detail: "Auth service temporarily unavailable" },
+      { status: 503 },
+    );
+  }
 }
 
 export const GET = publicRoute(handleGET);
