@@ -359,6 +359,7 @@ def render_instruction(
     workflow_profile: str = "baseline",
     current_date: str | None = None,
     jev_guidance: str | None = None,
+    prior_leads_guidance: str | None = None,
 ) -> str:
     """`PI_INSTRUCTION` with `{current_date}`/`{context_window}`/`{reading_budget}`
     filled in. Uses `str.replace` rather than `str.format` — the prompt has
@@ -375,6 +376,8 @@ def render_instruction(
     text = text.replace("{reading_budget}", f"{_reading_budget_for(model):,}")
     if jev_guidance:
         text = text.rstrip() + "\n\n" + jev_guidance.strip() + "\n"
+    if prior_leads_guidance:
+        text = text.rstrip() + "\n\n" + prior_leads_guidance.strip() + "\n"
     return text
 
 
@@ -748,6 +751,7 @@ def _build_argv(
     workflow_files: wf.WorkflowFiles | None = None,
     routed_thinking: str | None = None,
     jev_guidance: str | None = None,
+    prior_leads_guidance: str | None = None,
 ) -> list[str]:
     return pp.build_pi_argv(
         container=pi_container(),
@@ -761,6 +765,7 @@ def _build_argv(
             model,
             workflow_profile="workflow" if workflow_files else "baseline",
             jev_guidance=jev_guidance,
+            prior_leads_guidance=prior_leads_guidance,
         ),
         builtin_tools=pi_builtin_tools(),
         mcp_config_path=None if workflow_files else pi_mcp_config_path(),
@@ -846,6 +851,7 @@ async def _run_turn(
     workflow_files: wf.WorkflowFiles | None = None,
     routed_thinking: str | None = None,
     jev_guidance: str | None = None,
+    prior_leads_guidance: str | None = None,
 ) -> TurnOutcome:
     client = await _spawn_client(
         _build_argv(
@@ -856,6 +862,7 @@ async def _run_turn(
             workflow_files=workflow_files,
             routed_thinking=routed_thinking,
             jev_guidance=jev_guidance,
+            prior_leads_guidance=prior_leads_guidance,
         )
     )
     try:
@@ -888,7 +895,15 @@ async def _run_turn(
 
 
 def _finish_ok(
-    conn, *, session_id, workspace, conversation_id, turn_started_at, outcome: TurnOutcome, side_calls: list[dict]
+    conn,
+    *,
+    session_id,
+    workspace,
+    conversation_id,
+    turn_started_at,
+    outcome: TurnOutcome,
+    side_calls: list[dict],
+    question: str = "",
 ) -> None:
     all_calls = side_calls + outcome.local_tool_calls
     emit_retriever_events(conn, session_id, all_calls, skip_per_tool_emission=True)
@@ -902,8 +917,21 @@ def _finish_ok(
         base_text=outcome.final_text,
     )
     from gmail_search.agents.citations import normalize_citations
+    from gmail_search.agents.leads import record_session_leads
 
     final_text = normalize_citations(conn, session_id, final_text)
+    try:
+        record_session_leads(
+            conn,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            question=question,
+            final_answer=final_text,
+            side_calls=side_calls,
+            jev_config=_jev_config(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("record_session_leads failed for session %s (non-fatal)", session_id, exc_info=True)
     elapsed_ms = session_elapsed_ms(conn, session_id)
     emit_writer_and_final(conn, session_id, final_text, elapsed_ms=elapsed_ms)
     finalize_session(conn, session_id, status="done", final_answer=final_text)
@@ -974,6 +1002,20 @@ async def pi_run(
             _ensure_workspace_tmp_dir(workspace)
             if profile == "workflow":
                 workflow_files = wf.prepare_workflow(_workspaces_root(), workspace, session_id, timeout=hard_timeout_seconds())
+            prior_leads_guidance: str | None = None
+            try:
+                from gmail_search.agents.leads import find_prior_leads, format_prior_leads_guidance
+
+                prior_leads = find_prior_leads(
+                    conn,
+                    user_id=user_id,
+                    question=question,
+                    exclude_session_id=session_id,
+                    exclude_conversation_id=conversation_id,
+                )
+                prior_leads_guidance = format_prior_leads_guidance(prior_leads)
+            except Exception:  # noqa: BLE001
+                logger.warning("prior leads lookup failed for session %s (non-fatal)", session_id, exc_info=True)
             emit_plan_event(conn, session_id, agent_name=AGENT_NAME, approach=f"pi {profile} profile")
             outcome = await _run_turn(
                 conn,
@@ -985,6 +1027,7 @@ async def pi_run(
                 workflow_files=workflow_files,
                 routed_thinking=routed_thinking,
                 jev_guidance=jev_guidance,
+                prior_leads_guidance=prior_leads_guidance,
             )
             if not workflow_files:
                 _report_cost(cost_sink, resolved_model, outcome.usage)
@@ -997,6 +1040,7 @@ async def pi_run(
                 turn_started_at=turn_started_at,
                 outcome=outcome,
                 side_calls=side_calls,
+                question=question,
             )
         except Exception as exc:  # noqa: BLE001
             # A failed turn still costs money; PiTurnFailed carries the

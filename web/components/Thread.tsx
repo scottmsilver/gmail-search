@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   ComposerPrimitive,
   MessagePrimitive,
@@ -55,6 +56,8 @@ const UserMessage = () => (
 type DebugIdData = { id: string; log_path: string };
 type CitationWarningData = { broken: string[]; message: string };
 type TurnCostData = {
+  session_id?: string | null;
+  feedback?: "up" | "down" | null;
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -115,6 +118,9 @@ export const fmtElapsed = (ms: number): string => {
 };
 
 const TurnCostPart = ({ data }: { data: TurnCostData }) => {
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(data.feedback ?? null);
+  const [savingFeedback, setSavingFeedback] = useState(false);
+
   // Absent (older persisted turns) reads as "known" — see the field
   // comment on TurnCostData. Only an explicit `false` (the bounded
   // public runtime, which never tracks per-call spend) flips this.
@@ -124,17 +130,71 @@ const TurnCostPart = ({ data }: { data: TurnCostData }) => {
     ? `${fmtUsd(data.usd)} · ${compactNum(data.input_tokens)} in · ${compactNum(data.output_tokens)} out`
     : "cost unknown";
   const segments = [timeStr, costStr].filter(Boolean);
-  if (segments.length === 0) return null;
+  const sessionId = typeof data.session_id === "string" && data.session_id ? data.session_id : null;
+  if (segments.length === 0 && !sessionId) return null;
+
+  const toggleFeedback = async (target: "up" | "down") => {
+    if (!sessionId || savingFeedback) return;
+    const prev = feedback;
+    const next = prev === target ? null : target;
+    setFeedback(next);
+    setSavingFeedback(true);
+    try {
+      const res = await fetch(`/api/agent/sessions/${encodeURIComponent(sessionId)}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedback: next }),
+      });
+      if (!res.ok) setFeedback(prev);
+    } catch {
+      setFeedback(prev);
+    } finally {
+      setSavingFeedback(false);
+    }
+  };
+
   return (
     <div
-      className="mt-2 text-[11px] text-neutral-400 select-none"
+      className="mt-2 flex items-center gap-2 text-[11px] text-neutral-400 select-none"
       title={
         costKnown
           ? `${data.model ?? ""} · ${data.input_tokens.toLocaleString()} in / ${data.output_tokens.toLocaleString()} out`
           : "This runtime doesn't track per-call cost"
       }
     >
-      {segments.join(" · ")}
+      {segments.length > 0 && <span>{segments.join(" · ")}</span>}
+      {sessionId && (
+        <span className="inline-flex items-center gap-1 ml-1">
+          <button
+            type="button"
+            onClick={() => void toggleFeedback("up")}
+            disabled={savingFeedback}
+            aria-label="Helpful answer"
+            title="Helpful — reuse leads from this answer in future chats"
+            className={`px-1 py-0.5 rounded transition-colors ${
+              feedback === "up"
+                ? "text-emerald-600 bg-emerald-50"
+                : "text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100"
+            }`}
+          >
+            👍
+          </button>
+          <button
+            type="button"
+            onClick={() => void toggleFeedback("down")}
+            disabled={savingFeedback}
+            aria-label="Unhelpful or incorrect answer"
+            title="Incorrect — exclude this answer from future chat leads"
+            className={`px-1 py-0.5 rounded transition-colors ${
+              feedback === "down"
+                ? "text-red-600 bg-red-50"
+                : "text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100"
+            }`}
+          >
+            👎
+          </button>
+        </span>
+      )}
     </div>
   );
 };

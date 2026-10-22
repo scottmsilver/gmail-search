@@ -1665,6 +1665,36 @@ def register_agent_routes(app: FastAPI, db_path: Path) -> None:
 
         return StreamingResponse(replay(), media_type="text/event-stream")
 
+    @app.post("/api/agent/sessions/{session_id}/feedback")
+    async def session_feedback(
+        session_id: str,
+        request: Request,
+        user_id: str = Depends(require_user_id),
+    ) -> Response:
+        """Record passive thumbs-up / thumbs-down feedback on an owned
+        `agent_sessions` row (`plan.feedback = 'up' | 'down' | null`)."""
+        if not _CONVERSATION_ID_RE.match(session_id):
+            return JSONResponse({"error": "Invalid session_id"}, status_code=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "Body must be a JSON object"}, status_code=400)
+        feedback = body.get("feedback")
+        if feedback not in ("up", "down", None):
+            return JSONResponse({"error": "feedback must be 'up', 'down', or null"}, status_code=400)
+        from gmail_search.agents.leads import set_session_feedback
+
+        conn = get_connection(db_path)
+        try:
+            updated = set_session_feedback(conn, session_id=session_id, user_id=user_id, feedback=feedback)
+        finally:
+            conn.close()
+        if not updated:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        return JSONResponse({"ok": True, "session_id": session_id, "feedback": feedback})
+
     @app.get("/api/artifact/{artifact_id}")
     async def artifact(
         artifact_id: int,

@@ -1781,6 +1781,18 @@ def create_app(
         )
         row = cur.fetchone()
         conn.commit()
+        try:
+            from gmail_search.agents.leads import apply_battle_outcome_to_sessions
+
+            apply_battle_outcome_to_sessions(
+                conn,
+                user_id=uid,
+                winner=winner,
+                session_a=payload.get("request_id_a"),
+                session_b=payload.get("request_id_b"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_battle_outcome_to_sessions failed (non-fatal): %s", exc)
         if row is None:
             row_id = 0
         else:
@@ -1970,13 +1982,55 @@ def create_app(
                WHERE conversation_id = %s ORDER BY seq""",
             (conversation_id,),
         ).fetchall()
+        feedback_by_session: dict[str, str | None] = {}
+        try:
+            s_rows = conn.execute(
+                "SELECT id, plan FROM agent_sessions WHERE conversation_id = %s AND user_id = %s",
+                (conversation_id, user_id),
+            ).fetchall()
+            for sr in s_rows:
+                raw_plan = sr["plan"]
+                if isinstance(raw_plan, str) and raw_plan.strip():
+                    try:
+                        raw_plan = _json.loads(raw_plan)
+                    except Exception:
+                        raw_plan = {}
+                if isinstance(raw_plan, dict):
+                    fb = raw_plan.get("feedback")
+                    feedback_by_session[str(sr["id"])] = fb if fb in ("up", "down") else None
+                else:
+                    feedback_by_session[str(sr["id"])] = None
+        except Exception:  # noqa: BLE001
+            pass
         conn.close()
+        out_messages = []
+        for m in msg_rows:
+            parts = _json.loads(m["parts"])
+            if m["role"] == "assistant" and isinstance(parts, list):
+                inferred_sid: str | None = None
+                for p in parts:
+                    if isinstance(p, dict) and p.get("type") == "data-debug-id":
+                        pid = str(p.get("id") or "")
+                        if pid.startswith("dbg-agent-session-"):
+                            inferred_sid = pid[len("dbg-agent-session-") :]
+                            break
+                for p in parts:
+                    if isinstance(p, dict) and p.get("type") == "data-turn-cost" and isinstance(p.get("data"), dict):
+                        pid = str(p.get("id") or "")
+                        sid = p["data"].get("session_id") or (
+                            pid[3:] if pid.startswith("tc-") and not pid.startswith("tc-deep-") else inferred_sid
+                        )
+                        if isinstance(sid, str) and sid:
+                            p["data"]["session_id"] = sid
+                            if sid in feedback_by_session:
+                                p["data"]["feedback"] = feedback_by_session[sid]
+            out_messages.append({"seq": m["seq"], "role": m["role"], "parts": parts})
         return {
             "id": row["id"],
             "title": row["title"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-            "messages": [{"seq": m["seq"], "role": m["role"], "parts": _json.loads(m["parts"])} for m in msg_rows],
+            "messages": out_messages,
         }
 
     @app.put("/api/conversations/{conversation_id}")

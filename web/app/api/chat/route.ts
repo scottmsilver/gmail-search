@@ -191,6 +191,7 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       let buffer = "";
       let finalText = "";
       let workerRunId: string | null = null;
+      let deepSessionId: string | null = null;
       let finalStartedId: string | null = null;
       // Answer text streamed while the model writes it (`answer_delta`); the
       // `final` frame then only closes it, unless the texts differ.
@@ -244,11 +245,12 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
       };
 
       const emitTurnCost = () => {
-        if (!costKnown && elapsedMs === null) return;
+        if (!costKnown && elapsedMs === null && !deepSessionId) return;
         writer.write({
           type: "data-turn-cost",
           id: `tc-deep-${args.loggerId}`,
           data: {
+            session_id: deepSessionId,
             model: args.model,
             input_tokens: totalInputTokens,
             output_tokens: totalOutputTokens,
@@ -338,6 +340,9 @@ const createDeepModeStream = (args: DeepStreamArgs) =>
               writer.write({ type: "text-end", id: finalStartedId });
               persistedAssistantText = msg;
             } else if (kind === "session") {
+              if (typeof data.session_id === "string") {
+                deepSessionId = data.session_id;
+              }
               if (data.supports_cancel === true && typeof data.session_id === "string"
                   && typeof data.conversation_id === "string") {
                 serverOwnsTranscript = true;
