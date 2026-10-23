@@ -582,3 +582,26 @@ async def test_timing_log_names_phases_and_outcome_but_never_the_query(tmp_path,
     [line]=[record.getMessage() for record in caplog.records if record.name=='gmail_search.gateway.timing']
     assert line.startswith('search disabled ') and 'embed=' in line and 'rerank=' in line
     assert 'draw' not in line and 'request' not in line
+
+
+@pytest.mark.asyncio
+async def test_concurrent_searches_coalesce_owner_context_load(tmp_path):
+    service,_,token,reader,_,_=_service(tmp_path)
+    alias_loads=0
+    entered=asyncio.Event()
+    release=asyncio.Event()
+    async def slow_aliases(**kwargs):
+        nonlocal alias_loads
+        alias_loads+=1
+        entered.set()
+        await release.wait()
+        return Selection((AliasRow('ke','["kol emeth"]'),),True)
+    reader.queries.owner_aliases=slow_aliases
+    first=asyncio.create_task(service.search(token.secret,query='draw request'))
+    await asyncio.wait_for(entered.wait(),1)
+    second=asyncio.create_task(service.search(token.secret,query='draw request'))
+    await asyncio.sleep(.02)
+    release.set()
+    r1,r2=await asyncio.gather(first,second)
+    assert alias_loads==1
+    assert r1['results'][0]['thread_id']==r2['results'][0]['thread_id']=='t1'

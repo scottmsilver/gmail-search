@@ -1,6 +1,7 @@
 import heapq
 import json
 import logging
+import mmap
 from pathlib import Path
 
 import numpy as np
@@ -152,7 +153,13 @@ class ScannSearcher:
                     count = int(s["count"])
                     if not p.is_file() or p.stat().st_size != count * full_dim * 4:
                         raise FileNotFoundError(f"corpus shard file missing/mis-sized: {p}")
-                    files.append(np.memmap(p, dtype=np.float32, mode="r", shape=(count, full_dim)))
+                    mm = np.memmap(p, dtype=np.float32, mode="r", shape=(count, full_dim))
+                    if getattr(mm, "_mmap", None) is not None and hasattr(mmap, "MADV_WILLNEED"):
+                        try:
+                            mm._mmap.madvise(mmap.MADV_WILLNEED)
+                        except OSError:
+                            pass
+                    files.append(mm)
                     offsets.append(offsets[-1] + count)
                 if offsets[-1] != len(self.embedding_ids):
                     raise ValueError(f"corpus rows {offsets[-1]} != {len(self.embedding_ids)} indexed ids")
@@ -163,7 +170,13 @@ class ScannSearcher:
                 n_rows = len(self.embedding_ids)
                 if not full_path.is_file() or full_path.stat().st_size != n_rows * full_dim * 4:
                     raise FileNotFoundError(f"corpus_full missing/mis-sized: {full_path}")
-                self._corpus_full = np.memmap(full_path, dtype=np.float32, mode="r", shape=(n_rows, full_dim))
+                mm = np.memmap(full_path, dtype=np.float32, mode="r", shape=(n_rows, full_dim))
+                if getattr(mm, "_mmap", None) is not None and hasattr(mmap, "MADV_WILLNEED"):
+                    try:
+                        mm._mmap.madvise(mmap.MADV_WILLNEED)
+                    except OSError:
+                        pass
+                self._corpus_full = mm
             # Position-in-ids-list IS the global row index (the builder
             # writes shards — and their corpus files — in id-order).
             self._id_to_pos = {eid: i for i, eid in enumerate(self.embedding_ids)}
@@ -449,11 +462,10 @@ class ScannSearcher:
         kept_cand_ids = [c for c, _ in kept]
         positions = [p for _, p in kept]
         cand_vecs = self._gather_full(positions)  # (P, full_dim)
-        cand_norms = np.linalg.norm(cand_vecs, axis=1, keepdims=True)
-        cand_norms[cand_norms == 0] = 1.0
-        cand_vecs_n = cand_vecs / cand_norms
         q_full = self._l2_normalize(query_vector_full)
-        scores = cand_vecs_n @ q_full
+        raw_dots = cand_vecs @ q_full
+        cand_norms = np.sqrt(np.einsum("ij,ij->i", cand_vecs, cand_vecs))
+        scores = np.divide(raw_dots, cand_norms, out=np.zeros_like(raw_dots), where=cand_norms > 0)
         # Top-K by exact score.
         k = min(top_k, scores.shape[0])
         top_pos = np.argpartition(scores, -k)[-k:]

@@ -32,7 +32,7 @@ from .tool_deadline import tool_deadline
 BROAD_FILTER_ANN_POOL=3000
 # Owner aliases/contacts change only when the daemons reindex; re-reading
 # ~11k rows on every search cost 0.2-1 s.
-OWNER_CONTEXT_CACHE_SECONDS=60
+OWNER_CONTEXT_CACHE_SECONDS=1800
 # The Gemini rerank (0.8-1.1 s, synthetic candidates, 2026-09-24) is optional.
 # It must finish this long before the tool deadline: the guest's 5 s clock
 # started before ours, so answers published in the last second were still
@@ -149,6 +149,7 @@ class RunSearchService:
         self.owners=MappingProxyType(dict(owners))
         self.reranker=reranker
         self._context_cache={}
+        self._context_locks={}
 
     async def authorize(self,token):
         return await _thread(self.capabilities.authorize,token,audience='retrieval',operation='search')
@@ -198,10 +199,14 @@ class RunSearchService:
     async def _cached_context(self,owner,deadline,check,reasons):
         cached=self._context_cache.get(owner)
         if cached is None or cached[0]<=time.monotonic():
-            fresh=set()
-            aliases,contacts=await self._context(owner,deadline,check,fresh)
-            cached=(time.monotonic()+OWNER_CONTEXT_CACHE_SECONDS,aliases,contacts,frozenset(fresh))
-            self._context_cache[owner]=cached
+            lock=self._context_locks.setdefault(owner,asyncio.Lock())
+            async with lock:
+                cached=self._context_cache.get(owner)
+                if cached is None or cached[0]<=time.monotonic():
+                    fresh=set()
+                    aliases,contacts=await self._context(owner,deadline,check,fresh)
+                    cached=(time.monotonic()+OWNER_CONTEXT_CACHE_SECONDS,aliases,contacts,frozenset(fresh))
+                    self._context_cache[owner]=cached
         reasons.update(cached[3])
         return cached[1],cached[2]
 
@@ -320,17 +325,33 @@ class RunSearchService:
                     has_date=bool(filters.date_from or filters.date_to)
                     fetch_k=max(top_k*10,2000) if has_date else top_k*10
                     semantic='approximate'
+                    async def run_lexical():
+                        lex=await self._lexical(db,parsed.text or expanded,candidates,2000 if has_date else 200,reasons)
+                        if expanded.lower()!=query.lower():
+                            other=await self._lexical(db,original.text or query,candidates,2000 if has_date else 200,reasons)
+                            for mid,score in other.items():lex[mid]=max(lex.get(mid,0.),score)
+                        return lex
                     if candidates is not None and len(candidates)<=20_000:
                         exact=await exact_candidates(db,candidates,vector,dimensions=profile.dimensions,top_k=fetch_k,
                                                      deadline=deadline,check_active=check)
                         ids,scores=exact.ids,exact.scores
                         reasons.update(exact.reasons)
                         semantic='exact_restricted'
+                        clock.mark('vector')
+                        lexical=None
                     else:
-                        ids,scores=await index.search(vector,top_k=BROAD_FILTER_ANN_POOL if candidates is not None else fetch_k,
-                                                      absolute_deadline=deadline)
+                        vec_task=asyncio.create_task(index.search(
+                            vector,top_k=BROAD_FILTER_ANN_POOL if candidates is not None else fetch_k,
+                            absolute_deadline=deadline))
+                        lex_task=asyncio.create_task(run_lexical())
+                        try:
+                            (ids,scores),lexical=await asyncio.gather(vec_task,lex_task)
+                        finally:
+                            vec_task.cancel()
+                            lex_task.cancel()
+                            await _drain(asyncio.ensure_future(asyncio.gather(vec_task,lex_task,return_exceptions=True)))
                         reasons.add('approximate_vector_search')
-                    clock.mark('vector')
+                        clock.mark('vector')
                     hydrated=await db.hydrate_embeddings(tuple(ids))
                     _remember(reasons,hydrated,'embedding_hydration')
                     allowed=None if candidates is None else frozenset(candidates)
@@ -347,10 +368,8 @@ class RunSearchService:
                         vector_scores={identifier:vector_scores[identifier] for identifier in selected_ids}
                         rows=tuple(row for row in rows if row.id in vector_scores)
                     clock.mark('embedding_hydration')
-                    lexical=await self._lexical(db,parsed.text or expanded,candidates,2000 if has_date else 200,reasons)
-                    if expanded.lower()!=query.lower():
-                        other=await self._lexical(db,original.text or query,candidates,2000 if has_date else 200,reasons)
-                        for mid,score in other.items():lexical[mid]=max(lexical.get(mid,0.),score)
+                    if lexical is None:
+                        lexical=await run_lexical()
                     clock.mark('lexical')
                     messages=await self._hydrate(db.hydrate_messages,tuple(lexical),reasons,'message_hydration')
                     _remember(reasons,messages,'message_hydration')
