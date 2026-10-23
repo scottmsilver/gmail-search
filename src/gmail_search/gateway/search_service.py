@@ -30,6 +30,11 @@ from .tool_deadline import tool_deadline
 # 419 vs 710) at a third of the rescoring and hydration cost. Not a deadline
 # lever: hydrating 3000 costs ~95 ms, and ScaNN reorders its 4000 pool anyway (#22).
 BROAD_FILTER_ANN_POOL=3000
+# Exact vector scan streams hex-encoded float32 embeddings (~25 KB/row at
+# 3072d) through the 128 MB session budget. Above 250 messages (~1k chunks,
+# ~25 MB), exact scanning takes 1-3+ s and exhausts max_session_bytes before
+# lexical and hydration can run, so broader filters use BROAD_FILTER_ANN_POOL.
+EXACT_CANDIDATE_MAX_MESSAGES=250
 # Owner aliases/contacts change only when the daemons reindex; re-reading
 # ~11k rows on every search cost 0.2-1 s.
 OWNER_CONTEXT_CACHE_SECONDS=1800
@@ -331,7 +336,7 @@ class RunSearchService:
                             other=await self._lexical(db,original.text or query,candidates,2000 if has_date else 200,reasons)
                             for mid,score in other.items():lex[mid]=max(lex.get(mid,0.),score)
                         return lex
-                    if candidates is not None and len(candidates)<=20_000:
+                    if candidates is not None and len(candidates)<=EXACT_CANDIDATE_MAX_MESSAGES:
                         exact=await exact_candidates(db,candidates,vector,dimensions=profile.dimensions,top_k=fetch_k,
                                                      deadline=deadline,check_active=check)
                         ids,scores=exact.ids,exact.scores
@@ -352,8 +357,7 @@ class RunSearchService:
                             await _drain(asyncio.ensure_future(asyncio.gather(vec_task,lex_task,return_exceptions=True)))
                         reasons.add('approximate_vector_search')
                         clock.mark('vector')
-                    hydrated=await db.hydrate_embeddings(tuple(ids))
-                    _remember(reasons,hydrated,'embedding_hydration')
+                    hydrated=await self._hydrate(db.hydrate_embeddings,tuple(ids),reasons,'embedding_hydration')
                     allowed=None if candidates is None else frozenset(candidates)
                     rows=tuple(row for row in hydrated.rows if allowed is None or row.message_id in allowed)
                     vector_scores=dict(zip(ids,scores,strict=True))
