@@ -37,9 +37,33 @@ _EXT_TO_MIME = {
 }
 
 
+def _sniff_mime_from_magic(file_path: Path) -> str | None:
+    try:
+        with file_path.open("rb") as f:
+            header = f.read(12)
+    except OSError:
+        return None
+    if header.startswith(b"%PDF-"):
+        return "application/pdf"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "image/webp"
+    if header.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    return None
+
+
 def _sniff_mime_from_filename(file_path: Path) -> str | None:
     ext = file_path.suffix.lstrip(".").lower()
-    return _EXT_TO_MIME.get(ext)
+    sniffed = _EXT_TO_MIME.get(ext)
+    if sniffed is not None:
+        return sniffed
+    return _sniff_mime_from_magic(file_path)
 
 
 def dispatch(mime_type: str, file_path: Path, config: dict[str, Any]) -> ExtractResult | None:

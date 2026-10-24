@@ -80,6 +80,7 @@ class OpenRouterBackend:
         ]
         body: dict = {
             "model": self.model_id,
+            "provider": {"zdr": True, "data_collection": "deny"},
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,

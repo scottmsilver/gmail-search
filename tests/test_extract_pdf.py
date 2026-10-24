@@ -74,3 +74,55 @@ def test_render_keeps_150_dpi_for_normal_pages(tmp_path):
     result = extract_pdf(pdf_path, {"max_pdf_pages": 20})
     w, h = Image.open(result.images[0]).size
     assert (w, h) == (1275, 1650)
+
+
+def test_octet_stream_truncated_filename_sniffs_pdf_magic(tmp_path):
+    from gmail_search.extract import dispatch
+
+    # Simulates a scanner filename truncated at 80 chars with a dot mid-name and no .pdf suffix.
+    pdf_path = tmp_path / "10152026_OWNER NAME(S) .Oa- Sc r-'l PROJECT ADDRESS 24299 Summerhill Ave, Los Al"
+    _create_test_pdf(pdf_path, pages=1)
+    result = dispatch("application/octet-stream", pdf_path, {"max_pdf_pages": 20, "ocr": False})
+    assert result is not None
+    assert result.text is not None
+    assert "Page 1 content here" in result.text
+
+
+def test_extract_pdf_ocr_fallback_enforces_zdr(tmp_path, monkeypatch):
+    # Create an image-only PDF (no embedded text layer).
+    img_pdf = tmp_path / "scan.pdf"
+    src = fitz.open()
+    p = src.new_page(width=400, height=200)
+    p.insert_text((36, 72), "Scanned Estimate $51,500")
+    pix = p.get_pixmap(dpi=100)
+    png_bytes = pix.tobytes("png")
+    src.close()
+
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=200)
+    page.insert_image(page.rect, stream=png_bytes)
+    doc.save(str(img_pdf))
+    doc.close()
+
+    captured_bodies = []
+
+    class _FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Scanned Estimate $51,500"}}]}
+
+    def _fake_post(self, url, *, json=None, headers=None, timeout=None):
+        captured_bodies.append(json)
+        return _FakeResp()
+
+    monkeypatch.setattr("httpx.Client.post", _fake_post)
+    result = extract_pdf(img_pdf, {"max_pdf_pages": 20, "openrouter_key": "test-or-key"})
+    assert result is not None
+    assert result.text == "Scanned Estimate $51,500"
+    assert len(captured_bodies) == 1
+    assert captured_bodies[0]["model"] == "google/gemini-3-flash-preview"
+    assert captured_bodies[0]["provider"] == {"zdr": True, "data_collection": "deny"}
