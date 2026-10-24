@@ -605,3 +605,9 @@ async def test_concurrent_searches_coalesce_owner_context_load(tmp_path):
     r1,r2=await asyncio.gather(first,second)
     assert alias_loads==1
     assert r1['results'][0]['thread_id']==r2['results'][0]['thread_id']=='t1'
+
+
+def test_lexical_tokens_strip_common_stopwords_with_fallback():
+    from gmail_search.gateway.search_service import _tokens
+    assert _tokens('Nubank investment memo Seed Series A')==('Nubank','investment','memo','Seed','Series')
+    assert _tokens('a in the')==('a','in','the')

@@ -293,14 +293,14 @@ class BoundSearchQueries:
             date_first,date_last,message_count FROM public.thread_summary
             WHERE user_id=%s AND thread_id=ANY(%s::text[]) ORDER BY thread_id''',[self._session.owner_id,list(ids)],ThreadRow,max(1,len(ids)))
 
-    async def owner_aliases(self,*,after=None,limit=1000):
+    async def owner_aliases(self,*,after=None,limit=5000):
         return await self._named_page('term_aliases','term','term,expansions',AliasRow,after,limit)
 
-    async def owner_contacts(self,*,after=None,limit=1000):
+    async def owner_contacts(self,*,after=None,limit=5000):
         return await self._named_page('contact_frequency','email','email,score',ContactRow,after,limit)
 
     async def _named_page(self,table,key,columns,row_type,after,limit):
-        _limit(limit,1000)
+        _limit(limit,5000)
         if after is not None:_text(after)
         statement=f'SELECT user_id AS owner_id,{columns} FROM public.{table} WHERE user_id=%s'
         params=[self._session.owner_id]
