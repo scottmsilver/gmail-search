@@ -93,11 +93,11 @@ export const CitableMarkdown = ({ text, hints, attHints, variant = "prose" }: Pr
 
   const wrapperClass =
     variant === "prose"
-      ? "prose prose-sm max-w-4xl prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0 prose-headings:my-2 prose-pre:my-2 prose-code:before:content-none prose-code:after:content-none"
+      ? "prose prose-sm max-w-full sm:max-w-4xl break-words prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0 prose-headings:my-2 prose-pre:my-2 prose-pre:overflow-x-auto prose-code:before:content-none prose-code:after:content-none"
       // inline: no prose, no max-width — parent row controls layout.
       // "[&_p]:m-0" so ReactMarkdown's default <p> wrapper doesn't
       // inject vertical margin into a single-line summary.
-      : "[&_p]:m-0 [&_p]:inline";
+      : "break-words [&_p]:m-0 [&_p]:inline";
   return (
     <div className={wrapperClass}>
       <PassiveMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={safeUrl}>

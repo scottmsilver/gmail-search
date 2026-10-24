@@ -204,7 +204,7 @@ const TurnCostPart = ({ data }: { data: TurnCostData }) => {
 const HiddenPart = () => null;
 
 const AssistantMessage = () => (
-  <MessagePrimitive.Root className="my-4 px-4 sm:px-6 md:px-8">
+  <MessagePrimitive.Root className="my-4 min-w-0 px-4 sm:px-6 md:px-8">
     <AssistantWork />
     <MessagePrimitive.Parts
       components={{
@@ -251,7 +251,7 @@ const Composer = ({onStop, stopping, stopError}: StopControls) => (
       </div>
       <ComposerPrimitive.Input
         placeholder="Ask about your email…"
-        className="order-first min-w-0 flex-1 bg-transparent focus:outline-none resize-none placeholder:text-neutral-400 text-sm leading-6 sm:order-none"
+        className="order-first min-w-0 flex-1 bg-transparent focus:outline-none resize-none placeholder:text-neutral-400 text-base sm:text-sm leading-6 sm:order-none"
         rows={1}
         autoFocus
       />
@@ -286,8 +286,8 @@ const Composer = ({onStop, stopping, stopError}: StopControls) => (
 );
 
 export const Thread = (controls: StopControls = {}) => (
-  <ThreadPrimitive.Root className="flex flex-col h-full w-full max-w-5xl mx-auto bg-white">
-    <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
+  <ThreadPrimitive.Root className="flex flex-col h-full w-full min-w-0 max-w-5xl mx-auto bg-white">
+    <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto overflow-x-hidden">
       <ThreadPrimitive.Empty>
         <div className="text-sm text-neutral-400 mt-32 text-center px-4">
           Ask anything about your email.

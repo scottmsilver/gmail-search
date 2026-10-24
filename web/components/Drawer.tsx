@@ -41,7 +41,7 @@ export const Drawer = ({
       />
       <aside
         className={`fixed top-0 right-0 h-full ${widthClass} bg-white shadow-2xl z-50 transition-transform duration-200 flex flex-col ${
-          open ? "translate-x-0" : "translate-x-full"
+          open ? "translate-x-0" : "translate-x-full pointer-events-none invisible"
         }`}
         aria-hidden={!open}
       >

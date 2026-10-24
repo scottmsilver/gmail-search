@@ -37,11 +37,11 @@ export default function RootLayout({
           largest possible viewport on mobile Chrome and ignores the
           collapsing URL bar and the keyboard, which is how the composer
           at the bottom of this column ends up rendered below the fold. */}
-      <body className="flex h-dvh flex-col bg-background text-foreground antialiased">
+      <body className="flex h-dvh w-full max-w-full overflow-x-hidden flex-col bg-background text-foreground antialiased">
         <AuthGate publicMode={process.env.GMS_PUBLIC_ORIGIN !== undefined} fullWorkerMode={process.env.GMS_FULL_WORKER_ROUTES === "1"}>
           <PreviewProvider>
             <TopNav />
-            <main className="flex-1 min-h-0">{children}</main>
+            <main className="flex-1 min-h-0 min-w-0">{children}</main>
             <PreviewDrawer />
           </PreviewProvider>
         </AuthGate>

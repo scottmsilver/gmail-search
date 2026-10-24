@@ -80,8 +80,23 @@
 html,
 body {
   height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
   background: var(--bg-page);
   color: var(--fg-primary);
+}
+
+/* Keep wide markdown tables and unbroken words/URLs inside the mobile
+   viewport so individual chat turns scroll horizontally within their
+   table/pre block rather than widening the entire page on iOS Safari. */
+.prose {
+  overflow-wrap: anywhere;
+}
+
+.prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* Reusable theme-aware hover for icon buttons: raised bg on hover,

@@ -245,7 +245,7 @@ const SearchInner = () => {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search your archive…"
             autoFocus
-            className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent text-base sm:text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
           <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
             <div className="flex items-center gap-0.5 rounded-full bg-muted p-0.5 text-[11px]">

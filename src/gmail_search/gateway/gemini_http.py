@@ -5,8 +5,10 @@ Candidate tokens plus thought tokens form billable output. Unsupported cache/too
 usage, fallback models, missing terminal usage and malformed streams fail closed.
 No automatic retries, redirects, credentials in URLs or environment proxies.
 """
+import asyncio
 from contextlib import asynccontextmanager
 import json
+import logging
 
 import httpx
 
@@ -14,6 +16,10 @@ from .gemini import endpoint, _part
 from .inference import MAX_REQUEST_BYTES, _plain_json
 from .provider_http import (AnthropicHTTPTransport, ProviderProtocolError, _SSE,
                             _object, _integer, _text, _unique_object)
+
+logger = logging.getLogger(__name__)
+_TRANSIENT_STATUSES = frozenset((429, 500, 502, 503, 504))
+_RETRY_BACKOFF_SECONDS = (0.5, 1.5)
 
 
 class _GeminiEvents:
@@ -131,19 +137,41 @@ class GeminiHTTPTransport(AnthropicHTTPTransport):
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()
         if len(encoded) > MAX_REQUEST_BYTES:
             raise ValueError('Provider request exceeds configured limits.')
-        request = httpx.Request('POST', self._endpoint, content=encoded, headers={
-            'x-goog-api-key': self._key, 'content-type': 'application/json',
-            'accept': 'text/event-stream', 'accept-encoding': 'identity',
-        }, extensions={'timeout': httpx.Timeout(connect=5, read=30, write=10, pool=5).as_dict()})
+        delays = _RETRY_BACKOFF_SECONDS if self._owned else ()
         response = None
         try:
-            response = await self._client.send(request, stream=True, follow_redirects=False, auth=None)
+            for attempt in range(len(delays) + 1):
+                request = httpx.Request('POST', self._endpoint, content=encoded, headers={
+                    'x-goog-api-key': self._key, 'content-type': 'application/json',
+                    'accept': 'text/event-stream', 'accept-encoding': 'identity',
+                }, extensions={'timeout': httpx.Timeout(connect=10, read=30, write=10, pool=5).as_dict()})
+                try:
+                    response = await self._client.send(request, stream=True, follow_redirects=False, auth=None)
+                except httpx.HTTPError as exc:
+                    logger.warning('gemini upstream %s transport error (%s) attempt %d/%d',
+                                   self._model, type(exc).__name__, attempt + 1, len(delays) + 1)
+                    if attempt < len(delays):
+                        await asyncio.sleep(delays[attempt])
+                        continue
+                    raise ProviderProtocolError() from None
+                if response.status_code in _TRANSIENT_STATUSES and attempt < len(delays):
+                    logger.warning('gemini upstream %s returned HTTP %d attempt %d/%d; retrying',
+                                   self._model, response.status_code, attempt + 1, len(delays) + 1)
+                    await response.aclose()
+                    response = None
+                    await asyncio.sleep(delays[attempt])
+                    continue
+                break
             if (response.status_code != 200
                     or response.headers.get('content-type', '').split(';')[0].strip().lower() != 'text/event-stream'
                     or response.headers.get('content-encoding', 'identity').lower() != 'identity'):
+                logger.warning('gemini upstream %s rejected response status=%d content_type=%r',
+                               self._model, response.status_code,
+                               response.headers.get('content-type', '').split(';')[0].strip().lower())
                 raise ProviderProtocolError()
             yield _GeminiSSE(response, body, self._model, self._max_frame, self._max_body)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning('gemini upstream %s stream error (%s)', self._model, type(exc).__name__)
             raise ProviderProtocolError() from None
         finally:
             if response is not None:
