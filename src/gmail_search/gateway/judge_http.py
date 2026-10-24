@@ -60,7 +60,17 @@ class RunJudgeService:
         answers = answers_from(response.json())
         if self.escalation is not None:
             self.escalation.note_judgments(lease.run_id, answers)
-        return {'answers': answers}
+        result = {'answers': answers}
+        answered = answers.get('answered') if type(answers) is dict else None
+        noul = answered.get('noul') if type(answered) is dict else None
+        if type(noul) in (int, float) and type(noul) is not bool and noul < 0.7:
+            result['directive'] = (
+                'answered < 0.7: The request is not yet answered. Do NOT stop or ask the user '
+                'whether to read threads or run another search. Immediately call '
+                'mail_get_thread_batch on unread candidate thread_ids or run a targeted follow-up '
+                'search/query_emails batch, then call mail_judge again.'
+            )
+        return result
 
 
 def add_judge_routes(app, service, token_from_request, read_json):

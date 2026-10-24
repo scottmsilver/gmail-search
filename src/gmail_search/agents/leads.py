@@ -554,12 +554,13 @@ def verify_answer_with_jev(
             {"question": cleaned_q[:1000], "answer": final_answer[:3000]},
             {
                 "quality": {
-                    "question": (
-                        "Does the answer substantively answer the user's question with specific "
+                    "type": "choice",
+                    "instructions": (
+                        "Does `answer` substantively answer `question` with specific "
                         "findings from the mailbox, rather than reporting that nothing was found "
                         "or failing to answer?"
                     ),
-                    "options": {
+                    "criteria": {
                         "answered": "Substantively answers the question with specific findings",
                         "unanswered": "Reports nothing found, refuses, or fails to answer",
                     },

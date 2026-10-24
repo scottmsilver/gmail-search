@@ -25,3 +25,25 @@ def test_prompt_keeps_latest_context_with_exact_utf8_budget():
 def test_first_question_is_unchanged():
     assert browser_prompt.build_prompt([], 'hello')=='hello'
     assert browser_prompt.build_prompt([{'role':'user','parts':[{'type':'text','text':'hello'}]}], 'hello')=='hello'
+
+
+def test_followup_includes_compact_tool_outcomes_without_leaking_mail_content():
+    search_result={'content':[{'type':'text','text':
+        '{"results":[{"input":{"query":"secret body"},"result":{"results":[{"thread_id":"t1"}]}},'
+        '{"input":{"query":"slow"},"result":{"error":"Guest tool deadline exceeded; interrupted operations may have completed."}}]}'}]}
+    judge_result={'content':[{'type':'text','text':'{"answers":{"answered":{"type":"noul","noul":0.06}}}'}]}
+    rows=[
+        {'role':'user','parts':[{'type':'text','text':'Check Nubank'}]},
+        {'role':'assistant','parts':[
+            {'type':'data-deep-stage','data':{'kind':'tool_result','payload':{
+                'type':'tool_result','name':'mail_search_emails_batch','result':search_result,'elapsed_ms':1240}}},
+            {'type':'data-deep-stage','data':{'kind':'tool_result','payload':{
+                'type':'tool_result','name':'mail_judge','result':judge_result,'elapsed_ms':210}}},
+            {'type':'text','text':'Initial summary'},
+        ]},
+    ]
+    prompt=browser_prompt.build_prompt(rows,'Any timeouts?')
+    assert 'mail_search_emails_batch(1 ok, 1 timeout, 1240ms)' in prompt
+    assert 'mail_judge(answered=0.06, 210ms)' in prompt
+    assert 'secret body' not in prompt
+

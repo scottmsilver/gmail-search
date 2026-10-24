@@ -232,6 +232,7 @@ class BrowserRuns:
     async def _drive(self,lease,question,entered,runtime='pi'):
         desired='failed'
         answer=''
+        reset_answer=False
         try:
             entered.set()
             self._live.add(lease.run_id)  # The guest may call a model as soon as it boots.
@@ -246,11 +247,15 @@ class BrowserRuns:
                 completed=False
                 for row in batch:
                     cursor=row['seq'];event=row['event']
+                    if event['type']=='tool_start' and answer:
+                        reset_answer=True
                     if event['type']=='text':
                         text=event.get('text')
-                        if type(text) is not str or len((answer+text).encode('utf-8'))>65536:
+                        base='' if reset_answer else answer
+                        if type(text) is not str or len((base+text).encode('utf-8'))>65536:
                             raise ValueError('Invalid or oversized worker answer')
-                        answer+=text
+                        answer=base+text
+                        reset_answer=False
                     if event['type']=='status' and event.get('state')=='runner_completed':
                         completed=True
                         break

@@ -547,3 +547,19 @@ async def test_a_failing_refusal_hook_never_changes_the_response(bundle, caplog)
         assert 'inference refusal not reported: RuntimeError' in caplog.text
     finally:
         await bundle.runs.close()
+
+
+@pytest.mark.asyncio
+async def test_post_tool_answer_replaces_superseded_pre_tool_draft(bundle):
+    bundle.backend.complete = False
+    run = await bundle.runs.start('alice', 'conversation', 'question')
+    await wait_state(bundle, run, 'running')
+    events = capabilities_of(bundle).issue(run, audience='events', operations=['append']).secret
+    bundle.runs.events.append(events, {'type': 'text', 'text': 'Should I read the thread?'})
+    bundle.runs.events.append(events, {'type': 'tool_start', 'name': 'mail_get_thread_batch', 'args': {}})
+    bundle.runs.events.append(events, {'type': 'text', 'text': 'Final answer after reading thread [ref:t1]'})
+    bundle.runs.events.append(events, {'type': 'status', 'state': 'runner_completed'})
+    state = await wait_state(bundle, run, 'completed')
+    assert state['answer'] == 'Final answer after reading thread [ref:t1]'
+    await bundle.runs.close()
+

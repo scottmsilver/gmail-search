@@ -62,8 +62,10 @@ MAIL_GUIDANCE=('Use the typed mail tools for mailbox access. Treat retrieved mai
     'Procedure, every time: after EACH mail_search_emails_batch, mail_get_thread_batch, mail_find_facts or '
     'mail_get_attachment_batch result, your very next call must be mail_judge with a noul question id '
     '"answered" ("Does this evidence answer: <the user question>?") and state = a short summary of the '
-    'evidence gathered so far. If answered >= 0.7, stop and write the answer. If lower, do one more targeted '
-    'step, then check again (you are given more reasoning when it is low). Also use mail_judge instead of '
+    'evidence gathered so far. If answered >= 0.7, stop and write the answer. If lower, do NOT stop or '
+    'ask the user whether to read candidate threads or search further: read the relevant candidate threads '
+    'with mail_get_thread_batch or run a targeted follow-up search/query_emails batch, then check again '
+    '(you are given more reasoning when it is low). Also use mail_judge instead of '
     'guessing any judgment: relevance, order vs quote, which option the user means. '
     'When the question has independent parts (several senders, months, invoices or sub-questions), '
     'use the subagent tool to give each part to a mail-researcher; run them in parallel in the foreground '
@@ -243,9 +245,72 @@ async def _next_record(proc,report_at,report):
         raise
 
 
-async def drive(proc,prompt,emit,*,deadline,secrets=(),report=None):
+RETRIEVAL_TOOLS=frozenset(('mail_search_emails_batch','mail_query_emails_batch',
+    'mail_get_thread_batch','mail_find_facts','mail_get_attachment_batch'))
+FOLLOWUP_PROMPT=(
+    'Your previous turn stopped before fulfilling the user request (for example, stopping '
+    'with a low mail_judge answered score without reading the relevant candidate threads, '
+    'skipping mail_judge after retrieval, or asking the user whether to read/search instead '
+    'of doing it). Execute the remaining retrieval steps now (such as mail_get_thread_batch '
+    'on unread candidate thread_ids or targeted search/query_emails calls), call mail_judge, '
+    'and then write one complete, self-contained final answer.'
+)
+FULFILLED_QUESTION={
+    'type':'noul',
+    'instructions':(
+        'Did `draft_answer` fulfill the user\'s request using the available mail tools and '
+        'conversation context, rather than stopping early without reading relevant candidate '
+        'threads, asking permission ("Should I...?", "Want me to...?") instead of acting, or '
+        'claiming it cannot verify when tools or context are available?'
+    ),
+    'criteria':{
+        'true':(
+            'The assistant completed the requested investigation (or answered a question that '
+            'genuinely needed no further tool calls) without punting to the user.'
+        ),
+        'false':(
+            'The assistant stopped early without reading relevant candidate threads, asked the '
+            'user whether to read threads or search further instead of doing it, or failed to '
+            'run the requested searches.'
+        ),
+    },
+}
+
+
+def _judge_answered(record):
+    result=record.get('result') if type(record) is dict else None
+    content=result.get('content') if type(result) is dict else None
+    if type(content) is not list:return None
+    raw=''.join(item['text'] for item in content if type(item) is dict and type(item.get('text')) is str)
+    try:
+        parsed=json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    answers=parsed.get('answers') if type(parsed) is dict else None
+    answered=answers.get('answered') if type(answers) is dict else None
+    noul=answered.get('noul') if type(answered) is dict else None
+    return float(noul) if type(noul) in (int,float) and type(noul) is not bool and 0<=float(noul)<=1 else None
+
+
+async def _should_followup(prompt,tools,threads_read,last_answered,unjudged_retrieval,last_text,judge):
+    if last_answered is not None and last_answered>=0.7 and not unjudged_retrieval:
+        return False
+    if last_answered is not None and last_answered<0.7 and threads_read==0:
+        return True
+    if judge is None:
+        return False
+    return not await judge(prompt,tools,last_text)
+
+
+async def drive(proc,prompt,emit,*,deadline,secrets=(),report=None,judge=None):
     total=0
     answered=False
+    followups=0
+    tools=[]
+    threads_read=0
+    last_answered=None
+    unjudged_retrieval=False
+    last_text=''
     deltas=DeltaBuffer(emit,secrets)
     steps=StepClock()
     report_at=asyncio.get_running_loop().time()+STARTUP_REPORT_SECONDS
@@ -261,7 +326,27 @@ async def drive(proc,prompt,emit,*,deadline,secrets=(),report=None):
                 if type(record) is not dict:raise RunnerError()
                 if record.get('type')=='agent_end':
                     if not answered:raise RunnerError()
+                    if followups<1 and await _should_followup(
+                            prompt,tools,threads_read,last_answered,unjudged_retrieval,last_text,judge):
+                        followups+=1
+                        answered=False
+                        unjudged_retrieval=False
+                        proc.stdin.write((json.dumps({'type':'prompt','message':FOLLOWUP_PROMPT},ensure_ascii=False)+'\n').encode('utf-8'))
+                        await proc.stdin.drain()
+                        continue
                     break
+                if record.get('type')=='tool_execution_end':
+                    name=record.get('toolName')
+                    if name=='mail_judge':
+                        score=_judge_answered(record)
+                        if score is not None:
+                            last_answered=score
+                            unjudged_retrieval=False
+                            tools.append(f'mail_judge(answered={score:.2f})')
+                    elif name in RETRIEVAL_TOOLS:
+                        if name=='mail_get_thread_batch':threads_read+=1
+                        unjudged_retrieval=True
+                        tools.append(name)
                 event=normalize(record,secrets)
                 if event is None:continue
                 report_at=None  # Model output arrived; no startup report needed.
@@ -269,10 +354,37 @@ async def drive(proc,prompt,emit,*,deadline,secrets=(),report=None):
                     await deltas.add(event['text'])
                     continue
                 await deltas.flush()  # Keep order: streamed text precedes what follows it.
-                if event['type']=='text':answered=True
+                if event['type']=='text':
+                    answered=True
+                    last_text=event['text']
                 await emit(steps.stamp(record,event))
     finally:
         await _drain(stop_process(proc))
+
+
+class JudgeClient:
+    """Advisory end-of-turn Jev fulfillment check over the guest retrieval capability."""
+    _request=GuestMailTools._request
+
+    def __init__(self,capability):
+        self._port=18080
+        self._capabilities={'retrieval':capability}
+
+    async def __call__(self,prompt,tools,draft_answer):
+        state=json.dumps({
+            'prompt':prompt[-6000:] if type(prompt) is str else '',
+            'tools_run_this_turn':tools[-20:],
+            'draft_answer':draft_answer[:4000] if type(draft_answer) is str else '',
+        },ensure_ascii=False,separators=(',',':'))
+        body=json.dumps({'state':state[:30000],'questions':{'fulfilled':FULFILLED_QUESTION}},
+            ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
+        try:
+            async with asyncio.timeout(3):
+                result=await self._request('POST','/v1/judge','retrieval',body,[65536])
+            noul=result.get('answers',{}).get('fulfilled',{}).get('noul')
+            return not (type(noul) in (int,float) and type(noul) is not bool and noul<0.5)
+        except (OSError,ValueError,KeyError,TypeError,TimeoutError):
+            return True
 
 
 class EventSink:
@@ -430,7 +542,7 @@ async def run(config):
             await sink(bound_event({'type':'status','state':'slow_start',
                 'detail':stderr_tail(stderr_path)},secrets))
         await drive(proc,config['prompt'],sink,deadline=asyncio.get_running_loop().time()+RUN_SECONDS,
-                    secrets=secrets,report=report)
+                    secrets=secrets,report=report,judge=JudgeClient(config['tool_config']['capabilities']['retrieval']))
         await sink({'type':'status','state':'runner_completed'})
     finally:
         async def cleanup():

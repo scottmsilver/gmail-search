@@ -57,7 +57,7 @@ def test_profile_keeps_full_image_and_qualified_isolation():
     import firecracker_backend as backend
     assert p.ProductionFullAgentBackend.profile == 'agent_full'
     assert p.ProductionFullAgentBackend.supervisor_module == Path('/opt/gmail-worker/production_worker_profile.py')
-    assert backend.AGENT_FULL_PIN == 'b71e81e8e481113280a48661bc157741aa3961bf9d708179ca68fc5a65dd9d39'
+    assert backend.AGENT_FULL_PIN == '9d0d9a5f826bd8964ae16aba4804efffb3b5cfdeedaaa8e1087b462805f8653c'
     config = backend.fixed_config(dict(memory_mib=1024,vcpus=1),profile='agent_full')
     assert 'network-interfaces' not in config
     assert all(d['is_read_only'] for d in config['drives'])

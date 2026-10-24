@@ -410,3 +410,54 @@ async def test_startup_report_fires_once_when_pi_is_silent_and_the_run_continues
     asyncio.ensure_future(feed())
     raw,report_at=await runner._next_record(proc,loop.time()+0.01,report)
     assert raw==b'line\n' and reports==[1] and report_at is None
+
+
+@pytest.mark.asyncio
+async def test_low_mail_judge_without_thread_read_triggers_one_followup_turn():
+    runner=module('guest_agent_pi')
+    code='''import sys,json
+first=json.loads(sys.stdin.readline())
+print(json.dumps({'type':'tool_execution_end','toolName':'mail_search_emails_batch','result':{'content':[{'type':'text','text':'{}'}]}}),flush=True)
+print(json.dumps({'type':'tool_execution_end','toolName':'mail_judge','result':{'content':[{'type':'text','text':'{"answers":{"answered":{"type":"noul","noul":0.06}}}'}]}}),flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'Should I read the thread?'}]}}),flush=True)
+print(json.dumps({'type':'agent_end'}),flush=True)
+second=json.loads(sys.stdin.readline())
+assert 'stopped before fulfilling' in second['message']
+print(json.dumps({'type':'tool_execution_end','toolName':'mail_get_thread_batch','result':{'content':[{'type':'text','text':'{}'}]}}),flush=True)
+print(json.dumps({'type':'tool_execution_end','toolName':'mail_judge','result':{'content':[{'type':'text','text':'{"answers":{"answered":{"type":"noul","noul":0.85}}}'}]}}),flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'Read the thread: final answer [ref:t1]'}]}}),flush=True)
+print(json.dumps({'type':'agent_end'}),flush=True)
+'''
+    proc=await asyncio.create_subprocess_exec(sys.executable,'-u','-c',code,
+        stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,start_new_session=True,limit=65536)
+    events=[]
+    async def emit(event):events.append(event)
+    await runner.drive(proc,'Summarize Nubank',emit,deadline=asyncio.get_running_loop().time()+5)
+    texts=[e['text'] for e in events if e['type']=='text']
+    assert texts==['Should I read the thread?','Read the thread: final answer [ref:t1]']
+
+
+@pytest.mark.asyncio
+async def test_end_of_turn_judge_rejection_triggers_at_most_one_followup():
+    runner=module('guest_agent_pi')
+    code='''import sys,json
+sys.stdin.readline()
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'Want me to search?'}]}}),flush=True)
+print(json.dumps({'type':'agent_end'}),flush=True)
+second=json.loads(sys.stdin.readline())
+assert second['type']=='prompt'
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'Completed after nudge'}]}}),flush=True)
+print(json.dumps({'type':'agent_end'}),flush=True)
+'''
+    proc=await asyncio.create_subprocess_exec(sys.executable,'-u','-c',code,
+        stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,start_new_session=True,limit=65536)
+    calls=[]
+    async def judge(prompt,tools,draft):
+        calls.append((tools,draft))
+        return False
+    events=[]
+    async def emit(event):events.append(event)
+    await runner.drive(proc,'Run a few searches',emit,deadline=asyncio.get_running_loop().time()+5,judge=judge)
+    assert len(calls)==1
+    assert [e['text'] for e in events if e['type']=='text']==['Want me to search?','Completed after nudge']
+
